@@ -4,6 +4,7 @@ import {
   ChevronRight, ArrowRight, ShieldCheck, CheckCircle2, Sparkles,
   X, Filter, Building2, BookOpen
 } from 'lucide-react';
+import { getCurrencySymbol, formatSalaryRange } from '../../utils/currency';
 
 export default function CandidateJobListing({ onSelectJobForApplication }) {
   const [jobs, setJobs] = useState([]);
@@ -40,18 +41,7 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
   }, []);
 
   const formatSalary = (min, max, currency = 'USD') => {
-    if (!min && !max) return 'Competitive compensation';
-    const currSymbol = currency === 'USD' || currency === 'CAD' || currency === 'AUD' || currency === 'SGD' ? '$'
-      : currency === 'EUR' ? '€'
-      : currency === 'GBP' ? '£'
-      : currency === 'INR' ? '₹'
-      : `${currency} `;
-
-    if (min && max) {
-      return `${currSymbol}${Number(min).toLocaleString()} - ${currSymbol}${Number(max).toLocaleString()} ${currency}`;
-    }
-    if (min) return `From ${currSymbol}${Number(min).toLocaleString()} ${currency}`;
-    return `Up to ${currSymbol}${Number(max).toLocaleString()} ${currency}`;
+    return formatSalaryRange(min, max, currency);
   };
 
   // Filtered jobs
@@ -199,7 +189,9 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                 {/* Compensation Banner */}
                 <div className="p-3 rounded-2xl bg-gradient-to-r from-emerald-500/10 via-indigo-500/10 to-transparent border border-emerald-500/20 flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <DollarSign className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <div className="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center text-[11px] font-black text-emerald-600 dark:text-emerald-400 shrink-0">
+                      {getCurrencySymbol(job.salary_currency)}
+                    </div>
                     <div>
                       <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Offered Salary Band</div>
                       <div className="text-xs font-black text-emerald-700 dark:text-emerald-300">
