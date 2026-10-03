@@ -10,18 +10,18 @@ class JobPosting(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     
     # 1. Role Identity & Metadata Fields
-    job_title = Column(String(150), nullable=False)
-    department = Column(String(100), nullable=False)
-    seniority_level = Column(String(50), nullable=False, default="Mid-Level (L4)") # Intern, Entry-Level (L3), Mid-Level (L4), Senior (L5), Lead
-    employment_type = Column(String(50), nullable=False, default="Full-Time") # Full-Time, Part-Time, Contract, Internship
-    workplace_model = Column(String(50), nullable=False, default="Remote") # Remote, Hybrid, On-site
+    job_title = Column(String(255), nullable=False)
+    department = Column(String(255), nullable=False)
+    seniority_level = Column(String(100), nullable=False, default="Mid-Level (L4)") # Intern, Entry-Level (L3), Mid-Level (L4), Senior (L5), Lead
+    employment_type = Column(String(100), nullable=False, default="Full-Time") # Full-Time, Part-Time, Contract, Internship
+    workplace_model = Column(String(100), nullable=False, default="Remote") # Remote, Hybrid, On-site
     permitted_locations = Column(JSON, default=list) # e.g. ["United States", "Canada", "Remote (EST/PST)"]
     
     # 2. Educational & Academic Qualification Metrics
-    min_degree_level = Column(String(100), default="Bachelor's Degree (B.S. / B.E. / B.Tech)")
-    degree_enforcement_type = Column(String(100), default="Equivalent Professional Experience Allowed")
+    min_degree_level = Column(String(255), default="Bachelor's Degree (B.S. / B.E. / B.Tech)")
+    degree_enforcement_type = Column(String(255), default="Equivalent Professional Experience Allowed")
     accepted_majors = Column(JSON, default=lambda: ["Computer Science", "Software Engineering", "Information Technology"])
-    min_cgpa = Column(String(50), default="3.0 / 4.0")
+    min_cgpa = Column(String(100), default="3.0 / 4.0")
     cgpa_strict_filter = Column(Boolean, default=False)
     grad_year_start = Column(Integer, nullable=True)
     grad_year_end = Column(Integer, nullable=True)
@@ -35,14 +35,14 @@ class JobPosting(Base):
     interview_duration_mins = Column(Integer, default=20) # 15, 20, 30, 45, 60
     allow_grace_extension = Column(Boolean, default=True) # +5m toggle
     max_followup_depth = Column(Integer, default=1) # 1 or 2
-    pacing_strictness = Column(String(50), default="Balanced") # Relaxed, Balanced, Aggressive
+    pacing_strictness = Column(String(255), default="Balanced") # Relaxed, Balanced, Aggressive
     interviewer_tone = Column(Text, default="Direct, technical, tech-lead caliber; probes for architectural trade-offs; warm but concise.")
-    integrity_policy_tier = Column(String(50), default="Moderate") # Basic, Moderate, Strict
+    integrity_policy_tier = Column(String(255), default="Moderate") # Basic, Moderate, Strict
 
     # 5. Compensation & Location Budget
     salary_range_min = Column(Float, nullable=True)
     salary_range_max = Column(Float, nullable=True)
-    salary_currency = Column(String(10), default="USD")
+    salary_currency = Column(String(20), default="USD")
 
     recruiter_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     status = Column(String(50), default="active") # active, draft, archived
@@ -120,7 +120,7 @@ class JobQuestionPlan(Base):
     allocated_questions = Column(Integer, nullable=False)
     time_allocation_minutes = Column(Float, nullable=False)
     weight_percentage = Column(Float, nullable=False)
-    target_rubric_tier = Column(String(50), default="L3-L4")
+    target_rubric_tier = Column(String(100), default="L3-L4")
 
     job = relationship("JobPosting", back_populates="question_plans")
 
