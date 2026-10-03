@@ -3,8 +3,7 @@ import base64
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Optional
-from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form, Body
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form, Body, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
@@ -32,9 +31,6 @@ from backend.app.services.resume_parser import (
     extract_text_from_file, parse_structured_resume_data, detect_discrepancies
 )
 
-os.makedirs("uploads/resumes", exist_ok=True)
-os.makedirs("uploads/id_verifications", exist_ok=True)
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize DB tables & schema migrations
@@ -47,7 +43,15 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE job_postings ADD COLUMN IF NOT EXISTS recruiter_id VARCHAR(36) REFERENCES users(id) ON DELETE SET NULL;",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500);",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(50) DEFAULT 'local';",
-            "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;",
+            "ALTER TABLE candidate_resumes ADD COLUMN IF NOT EXISTS file_data BYTEA;",
+            "ALTER TABLE candidate_resumes ADD COLUMN IF NOT EXISTS file_base64 TEXT;",
+            "ALTER TABLE candidate_resumes ALTER COLUMN original_file_path DROP NOT NULL;",
+            "ALTER TABLE candidate_id_verification ALTER COLUMN live_photo_path TYPE TEXT;",
+            "ALTER TABLE candidate_id_verification ALTER COLUMN government_id_path TYPE TEXT;",
+            "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS current_question_index INTEGER DEFAULT 0;",
+            "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;",
+            "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;",
+            "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS system_prompt_snapshot TEXT;",
         ]
         for mig in migrations:
             try:
@@ -65,9 +69,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
-
-# Static file serving for uploads (resumes & webcam verification photos)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # CORS middleware for local frontend development
 app.add_middleware(
@@ -249,21 +250,6 @@ async def preview_question_budget(payload: dict):
 
 @app.post("/api/auth/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def signup(payload: UserCreate, db: AsyncSession = Depends(get_db)):
-    # Validate password length
-    if len(payload.password) < 8:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 8 characters long."
-        )
-
-    # Validate recruiter requires company name
-    target_role = payload.role.lower() if payload.role in ["recruiter", "candidate"] else "candidate"
-    if target_role == "recruiter" and (not payload.company_name or not payload.company_name.strip()):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Company name is required for recruiter registration."
-        )
-
     # Check if user already exists
     stmt = select(User).where(User.email.ilike(payload.email.strip()))
     result = await db.execute(stmt)
@@ -272,6 +258,15 @@ async def signup(payload: UserCreate, db: AsyncSession = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An account with this email address already exists. Please sign in instead."
+        )
+
+    target_role = payload.role.lower() if payload.role in ["recruiter", "candidate"] else "candidate"
+
+    # Enforce company requirement for recruiters
+    if target_role == "recruiter" and (not payload.company_name or not payload.company_name.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Company name is required for recruiter registration."
         )
 
     hashed_pwd = hash_password(payload.password)
@@ -309,7 +304,13 @@ async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)):
             detail="Invalid email or password. Please check your credentials."
         )
 
-    # Role is automatically detected from the user's registered account in the database
+    # Enforce role matching if specified
+    if payload.role and user.role != payload.role.lower():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This account is registered as a {user.role.capitalize()}. Please select the {user.role.capitalize()} sign-in portal."
+        )
+
     token = create_access_token({
         "sub": user.id,
         "email": user.email,
@@ -318,6 +319,49 @@ async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)):
     })
     return TokenResponse(access_token=token, token_type="bearer", user=user)
 
+
+@app.post("/api/interview-sessions", response_model=InterviewSessionResponse, status_code=status.HTTP_201_CREATED)
+async def create_interview_session(
+    payload: InterviewSessionCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    session = InterviewSession(
+        application_id=payload.application_id,
+        job_id=payload.job_id,
+        status="scheduled",
+        total_questions_planned=payload.total_questions_planned,
+        duration_planned_mins=payload.duration_planned_mins,
+        gemini_model_used=payload.gemini_model_used,
+        system_prompt_snapshot=payload.system_prompt_snapshot
+    )
+    db.add(session)
+    await db.commit()
+
+    stmt = (
+        select(InterviewSession)
+        .options(selectinload(InterviewSession.questions))
+        .where(InterviewSession.id == session.id)
+    )
+    res = await db.execute(stmt)
+    return res.scalars().first()
+
+
+@app.get("/api/interview-sessions/{session_id}", response_model=InterviewSessionResponse)
+async def get_interview_session(
+    session_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = (
+        select(InterviewSession)
+        .options(selectinload(InterviewSession.questions))
+        .where(InterviewSession.id == session_id)
+    )
+    res = await db.execute(stmt)
+    session = res.scalars().first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    return session
 
 
 @app.get("/api/auth/me", response_model=UserResponse)
@@ -525,17 +569,12 @@ async def upload_application_resume(
             detail=f"File exceeds hard limit of 10 MB ({len(content) / (1024*1024):.2f} MB provided)."
         )
 
-    # 3. Store original file on disk
-    dest_dir = os.path.join("uploads", "resumes", application_id)
-    os.makedirs(dest_dir, exist_ok=True)
-    clean_filename = f"original_{filename.replace(' ', '_')}"
-    save_path = os.path.join(dest_dir, clean_filename)
-    with open(save_path, "wb") as f:
-        f.write(content)
+    # 3. In-memory encoding for Gemini API multimodal ingestion
+    file_base64_str = base64.b64encode(content).decode("utf-8")
 
-    # 4. Execute Real Parsing Pipeline (PDF / DOCX / TXT + Apple Vision OCR fallback)
+    # 4. Execute Real Parsing Pipeline in-memory (PDF / DOCX / TXT + Apple Vision OCR fallback)
     try:
-        extracted_text, file_type, ocr_used = extract_text_from_file(save_path)
+        extracted_text, file_type, ocr_used = extract_text_from_file(content, filename=filename)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(e)}")
 
@@ -562,16 +601,20 @@ async def upload_application_resume(
         job=app.job
     )
 
-    # 7. Persist CandidateResume record
+    # 7. Persist CandidateResume record directly into PostgreSQL (BYTEA & Base64)
     resume_stmt = select(CandidateResume).where(CandidateResume.application_id == application_id)
     r_res = await db.execute(resume_stmt)
     existing_resume = r_res.scalars().first()
 
+    download_endpoint = f"/api/applications/{application_id}/resume/file"
+
     if existing_resume:
-        existing_resume.original_file_path = f"/uploads/resumes/{application_id}/{clean_filename}"
+        existing_resume.original_file_path = download_endpoint
         existing_resume.original_file_name = filename
         existing_resume.file_type = file_type
         existing_resume.file_size_bytes = len(content)
+        existing_resume.file_data = content
+        existing_resume.file_base64 = file_base64_str
         existing_resume.parsed_text = extracted_text
         existing_resume.parsed_structured_data = structured_data
         existing_resume.ocr_used = ocr_used
@@ -579,10 +622,12 @@ async def upload_application_resume(
     else:
         new_resume = CandidateResume(
             application_id=application_id,
-            original_file_path=f"/uploads/resumes/{application_id}/{clean_filename}",
+            original_file_path=download_endpoint,
             original_file_name=filename,
             file_type=file_type,
             file_size_bytes=len(content),
+            file_data=content,
+            file_base64=file_base64_str,
             parsed_text=extracted_text,
             parsed_structured_data=structured_data,
             ocr_used=ocr_used,
@@ -642,10 +687,35 @@ async def get_parsed_resume(application_id: str, db: AsyncSession = Depends(get_
         "original_file_name": resume.original_file_name,
         "original_file_path": resume.original_file_path,
         "file_type": resume.file_type,
+        "file_base64": resume.file_base64,
+        "file_download_url": f"/api/applications/{application_id}/resume/file",
         "ocr_used": resume.ocr_used,
         "parsed_structured_data": resume.parsed_structured_data,
         "parsed_text": resume.parsed_text
     }
+
+
+@app.get("/api/applications/{application_id}/resume/file")
+async def get_resume_file(application_id: str, db: AsyncSession = Depends(get_db)):
+    stmt = select(CandidateResume).where(CandidateResume.application_id == application_id)
+    res = await db.execute(stmt)
+    resume = res.scalars().first()
+    if not resume or not resume.file_data:
+        raise HTTPException(status_code=404, detail="Resume file not found in database")
+
+    media_types = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "txt": "text/plain"
+    }
+    media_type = media_types.get(resume.file_type, "application/octet-stream")
+    return Response(
+        content=bytes(resume.file_data),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{resume.original_file_name or "resume.pdf"}"'
+        }
+    )
 
 
 @app.patch("/api/applications/{application_id}/parsed-resume", response_model=JobApplicationResponse)
@@ -717,50 +787,35 @@ async def save_id_verification(
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
 
-    dest_dir = os.path.join("uploads", "id_verifications", application_id)
-    os.makedirs(dest_dir, exist_ok=True)
-
     live_photo_data = payload.get("live_photo")
-    gov_id_data = payload.get("government_id") # optional base64 or path
+    gov_id_data = payload.get("government_id")
 
     if not live_photo_data:
         raise HTTPException(status_code=400, detail="Live webcam photo snapshot is required")
 
-    # Save live photo from base64
-    live_photo_path = os.path.join(dest_dir, "webcam_snapshot.jpg")
-    if "," in live_photo_data:
-        live_photo_data = live_photo_data.split(",")[1]
-    
-    with open(live_photo_path, "wb") as f:
-        f.write(base64.b64decode(live_photo_data))
-
-    live_photo_url = f"/uploads/id_verifications/{application_id}/webcam_snapshot.jpg"
+    # Store photo as data URL directly in PostgreSQL
+    live_photo_val = live_photo_data if live_photo_data.startswith("data:") else f"data:image/jpeg;base64,{live_photo_data}"
 
     # Optional government ID
-    gov_id_url = None
+    gov_id_val = None
     if gov_id_data and len(gov_id_data) > 10:
-        gov_id_path = os.path.join(dest_dir, "government_id.jpg")
-        if "," in gov_id_data:
-            gov_id_data = gov_id_data.split(",")[1]
-        with open(gov_id_path, "wb") as f:
-            f.write(base64.b64decode(gov_id_data))
-        gov_id_url = f"/uploads/id_verifications/{application_id}/government_id.jpg"
+        gov_id_val = gov_id_data if gov_id_data.startswith("data:") else f"data:image/jpeg;base64,{gov_id_data}"
 
-    # Upsert verification record
+    # Upsert verification record directly in PostgreSQL
     stmt = select(CandidateIdVerification).where(CandidateIdVerification.application_id == application_id)
     res = await db.execute(stmt)
     existing_verif = res.scalars().first()
 
     if existing_verif:
-        existing_verif.live_photo_path = live_photo_url
-        existing_verif.government_id_path = gov_id_url or existing_verif.government_id_path
+        existing_verif.live_photo_path = live_photo_val
+        existing_verif.government_id_path = gov_id_val or existing_verif.government_id_path
         existing_verif.captured_at = datetime.utcnow()
         existing_verif.verification_status = "pending"
     else:
         new_verif = CandidateIdVerification(
             application_id=application_id,
-            live_photo_path=live_photo_url,
-            government_id_path=gov_id_url,
+            live_photo_path=live_photo_val,
+            government_id_path=gov_id_val,
             captured_at=datetime.utcnow(),
             verification_status="pending"
         )
@@ -861,67 +916,5 @@ async def update_application_status(
     app.status = new_status
     await db.commit()
     return await get_application_with_relations(application_id, db)
-
-
-# ---------------------------------------------------------
-# Interview Sessions & Dynamic Questions (Gemini Ready)
-# ---------------------------------------------------------
-
-@app.post("/api/interview-sessions", response_model=InterviewSessionResponse, status_code=status.HTTP_201_CREATED)
-async def create_interview_session(
-    payload: InterviewSessionCreate,
-    current_user: Optional[User] = Depends(get_optional_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    app_stmt = select(JobApplication).where(JobApplication.id == payload.application_id)
-    a_res = await db.execute(app_stmt)
-    application = a_res.scalars().first()
-    if not application:
-        raise HTTPException(status_code=404, detail="Job application not found")
-
-    session = InterviewSession(
-        application_id=payload.application_id,
-        job_id=payload.job_id,
-        status="scheduled",
-        total_questions_planned=payload.total_questions_planned,
-        duration_planned_mins=payload.duration_planned_mins,
-        gemini_model_used=payload.gemini_model_used,
-        system_prompt_snapshot=payload.system_prompt_snapshot,
-    )
-    db.add(session)
-    await db.commit()
-    await db.refresh(session)
-    return session
-
-
-@app.get("/api/interview-sessions/{session_id}", response_model=InterviewSessionResponse)
-async def get_interview_session(session_id: str, db: AsyncSession = Depends(get_db)):
-    stmt = (
-        select(InterviewSession)
-        .where(InterviewSession.id == session_id)
-        .options(
-            selectinload(InterviewSession.questions),
-            selectinload(InterviewSession.job),
-            selectinload(InterviewSession.application)
-        )
-    )
-    res = await db.execute(stmt)
-    session = res.scalars().first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Interview session not found")
-    return session
-
-
-@app.get("/api/applications/{application_id}/interview-sessions", response_model=List[InterviewSessionResponse])
-async def list_application_interview_sessions(application_id: str, db: AsyncSession = Depends(get_db)):
-    stmt = (
-        select(InterviewSession)
-        .where(InterviewSession.application_id == application_id)
-        .options(selectinload(InterviewSession.questions))
-        .order_by(InterviewSession.created_at.desc())
-    )
-    res = await db.execute(stmt)
-    return res.scalars().all()
-
 
 

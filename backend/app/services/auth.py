@@ -14,6 +14,7 @@ from backend.app.models import User
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "candidly_ai_enterprise_super_secret_jwt_key_2026")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24 * 7  # 7-day token for seamless user experience
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
 
 def hash_password(password: str) -> str:
@@ -128,5 +129,4 @@ def require_role(required_role: str):
             )
         return current_user
     return role_checker
-
 

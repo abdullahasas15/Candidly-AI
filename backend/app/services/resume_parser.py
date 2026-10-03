@@ -110,9 +110,11 @@ def merge_and_calculate_experience(intervals: List[Tuple[float, float]]) -> floa
     return round(max(0.0, total_years), 1)
 
 
-def extract_text_from_pdf(file_path: str) -> Tuple[str, bool]:
+import io
+
+def extract_text_from_pdf(file_input: Any) -> Tuple[str, bool]:
     """
-    Extracts text from PDF.
+    Extracts text from PDF (file path or raw bytes).
     If extracted text is negligible (<60 characters), falls back to local Apple Vision OCR via ocrmac.
     Returns (extracted_text, ocr_used).
     """
@@ -120,7 +122,8 @@ def extract_text_from_pdf(file_path: str) -> Tuple[str, bool]:
     ocr_used = False
 
     try:
-        with pdfplumber.open(file_path) as pdf:
+        pdf_source = io.BytesIO(file_input) if isinstance(file_input, (bytes, bytearray)) else file_input
+        with pdfplumber.open(pdf_source) as pdf:
             for page in pdf.pages:
                 text = page.extract_text(layout=True) or ""
                 if text.strip():
@@ -137,7 +140,7 @@ def extract_text_from_pdf(file_path: str) -> Tuple[str, bool]:
             from ocrmac import ocrmac
 
             ocr_pages = []
-            pdf_doc = pdfium.PdfDocument(file_path)
+            pdf_doc = pdfium.PdfDocument(file_input)
             for page_index in range(len(pdf_doc)):
                 page = pdf_doc.get_page(page_index)
                 pil_image = page.render(scale=2).to_pil()
@@ -155,9 +158,10 @@ def extract_text_from_pdf(file_path: str) -> Tuple[str, bool]:
     return full_text, ocr_used
 
 
-def extract_text_from_docx(file_path: str) -> str:
-    """Extracts text from DOCX while preserving paragraphs and table structures."""
-    doc = docx.Document(file_path)
+def extract_text_from_docx(file_input: Any) -> str:
+    """Extracts text from DOCX (file path or raw bytes) while preserving paragraphs and table structures."""
+    docx_source = io.BytesIO(file_input) if isinstance(file_input, (bytes, bytearray)) else file_input
+    doc = docx.Document(docx_source)
     paragraphs = []
     for p in doc.paragraphs:
         if p.text.strip():
@@ -172,24 +176,41 @@ def extract_text_from_docx(file_path: str) -> str:
     return "\n".join(paragraphs).strip()
 
 
-def extract_text_from_file(file_path: str) -> Tuple[str, str, bool]:
+def extract_text_from_file(file_input: Any, filename: Optional[str] = None) -> Tuple[str, str, bool]:
     """
     Extracts text from PDF, DOCX, or TXT.
+    Accepts either (file_bytes: bytes, filename: str) or (file_path: str).
     Returns (extracted_text, file_type, ocr_used).
     """
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == '.pdf':
-        text, ocr_used = extract_text_from_pdf(file_path)
-        return text, 'pdf', ocr_used
-    elif ext in ['.docx', '.doc']:
-        text = extract_text_from_docx(file_path)
-        return text, 'docx', False
-    elif ext == '.txt':
-        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-            text = f.read()
-        return text.strip(), 'txt', False
+    if isinstance(file_input, (bytes, bytearray)):
+        name = filename or "resume.pdf"
+        ext = os.path.splitext(name)[1].lower()
+        if ext == '.pdf':
+            text, ocr_used = extract_text_from_pdf(file_input)
+            return text, 'pdf', ocr_used
+        elif ext in ['.docx', '.doc']:
+            text = extract_text_from_docx(file_input)
+            return text, 'docx', False
+        elif ext == '.txt':
+            text = file_input.decode('utf-8', errors='replace')
+            return text.strip(), 'txt', False
+        else:
+            raise ValueError(f"Unsupported resume format '{ext}'. Only PDF, DOCX, and TXT are supported.")
     else:
-        raise ValueError(f"Unsupported resume format '{ext}'. Only PDF, DOCX, and TXT are supported.")
+        file_path = str(file_input)
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.pdf':
+            text, ocr_used = extract_text_from_pdf(file_path)
+            return text, 'pdf', ocr_used
+        elif ext in ['.docx', '.doc']:
+            text = extract_text_from_docx(file_path)
+            return text, 'docx', False
+        elif ext == '.txt':
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                text = f.read()
+            return text.strip(), 'txt', False
+        else:
+            raise ValueError(f"Unsupported resume format '{ext}'. Only PDF, DOCX, and TXT are supported.")
 
 
 # ---------------------------------------------------------------------------

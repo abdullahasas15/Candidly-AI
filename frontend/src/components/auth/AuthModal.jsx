@@ -40,20 +40,22 @@ export default function AuthModal({
 
   if (!isOpen) return null;
 
-  const handleAuthComplete = (authResponse) => {
-    const token = authResponse.access_token;
-    const user = authResponse.user || authResponse;
+  const handleRoleChange = (newRole) => {
+    setRole(newRole);
+    setError(null);
+  };
 
-    if (token) {
-      localStorage.setItem('candidly-auth-token', token);
-      localStorage.setItem('candidly_token', token);
+  const handleAuthComplete = (authResponse) => {
+    if (authResponse.access_token) {
+      localStorage.setItem('candidly-auth-token', authResponse.access_token);
     }
-    if (user) {
-      localStorage.setItem('candidly-auth-user', JSON.stringify(user));
-      localStorage.setItem('candidly_user', JSON.stringify(user));
-      if (onSuccess) onSuccess(user);
+    if (authResponse.user) {
+      localStorage.setItem('candidly-auth-user', JSON.stringify(authResponse.user));
+      onSuccess(authResponse.user);
+    } else {
+      localStorage.setItem('candidly-auth-user', JSON.stringify(authResponse));
+      onSuccess(authResponse);
     }
-    if (onClose) onClose();
   };
 
   const handleSubmit = async (e) => {
@@ -63,41 +65,34 @@ export default function AuthModal({
 
     try {
       if (mode === 'signin') {
-        if (!email.trim() || !password) {
-          throw new Error('Please enter both your email address and password.');
-        }
-
         const res = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            email: email.trim().toLowerCase(),
-            password: password
+            email: email.trim(),
+            password,
+            role
           })
         });
-
         const data = await res.json();
         if (!res.ok) {
-          throw new Error(data.detail || 'Sign in failed. Please verify your email and password.');
+          throw new Error(data.detail || 'Sign in failed. Please check your credentials.');
         }
         handleAuthComplete(data);
       } else {
-        // Sign Up
+        // Sign Up Validation
         if (!fullName.trim()) {
           throw new Error('Please enter your full name.');
-        }
-        if (!email.trim()) {
-          throw new Error('Please enter a valid email address.');
         }
         if (password.length < 8) {
           throw new Error('Password must be at least 8 characters long.');
         }
         if (role === 'recruiter' && !companyName.trim()) {
-          throw new Error('Please enter your company or organization name.');
+          throw new Error('Company name is required for recruiter registration.');
         }
 
         const payload = {
-          email: email.trim().toLowerCase(),
+          email: email.trim(),
           password,
           full_name: fullName.trim(),
           role,
@@ -110,10 +105,9 @@ export default function AuthModal({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-
         const data = await res.json();
         if (!res.ok) {
-          throw new Error(data.detail || 'Registration failed. Please try again.');
+          throw new Error(data.detail || 'Registration failed. Please check your details and try again.');
         }
         handleAuthComplete(data);
       }
@@ -125,7 +119,7 @@ export default function AuthModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/75 backdrop-blur-md flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200">
       <div
         className="relative w-full max-w-md bg-white dark:bg-[#0E1322] rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden"
         onClick={(e) => e.stopPropagation()}
@@ -151,12 +145,12 @@ export default function AuthModal({
           <div className="space-y-3 text-center">
             <div>
               <h2 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
-                {mode === 'signin' ? 'Sign In' : 'Create an Account'}
+                {mode === 'signin' ? 'Welcome Back' : 'Create an Account'}
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                 {mode === 'signin'
-                  ? 'Enter your email and password to access your portal.'
-                  : 'Register to start hiring or taking AI voice interviews.'}
+                  ? 'Sign in to access your jobs, evaluations, and interview sessions.'
+                  : 'Get started with autonomous evidence-based voice interviews.'}
               </p>
             </div>
 
@@ -187,67 +181,65 @@ export default function AuthModal({
             </div>
           </div>
 
-          {/* Role Selector — Only shown in Sign Up mode */}
-          {mode === 'signup' && (
-            <div className="space-y-1.5">
-              <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                I want to register as
-              </label>
-              <div className="grid grid-cols-2 gap-2.5">
-                {/* Candidate Option */}
-                <button
-                  type="button"
-                  onClick={() => { setRole('candidate'); setError(null); }}
-                  className={`p-3 rounded-2xl border text-left transition-all relative flex flex-col justify-between ${
-                    role === 'candidate'
-                      ? 'border-indigo-600 bg-indigo-50/70 dark:bg-indigo-950/40 text-indigo-950 dark:text-indigo-100 ring-2 ring-indigo-500/30 shadow-sm'
-                      : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 bg-white dark:bg-slate-900/60 text-slate-600 dark:text-slate-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between w-full">
-                    <div className={`p-2 rounded-xl ${role === 'candidate' ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
-                      <Briefcase className="w-4 h-4" />
-                    </div>
-                    {role === 'candidate' && (
-                      <span className="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center">
-                        <CheckCircle2 className="w-3 h-3" />
-                      </span>
-                    )}
+          {/* Choosable Role Selector (Candidate vs Recruiter) */}
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              Account Role
+            </label>
+            <div className="grid grid-cols-2 gap-2.5">
+              {/* Candidate Option */}
+              <button
+                type="button"
+                onClick={() => handleRoleChange('candidate')}
+                className={`p-3 rounded-2xl border text-left transition-all relative flex flex-col justify-between ${
+                  role === 'candidate'
+                    ? 'border-indigo-600 bg-indigo-50/70 dark:bg-indigo-950/40 text-indigo-950 dark:text-indigo-100 ring-2 ring-indigo-500/30 shadow-sm'
+                    : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 bg-white dark:bg-slate-900/60 text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className={`p-2 rounded-xl ${role === 'candidate' ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                    <Briefcase className="w-4 h-4" />
                   </div>
-                  <div className="mt-2">
-                    <div className="font-extrabold text-xs">Candidate</div>
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400">Apply & Take Interviews</div>
-                  </div>
-                </button>
+                  {role === 'candidate' && (
+                    <span className="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center">
+                      <CheckCircle2 className="w-3 h-3" />
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2">
+                  <div className="font-extrabold text-xs">Candidate</div>
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400">Interview & Apply</div>
+                </div>
+              </button>
 
-                {/* Recruiter Option */}
-                <button
-                  type="button"
-                  onClick={() => { setRole('recruiter'); setError(null); }}
-                  className={`p-3 rounded-2xl border text-left transition-all relative flex flex-col justify-between ${
-                    role === 'recruiter'
-                      ? 'border-indigo-600 bg-indigo-50/70 dark:bg-indigo-950/40 text-indigo-950 dark:text-indigo-100 ring-2 ring-indigo-500/30 shadow-sm'
-                      : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 bg-white dark:bg-slate-900/60 text-slate-600 dark:text-slate-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between w-full">
-                    <div className={`p-2 rounded-xl ${role === 'recruiter' ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
-                      <Building className="w-4 h-4" />
-                    </div>
-                    {role === 'recruiter' && (
-                      <span className="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center">
-                        <CheckCircle2 className="w-3 h-3" />
-                      </span>
-                    )}
+              {/* Recruiter Option */}
+              <button
+                type="button"
+                onClick={() => handleRoleChange('recruiter')}
+                className={`p-3 rounded-2xl border text-left transition-all relative flex flex-col justify-between ${
+                  role === 'recruiter'
+                    ? 'border-indigo-600 bg-indigo-50/70 dark:bg-indigo-950/40 text-indigo-950 dark:text-indigo-100 ring-2 ring-indigo-500/30 shadow-sm'
+                    : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 bg-white dark:bg-slate-900/60 text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between w-full">
+                  <div className={`p-2 rounded-xl ${role === 'recruiter' ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                    <Building className="w-4 h-4" />
                   </div>
-                  <div className="mt-2">
-                    <div className="font-extrabold text-xs">Recruiter</div>
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400">Post Jobs & Review Rubrics</div>
-                  </div>
-                </button>
-              </div>
+                  {role === 'recruiter' && (
+                    <span className="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center">
+                      <CheckCircle2 className="w-3 h-3" />
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2">
+                  <div className="font-extrabold text-xs">Recruiter / Team</div>
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400">Post Jobs & Evaluate</div>
+                </div>
+              </button>
             </div>
-          )}
+          </div>
 
           {/* Error Message */}
           {error && (
@@ -258,11 +250,11 @@ export default function AuthModal({
           )}
 
           {/* Form */}
-          <form onSubmit={handleSubmit} className="space-y-3">
+          <form onSubmit={handleSubmit} className="space-y-3.5">
             {mode === 'signup' && (
               <div className="space-y-1">
                 <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
-                  Full Name
+                  Full Name <span className="text-rose-500">*</span>
                 </label>
                 <div className="relative">
                   <User className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
@@ -278,9 +270,46 @@ export default function AuthModal({
               </div>
             )}
 
+            {mode === 'signup' && role === 'recruiter' && (
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                  Company / Organization <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative">
+                  <Building className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    required
+                    value={companyName}
+                    onChange={(e) => setCompanyName(e.target.value)}
+                    placeholder="e.g. Stripe, OpenAI, Nexus Labs"
+                    className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+            )}
+
+            {mode === 'signup' && role === 'candidate' && (
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                  Headline / Professional Role (Optional)
+                </label>
+                <div className="relative">
+                  <Briefcase className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={headline}
+                    onChange={(e) => setHeadline(e.target.value)}
+                    placeholder="e.g. Senior Distributed Systems Engineer"
+                    className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="space-y-1">
               <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
-                Email Address
+                Email Address <span className="text-rose-500">*</span>
               </label>
               <div className="relative">
                 <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
@@ -289,27 +318,21 @@ export default function AuthModal({
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="your.email@example.com"
+                  placeholder="your.email@domain.com"
                   className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
             </div>
 
             <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
-                  Password
-                </label>
-                {mode === 'signup' && (
-                  <span className="text-[10px] text-slate-400">Min 8 characters</span>
-                )}
-              </div>
+              <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                Password <span className="text-rose-500">*</span> {mode === 'signup' && <span className="text-[10px] text-slate-400">(min. 8 characters)</span>}
+              </label>
               <div className="relative">
                 <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                 <input
                   type={showPassword ? 'text' : 'password'}
                   required
-                  minLength={mode === 'signup' ? 8 : 1}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
@@ -325,43 +348,6 @@ export default function AuthModal({
               </div>
             </div>
 
-            {mode === 'signup' && role === 'recruiter' && (
-              <div className="space-y-1">
-                <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
-                  Company / Organization <span className="text-rose-500">*</span>
-                </label>
-                <div className="relative">
-                  <Building className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                  <input
-                    type="text"
-                    required
-                    value={companyName}
-                    onChange={(e) => setCompanyName(e.target.value)}
-                    placeholder="e.g. Stripe, DeepMind, Nexus Labs"
-                    className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                </div>
-              </div>
-            )}
-
-            {mode === 'signup' && role === 'candidate' && (
-              <div className="space-y-1">
-                <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
-                  Headline / Role <span className="text-slate-400 font-normal">(Optional)</span>
-                </label>
-                <div className="relative">
-                  <Briefcase className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                  <input
-                    type="text"
-                    value={headline}
-                    onChange={(e) => setHeadline(e.target.value)}
-                    placeholder="e.g. Senior Software Engineer"
-                    className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                </div>
-              </div>
-            )}
-
             <button
               type="submit"
               disabled={loading}
@@ -373,7 +359,7 @@ export default function AuthModal({
                 <>
                   <span>
                     {mode === 'signin'
-                      ? 'Sign In'
+                      ? `Sign In as ${role === 'recruiter' ? 'Recruiter' : 'Candidate'}`
                       : `Create ${role === 'recruiter' ? 'Recruiter' : 'Candidate'} Account`}
                   </span>
                   <ArrowRight className="w-4 h-4" />

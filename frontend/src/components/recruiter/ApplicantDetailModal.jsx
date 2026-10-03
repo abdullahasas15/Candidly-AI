@@ -333,15 +333,19 @@ export default function ApplicantDetailModal({
                 {verification?.government_id_path && (
                   <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800 flex items-center justify-between">
                     <span className="text-[11px] text-slate-500 font-semibold">Government ID Document</span>
-                    <a
-                      href={verification.government_id_path}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1"
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const win = window.open();
+                        if (win) {
+                          win.document.write(`<iframe src="${verification.government_id_path}" frameborder="0" style="border:0; top:0px; left:0px; bottom:0px; right:0px; width:100%; height:100%;" allowfullscreen></iframe>`);
+                        }
+                      }}
+                      className="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer"
                     >
                       <span>View Document</span>
                       <ExternalLink className="w-3 h-3" />
-                    </a>
+                    </button>
                   </div>
                 )}
               </div>
@@ -370,18 +374,29 @@ export default function ApplicantDetailModal({
                       {resume.original_file_name}
                     </div>
                     <div className="text-[11px]">
-                      {(resume.file_size_bytes / 1024).toFixed(1)} KB · Format: {resume.file_type.toUpperCase()}
+                      {(resume.file_size_bytes / 1024).toFixed(1)} KB · Format: {resume.file_type.toUpperCase()} · <span className="text-emerald-600 dark:text-emerald-400 font-medium">PostgreSQL BYTEA</span>
                     </div>
                   </div>
 
-                  <a
-                    href={resume.original_file_path}
-                    download
-                    className="w-full inline-flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs hover:bg-slate-100 transition-colors"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Download Original Resume</span>
-                  </a>
+                  <div className="flex flex-col gap-2 pt-1">
+                    <a
+                      href={`/api/applications/${currentApp.id}/resume/file`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="w-full inline-flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm hover:shadow transition-all"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>View PDF Resume (PostgreSQL)</span>
+                    </a>
+                    <a
+                      href={`/api/applications/${currentApp.id}/resume/file`}
+                      download={resume.original_file_name || "resume.pdf"}
+                      className="w-full inline-flex items-center justify-center gap-2 py-1.5 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs hover:bg-slate-100 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download File</span>
+                    </a>
+                  </div>
                 </div>
               )}
 

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Float, Boolean, Text, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, String, Integer, Float, Boolean, Text, DateTime, ForeignKey, JSON, LargeBinary
 from sqlalchemy.orm import relationship
 from backend.app.database import Base
 
@@ -56,7 +56,6 @@ class JobPosting(Base):
     custom_questions = relationship("JobCustomQuestion", back_populates="job", cascade="all, delete-orphan", lazy="selectin")
     question_plans = relationship("JobQuestionPlan", back_populates="job", cascade="all, delete-orphan", lazy="selectin")
     applications = relationship("JobApplication", back_populates="job", cascade="all, delete-orphan", lazy="selectin")
-    interview_sessions = relationship("InterviewSession", back_populates="job", cascade="all, delete-orphan", lazy="selectin")
 
 
 
@@ -131,13 +130,13 @@ class User(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(150), unique=True, index=True, nullable=False)
-    password_hash = Column(String(255), nullable=False) # Production: email/password authentication
+    password_hash = Column(String(255), nullable=True) # Nullable for OAuth users
     full_name = Column(String(100), nullable=False)
     role = Column(String(20), nullable=False, default="recruiter") # 'recruiter' or 'candidate'
     company_name = Column(String(150), nullable=True) # for recruiters
     headline = Column(String(200), nullable=True) # for candidates
     avatar_url = Column(String(500), nullable=True)
-    auth_provider = Column(String(50), default="local") # 'local'
+    auth_provider = Column(String(50), default="local") # 'local' or 'google'
     created_at = Column(DateTime, default=datetime.utcnow)
 
     posted_jobs = relationship("JobPosting", back_populates="recruiter", lazy="selectin")
@@ -199,10 +198,14 @@ class CandidateResume(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     application_id = Column(String(36), ForeignKey("job_applications.id", ondelete="CASCADE"), nullable=False)
 
-    original_file_path = Column(String(500), nullable=False)
+    original_file_path = Column(String(500), nullable=True) # Direct API endpoint e.g. /api/applications/{app_id}/resume/file
     original_file_name = Column(String(255), nullable=False)
     file_type = Column(String(20), nullable=False) # pdf, docx, txt
     file_size_bytes = Column(Integer, nullable=False)
+
+    # In-Database PDF/Document Storage (Zero filesystem dependency)
+    file_data = Column(LargeBinary, nullable=True) # Raw PDF bytes in PostgreSQL (BYTEA)
+    file_base64 = Column(Text, nullable=True) # Base64 string for instant LLM/Gemini API prompt transmission
 
     parsed_text = Column(Text, nullable=True)
     parsed_structured_data = Column(JSON, default=dict) # companies, roles, dates, degrees, skills, total_experience_years
@@ -234,8 +237,8 @@ class CandidateIdVerification(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     application_id = Column(String(36), ForeignKey("job_applications.id", ondelete="CASCADE"), unique=True, nullable=False)
 
-    live_photo_path = Column(String(500), nullable=False)
-    government_id_path = Column(String(500), nullable=True)
+    live_photo_path = Column(Text, nullable=False) # Base64 data URL in PostgreSQL
+    government_id_path = Column(Text, nullable=True)
     captured_at = Column(DateTime, default=datetime.utcnow)
     verification_status = Column(String(50), default="pending") # pending, verified, flagged
 
@@ -249,24 +252,20 @@ class InterviewSession(Base):
     application_id = Column(String(36), ForeignKey("job_applications.id", ondelete="CASCADE"), nullable=False)
     job_id = Column(String(36), ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False)
 
-    status = Column(String(50), default="scheduled") # scheduled, in_progress, completed, abandoned
-    total_questions_planned = Column(Integer, default=8)
-    total_questions_asked = Column(Integer, default=0)
+    status = Column(String(50), default="scheduled") # scheduled, in_progress, completed, cancelled
+    total_questions_planned = Column(Integer, default=5)
     duration_planned_mins = Column(Integer, default=20)
-    actual_duration_secs = Column(Integer, default=0)
-
     gemini_model_used = Column(String(100), default="gemini-2.5-flash")
-    system_prompt_snapshot = Column(Text, nullable=True) # Frozen copy of prompt used
+    system_prompt_snapshot = Column(Text, nullable=True)
 
+    current_question_index = Column(Integer, default=0)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationships
-    application = relationship("JobApplication", back_populates="interview_sessions", lazy="selectin")
-    job = relationship("JobPosting", back_populates="interview_sessions", lazy="selectin")
-    questions = relationship("InterviewQuestion", back_populates="session", cascade="all, delete-orphan", order_by="InterviewQuestion.question_index", lazy="selectin")
+    application = relationship("JobApplication", back_populates="interview_sessions")
+    job = relationship("JobPosting")
+    questions = relationship("InterviewQuestion", back_populates="session", cascade="all, delete-orphan", order_by="InterviewQuestion.question_index")
 
 
 class InterviewQuestion(Base):
@@ -274,29 +273,24 @@ class InterviewQuestion(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String(36), ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False)
+    question_index = Column(Integer, nullable=False)
 
-    question_index = Column(Integer, nullable=False, default=1)
-    skill_name = Column(String(150), nullable=True)
+    skill_name = Column(String(200), nullable=True)
     skill_category = Column(String(100), nullable=True)
-    priority_tier = Column(String(20), default="P0") # P0, P1, P2
+    priority_tier = Column(String(10), nullable=True) # P0, P1, P2
 
     question_text = Column(Text, nullable=False)
-    expected_key_points = Column(JSON, default=list) # Array of key points expected in answer
+    expected_key_points = Column(JSON, default=list) # Rubric anchors from job rubrics
+    follow_up_depth_allowed = Column(Integer, default=2)
+    follow_up_count = Column(Integer, default=0)
 
-    candidate_answer = Column(Text, nullable=True)
-    follow_up_question = Column(Text, nullable=True)
-    follow_up_answer = Column(Text, nullable=True)
+    candidate_answer_transcript = Column(Text, nullable=True)
+    evaluation_score = Column(Float, nullable=True) # 1.0 to 5.0
+    evaluation_feedback = Column(Text, nullable=True)
 
-    time_spent_secs = Column(Integer, default=0)
-    rubric_level_assessed = Column(String(20), nullable=True) # e.g. L1, L2, L3, L4, L5
-    evaluation_notes = Column(Text, nullable=True)
-
-    asked_at = Column(DateTime, nullable=True)
-    answered_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("InterviewSession", back_populates="questions")
-
 
 
 
