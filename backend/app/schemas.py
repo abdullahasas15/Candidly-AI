@@ -165,16 +165,16 @@ class JobResponse(BaseModel):
 
 class UserCreate(BaseModel):
     email: str
-    password: str
+    password: str = Field(..., min_length=8, description="Minimum 8 characters")
     full_name: str
-    role: str = "recruiter" # 'recruiter' or 'candidate'
+    role: str = "candidate" # 'recruiter' or 'candidate'
     company_name: Optional[str] = None
     headline: Optional[str] = None
 
 class UserLogin(BaseModel):
     email: str
     password: str
-    role: Optional[str] = None
+    role: Optional[str] = None # Optional: auto-detected from database user record
 
 class UserResponse(BaseModel):
     id: str
@@ -193,13 +193,6 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
-
-class GoogleAuthRequest(BaseModel):
-    credential: Optional[str] = None
-    role: str = "candidate"
-    email: Optional[str] = None
-    full_name: Optional[str] = None
-    avatar_url: Optional[str] = None
 
 
 class CandidateApplicationResponse(BaseModel):
@@ -361,6 +354,67 @@ class JobApplicationListItem(BaseModel):
     expected_salary_currency: Optional[str] = "USD"
     discrepancy_count: int = 0
     unresolved_discrepancies: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------
+# Interview Sessions & Dynamic Questions Schemas (Gemini Ready)
+# ---------------------------------------------------------
+
+class InterviewQuestionCreate(BaseModel):
+    question_index: int = 1
+    skill_name: Optional[str] = None
+    skill_category: Optional[str] = None
+    priority_tier: str = "P0"
+    question_text: str
+    expected_key_points: List[str] = []
+
+class InterviewQuestionResponse(BaseModel):
+    id: str
+    session_id: str
+    question_index: int
+    skill_name: Optional[str] = None
+    skill_category: Optional[str] = None
+    priority_tier: str
+    question_text: str
+    expected_key_points: List[str] = []
+    candidate_answer: Optional[str] = None
+    follow_up_question: Optional[str] = None
+    follow_up_answer: Optional[str] = None
+    time_spent_secs: int = 0
+    rubric_level_assessed: Optional[str] = None
+    evaluation_notes: Optional[str] = None
+    asked_at: Optional[datetime] = None
+    answered_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class InterviewSessionCreate(BaseModel):
+    application_id: str
+    job_id: str
+    total_questions_planned: int = 8
+    duration_planned_mins: int = 20
+    gemini_model_used: str = "gemini-2.5-flash"
+    system_prompt_snapshot: Optional[str] = None
+
+class InterviewSessionResponse(BaseModel):
+    id: str
+    application_id: str
+    job_id: str
+    status: str
+    total_questions_planned: int
+    total_questions_asked: int
+    duration_planned_mins: int
+    actual_duration_secs: int
+    gemini_model_used: str
+    system_prompt_snapshot: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+    questions: List[InterviewQuestionResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
 

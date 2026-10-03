@@ -14,7 +14,6 @@ from backend.app.models import User
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "candidly_ai_enterprise_super_secret_jwt_key_2026")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24 * 7  # 7-day token for seamless user experience
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
 
 def hash_password(password: str) -> str:
@@ -130,45 +129,4 @@ def require_role(required_role: str):
         return current_user
     return role_checker
 
-
-def verify_google_credential(credential: str) -> Dict[str, Any]:
-    """
-    Verify Google OAuth credential token or parse JWT payload.
-    In production with GOOGLE_CLIENT_ID set, verifies against Google servers.
-    Otherwise safely parses ID token claims.
-    """
-    if GOOGLE_CLIENT_ID:
-        try:
-            from google.oauth2 import id_token
-            from google.auth.transport import requests
-            id_info = id_token.verify_oauth2_token(credential, requests.Request(), GOOGLE_CLIENT_ID)
-            return {
-                "email": id_info.get("email"),
-                "full_name": id_info.get("name") or id_info.get("email", "").split("@")[0],
-                "avatar_url": id_info.get("picture"),
-                "google_id": id_info.get("sub")
-            }
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Google token verification failed: {str(e)}"
-            )
-    else:
-        # Development / unverified token decode
-        try:
-            unverified = jwt.decode(credential, options={"verify_signature": False})
-            return {
-                "email": unverified.get("email"),
-                "full_name": unverified.get("name") or unverified.get("email", "").split("@")[0],
-                "avatar_url": unverified.get("picture"),
-                "google_id": unverified.get("sub")
-            }
-        except Exception:
-            # If payload was raw email or simulated token
-            return {
-                "email": credential if "@" in credential else f"{credential}@gmail.com",
-                "full_name": credential.split("@")[0].replace(".", " ").title(),
-                "avatar_url": None,
-                "google_id": credential
-            }
 

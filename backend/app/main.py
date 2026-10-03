@@ -13,18 +13,20 @@ from sqlalchemy.orm import selectinload
 from backend.app.database import engine, Base, get_db, AsyncSessionLocal
 from backend.app.models import (
     JobPosting, JobSkill, JobCertification, JobCustomQuestion, JobQuestionPlan,
-    User, CandidateApplication, JobApplication, CandidateResume, ResumeDiscrepancyFlag, CandidateIdVerification
+    User, CandidateApplication, JobApplication, CandidateResume, ResumeDiscrepancyFlag, CandidateIdVerification,
+    InterviewSession, InterviewQuestion
 )
 from backend.app.schemas import (
     JobCreate, JobResponse, UserCreate, UserLogin, UserResponse, CandidateApplicationResponse,
     JobApplicationCreate, JobApplicationUpdate, JobApplicationResponse, JobApplicationListItem,
     CandidateResumeResponse, ResumeDiscrepancyFlagResponse, CandidateIdVerificationResponse,
-    TokenResponse, GoogleAuthRequest
+    TokenResponse, InterviewSessionCreate, InterviewSessionResponse,
+    InterviewQuestionCreate, InterviewQuestionResponse
 )
 from backend.app.budgeting import calculate_question_budget
 from backend.app.services.auth import (
     hash_password, verify_password, create_access_token,
-    get_current_user, get_optional_current_user, require_role, verify_google_credential
+    get_current_user, get_optional_current_user, require_role
 )
 from backend.app.services.resume_parser import (
     extract_text_from_file, parse_structured_resume_data, detect_discrepancies
@@ -247,6 +249,21 @@ async def preview_question_budget(payload: dict):
 
 @app.post("/api/auth/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def signup(payload: UserCreate, db: AsyncSession = Depends(get_db)):
+    # Validate password length
+    if len(payload.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long."
+        )
+
+    # Validate recruiter requires company name
+    target_role = payload.role.lower() if payload.role in ["recruiter", "candidate"] else "candidate"
+    if target_role == "recruiter" and (not payload.company_name or not payload.company_name.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Company name is required for recruiter registration."
+        )
+
     # Check if user already exists
     stmt = select(User).where(User.email.ilike(payload.email.strip()))
     result = await db.execute(stmt)
@@ -262,7 +279,7 @@ async def signup(payload: UserCreate, db: AsyncSession = Depends(get_db)):
         email=payload.email.strip().lower(),
         password_hash=hashed_pwd,
         full_name=payload.full_name.strip(),
-        role=payload.role.lower() if payload.role in ["recruiter", "candidate"] else "candidate",
+        role=target_role,
         company_name=payload.company_name.strip() if payload.company_name else None,
         headline=payload.headline.strip() if payload.headline else None,
         auth_provider="local"
@@ -292,13 +309,7 @@ async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)):
             detail="Invalid email or password. Please check your credentials."
         )
 
-    # Enforce role matching if specified
-    if payload.role and user.role != payload.role.lower():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"This account is registered as a {user.role.capitalize()}. Please select the {user.role.capitalize()} sign-in portal."
-        )
-
+    # Role is automatically detected from the user's registered account in the database
     token = create_access_token({
         "sub": user.id,
         "email": user.email,
@@ -307,54 +318,6 @@ async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)):
     })
     return TokenResponse(access_token=token, token_type="bearer", user=user)
 
-
-@app.post("/api/auth/google", response_model=TokenResponse)
-async def google_auth(payload: GoogleAuthRequest, db: AsyncSession = Depends(get_db)):
-    if payload.credential:
-        profile = verify_google_credential(payload.credential)
-    else:
-        if not payload.email:
-            raise HTTPException(status_code=400, detail="Missing Google credentials or email")
-        profile = {
-            "email": payload.email.strip().lower(),
-            "full_name": payload.full_name or payload.email.split("@")[0].replace(".", " ").title(),
-            "avatar_url": payload.avatar_url,
-            "google_id": None
-        }
-
-    email = profile["email"].strip().lower()
-    stmt = select(User).where(User.email.ilike(email))
-    result = await db.execute(stmt)
-    user = result.scalars().first()
-
-    target_role = payload.role.lower() if payload.role in ["recruiter", "candidate"] else "candidate"
-
-    if not user:
-        user = User(
-            email=email,
-            full_name=profile.get("full_name") or "Google User",
-            password_hash=None,
-            role=target_role,
-            avatar_url=profile.get("avatar_url"),
-            auth_provider="google"
-        )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-    else:
-        # Update avatar if provided
-        if profile.get("avatar_url") and not user.avatar_url:
-            user.avatar_url = profile["avatar_url"]
-            await db.commit()
-            await db.refresh(user)
-
-    token = create_access_token({
-        "sub": user.id,
-        "email": user.email,
-        "role": user.role,
-        "name": user.full_name
-    })
-    return TokenResponse(access_token=token, token_type="bearer", user=user)
 
 
 @app.get("/api/auth/me", response_model=UserResponse)
@@ -898,5 +861,67 @@ async def update_application_status(
     app.status = new_status
     await db.commit()
     return await get_application_with_relations(application_id, db)
+
+
+# ---------------------------------------------------------
+# Interview Sessions & Dynamic Questions (Gemini Ready)
+# ---------------------------------------------------------
+
+@app.post("/api/interview-sessions", response_model=InterviewSessionResponse, status_code=status.HTTP_201_CREATED)
+async def create_interview_session(
+    payload: InterviewSessionCreate,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    app_stmt = select(JobApplication).where(JobApplication.id == payload.application_id)
+    a_res = await db.execute(app_stmt)
+    application = a_res.scalars().first()
+    if not application:
+        raise HTTPException(status_code=404, detail="Job application not found")
+
+    session = InterviewSession(
+        application_id=payload.application_id,
+        job_id=payload.job_id,
+        status="scheduled",
+        total_questions_planned=payload.total_questions_planned,
+        duration_planned_mins=payload.duration_planned_mins,
+        gemini_model_used=payload.gemini_model_used,
+        system_prompt_snapshot=payload.system_prompt_snapshot,
+    )
+    db.add(session)
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+@app.get("/api/interview-sessions/{session_id}", response_model=InterviewSessionResponse)
+async def get_interview_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    stmt = (
+        select(InterviewSession)
+        .where(InterviewSession.id == session_id)
+        .options(
+            selectinload(InterviewSession.questions),
+            selectinload(InterviewSession.job),
+            selectinload(InterviewSession.application)
+        )
+    )
+    res = await db.execute(stmt)
+    session = res.scalars().first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    return session
+
+
+@app.get("/api/applications/{application_id}/interview-sessions", response_model=List[InterviewSessionResponse])
+async def list_application_interview_sessions(application_id: str, db: AsyncSession = Depends(get_db)):
+    stmt = (
+        select(InterviewSession)
+        .where(InterviewSession.application_id == application_id)
+        .options(selectinload(InterviewSession.questions))
+        .order_by(InterviewSession.created_at.desc())
+    )
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
 
 

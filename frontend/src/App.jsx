@@ -94,6 +94,9 @@ export default function App() {
   const handleSignOut = () => {
     setAuthUser(null);
     localStorage.removeItem('candidly-auth-user');
+    localStorage.removeItem('candidly-auth-token');
+    localStorage.removeItem('candidly_user');
+    localStorage.removeItem('candidly_token');
     setViewMode('landing');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };

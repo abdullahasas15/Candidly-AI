@@ -56,6 +56,7 @@ class JobPosting(Base):
     custom_questions = relationship("JobCustomQuestion", back_populates="job", cascade="all, delete-orphan", lazy="selectin")
     question_plans = relationship("JobQuestionPlan", back_populates="job", cascade="all, delete-orphan", lazy="selectin")
     applications = relationship("JobApplication", back_populates="job", cascade="all, delete-orphan", lazy="selectin")
+    interview_sessions = relationship("InterviewSession", back_populates="job", cascade="all, delete-orphan", lazy="selectin")
 
 
 
@@ -130,13 +131,13 @@ class User(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(150), unique=True, index=True, nullable=False)
-    password_hash = Column(String(255), nullable=True) # Nullable for OAuth users
+    password_hash = Column(String(255), nullable=False) # Production: email/password authentication
     full_name = Column(String(100), nullable=False)
     role = Column(String(20), nullable=False, default="recruiter") # 'recruiter' or 'candidate'
     company_name = Column(String(150), nullable=True) # for recruiters
     headline = Column(String(200), nullable=True) # for candidates
     avatar_url = Column(String(500), nullable=True)
-    auth_provider = Column(String(50), default="local") # 'local' or 'google'
+    auth_provider = Column(String(50), default="local") # 'local'
     created_at = Column(DateTime, default=datetime.utcnow)
 
     posted_jobs = relationship("JobPosting", back_populates="recruiter", lazy="selectin")
@@ -189,6 +190,7 @@ class JobApplication(Base):
     resume = relationship("CandidateResume", back_populates="application", uselist=False, cascade="all, delete-orphan", lazy="selectin")
     discrepancy_flags = relationship("ResumeDiscrepancyFlag", back_populates="application", cascade="all, delete-orphan", lazy="selectin")
     id_verification = relationship("CandidateIdVerification", back_populates="application", uselist=False, cascade="all, delete-orphan", lazy="selectin")
+    interview_sessions = relationship("InterviewSession", back_populates="application", cascade="all, delete-orphan", lazy="selectin")
 
 
 class CandidateResume(Base):
@@ -238,6 +240,63 @@ class CandidateIdVerification(Base):
     verification_status = Column(String(50), default="pending") # pending, verified, flagged
 
     application = relationship("JobApplication", back_populates="id_verification")
+
+
+class InterviewSession(Base):
+    __tablename__ = "interview_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    application_id = Column(String(36), ForeignKey("job_applications.id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(String(36), ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False)
+
+    status = Column(String(50), default="scheduled") # scheduled, in_progress, completed, abandoned
+    total_questions_planned = Column(Integer, default=8)
+    total_questions_asked = Column(Integer, default=0)
+    duration_planned_mins = Column(Integer, default=20)
+    actual_duration_secs = Column(Integer, default=0)
+
+    gemini_model_used = Column(String(100), default="gemini-2.5-flash")
+    system_prompt_snapshot = Column(Text, nullable=True) # Frozen copy of prompt used
+
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    application = relationship("JobApplication", back_populates="interview_sessions", lazy="selectin")
+    job = relationship("JobPosting", back_populates="interview_sessions", lazy="selectin")
+    questions = relationship("InterviewQuestion", back_populates="session", cascade="all, delete-orphan", order_by="InterviewQuestion.question_index", lazy="selectin")
+
+
+class InterviewQuestion(Base):
+    __tablename__ = "interview_questions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String(36), ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False)
+
+    question_index = Column(Integer, nullable=False, default=1)
+    skill_name = Column(String(150), nullable=True)
+    skill_category = Column(String(100), nullable=True)
+    priority_tier = Column(String(20), default="P0") # P0, P1, P2
+
+    question_text = Column(Text, nullable=False)
+    expected_key_points = Column(JSON, default=list) # Array of key points expected in answer
+
+    candidate_answer = Column(Text, nullable=True)
+    follow_up_question = Column(Text, nullable=True)
+    follow_up_answer = Column(Text, nullable=True)
+
+    time_spent_secs = Column(Integer, default=0)
+    rubric_level_assessed = Column(String(20), nullable=True) # e.g. L1, L2, L3, L4, L5
+    evaluation_notes = Column(Text, nullable=True)
+
+    asked_at = Column(DateTime, nullable=True)
+    answered_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("InterviewSession", back_populates="questions")
+
 
 
 
