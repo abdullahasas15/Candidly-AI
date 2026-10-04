@@ -4,7 +4,6 @@ import {
   ChevronRight, ArrowRight, ShieldCheck, CheckCircle2, Sparkles,
   X, Filter, Building2, BookOpen
 } from 'lucide-react';
-import { getCurrencySymbol, formatSalaryRange } from '../../utils/currency';
 
 export default function CandidateJobListing({ onSelectJobForApplication }) {
   const [jobs, setJobs] = useState([]);
@@ -41,7 +40,18 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
   }, []);
 
   const formatSalary = (min, max, currency = 'USD') => {
-    return formatSalaryRange(min, max, currency);
+    if (!min && !max) return 'Competitive compensation';
+    const currSymbol = currency === 'USD' || currency === 'CAD' || currency === 'AUD' || currency === 'SGD' ? '$'
+      : currency === 'EUR' ? '€'
+      : currency === 'GBP' ? '£'
+      : currency === 'INR' ? '₹'
+      : `${currency} `;
+
+    if (min && max) {
+      return `${currSymbol}${Number(min).toLocaleString()} - ${currSymbol}${Number(max).toLocaleString()} ${currency}`;
+    }
+    if (min) return `From ${currSymbol}${Number(min).toLocaleString()} ${currency}`;
+    return `Up to ${currSymbol}${Number(max).toLocaleString()} ${currency}`;
   };
 
   // Filtered jobs
@@ -189,9 +199,7 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                 {/* Compensation Banner */}
                 <div className="p-3 rounded-2xl bg-gradient-to-r from-emerald-500/10 via-indigo-500/10 to-transparent border border-emerald-500/20 flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <div className="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center text-[11px] font-black text-emerald-600 dark:text-emerald-400 shrink-0">
-                      {getCurrencySymbol(job.salary_currency)}
-                    </div>
+                    <DollarSign className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                     <div>
                       <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Offered Salary Band</div>
                       <div className="text-xs font-black text-emerald-700 dark:text-emerald-300">
@@ -315,6 +323,41 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                   </div>
                 </div>
               </div>
+
+              {/* Full Job Description Section (Workday / LinkedIn Standard) */}
+              <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2.5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white">
+                    <Briefcase className="w-4 h-4 text-indigo-600" />
+                    <span>Job Description & Role Overview</span>
+                  </div>
+                  <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                    Role Specification
+                  </span>
+                </div>
+                {inspectingJob.job_description && inspectingJob.job_description !== 'N/A' ? (
+                  <div className="text-slate-700 dark:text-slate-300 whitespace-pre-line leading-relaxed text-xs">
+                    {inspectingJob.job_description}
+                  </div>
+                ) : (
+                  <p className="text-slate-400 italic text-xs">
+                    No custom narrative job description provided. Please review the competencies, academic criteria, and interview duration benchmarks below.
+                  </p>
+                )}
+              </div>
+
+              {/* Custom Screening Questions notice */}
+              {inspectingJob.custom_questions && inspectingJob.custom_questions.length > 0 && (
+                <div className="p-4 rounded-2xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-indigo-900 dark:text-indigo-300">
+                    <ShieldCheck className="w-4 h-4 text-indigo-600" />
+                    <span>Employer Application Screening Questions ({inspectingJob.custom_questions.length})</span>
+                  </div>
+                  <p className="text-[11px] text-indigo-700/80 dark:text-indigo-300/80">
+                    This role includes {inspectingJob.custom_questions.length} custom question(s) that you will complete during your application.
+                  </p>
+                </div>
+              )}
 
               {/* Education & Academic Criteria */}
               <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">

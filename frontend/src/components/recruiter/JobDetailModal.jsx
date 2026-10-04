@@ -5,7 +5,6 @@ import {
   RefreshCw, Check
 } from 'lucide-react';
 import ApplicantDetailModal from './ApplicantDetailModal';
-import { getCurrencySymbol, formatMoney as formatMoneyUtil } from '../../utils/currency';
 
 export default function JobDetailModal({ job, isOpen, onClose }) {
   if (!isOpen || !job) return null;
@@ -42,7 +41,8 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
   };
 
   const formatMoney = (val, curr = 'USD') => {
-    return formatMoneyUtil(val, curr);
+    if (!val) return 'Not Stated';
+    return `$${Number(val).toLocaleString()} ${curr}`;
   };
 
   const getStatusBadge = (status) => {
@@ -84,8 +84,8 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
                 {job.workplace_model} · {job.employment_type}
               </span>
               {job.salary_range_min && (
-                <span className="px-2 py-0.5 rounded-md text-xs font-bold bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 flex items-center gap-1.5">
-                  <span className="font-extrabold text-xs">{getCurrencySymbol(job.salary_currency)}</span>
+                <span className="px-2 py-0.5 rounded-md text-xs font-bold bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
+                  <DollarSign className="w-3 h-3" />
                   <span>{formatMoney(job.salary_range_min, job.salary_currency)} - {formatMoney(job.salary_range_max, job.salary_currency)}</span>
                 </span>
               )}

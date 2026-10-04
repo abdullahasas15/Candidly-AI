@@ -5,7 +5,6 @@ import {
   Layers, Check, ChevronRight, UserCheck, RefreshCw, FileText,
   Sparkles, Code, FolderGit2, GraduationCap
 } from 'lucide-react';
-import { getCurrencySymbol, formatMoney as formatMoneyUtil } from '../../utils/currency';
 
 export default function ApplicantDetailModal({
   application,
@@ -79,7 +78,8 @@ export default function ApplicantDetailModal({
   };
 
   const formatMoney = (val, curr = 'USD') => {
-    return formatMoneyUtil(val, curr);
+    if (!val) return 'Not Stated';
+    return `$${Number(val).toLocaleString()} ${curr}`;
   };
 
   const resume = currentApp.resume;
@@ -260,8 +260,8 @@ export default function ApplicantDetailModal({
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 dark:text-slate-200">
                     Compensation & Experience Stated
                   </h3>
-                  <div className="text-emerald-600 dark:text-emerald-400 font-bold text-xs flex items-center gap-1.5">
-                    <span className="font-extrabold text-xs">{getCurrencySymbol(currentApp.expected_salary_currency)}</span>
+                  <div className="text-emerald-600 dark:text-emerald-400 font-bold text-xs flex items-center gap-1">
+                    <DollarSign className="w-3.5 h-3.5" />
                     <span>Expected: {formatMoney(currentApp.expected_salary, currentApp.expected_salary_currency)}</span>
                   </div>
                 </div>

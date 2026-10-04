@@ -5,22 +5,6 @@ import {
   DollarSign, ShieldCheck, Trash2, Plus, HelpCircle, Eye, Check,
   GraduationCap, Award, FolderGit2, Code2
 } from 'lucide-react';
-import { getCurrencySymbol, formatMoney as formatMoneyUtil, formatSalaryRange } from '../../utils/currency';
-
-// Safely extract error message from a fetch response that may not be JSON
-async function extractErrorMessage(res) {
-  try {
-    const text = await res.text();
-    try {
-      const json = JSON.parse(text);
-      return json.detail || json.message || text;
-    } catch {
-      return text;
-    }
-  } catch {
-    return 'Server error';
-  }
-}
 
 export default function ApplicationWizard({ job, authUser, isOpen, onClose, onApplicationSubmitted }) {
   if (!isOpen || !job) return null;
@@ -100,9 +84,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
     };
   }, [cameraStream]);
 
-  // Format currency — delegates to the shared utility for correct symbols
+  // Format currency
   const formatMoney = (val, curr = 'USD') => {
-    return formatMoneyUtil(val, curr);
+    if (!val) return '$0';
+    return `$${Number(val).toLocaleString()} ${curr}`;
   };
 
   // -------------------------------------------------------------
@@ -146,8 +131,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
         });
 
         if (!res.ok) {
-          const errMsg = await extractErrorMessage(res);
-          throw new Error(errMsg || 'Failed to create application draft');
+          const errData = await res.json();
+          throw new Error(errData.detail || 'Failed to create application draft');
         }
 
         const appData = await res.json();
@@ -205,8 +190,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
       });
 
       if (!res.ok) {
-        const errMsg = await extractErrorMessage(res);
-        throw new Error(errMsg || 'Resume parsing encountered an error');
+        const err = await res.json();
+        throw new Error(err.detail || 'Resume parsing encountered an error');
       }
 
       setUploadProgress(100);
@@ -285,8 +270,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
       });
 
       if (!res.ok) {
-        const errMsg = await extractErrorMessage(res);
-        throw new Error(errMsg || 'Failed to save resume corrections');
+        const err = await res.json();
+        throw new Error(err.detail || 'Failed to save resume corrections');
       }
 
       const updated = await res.json();
@@ -575,8 +560,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
       });
 
       if (!res.ok) {
-        const errMsg = await extractErrorMessage(res);
-        throw new Error(errMsg || 'Failed to save identity verification');
+        const err = await res.json();
+        throw new Error(err.detail || 'Failed to save identity verification');
       }
 
       setCurrentStep(6);
@@ -613,8 +598,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
       });
 
       if (!res.ok) {
-        const errMsg = await extractErrorMessage(res);
-        throw new Error(errMsg || 'Failed to finalize application submission');
+        const err = await res.json();
+        throw new Error(err.detail || 'Failed to finalize application submission');
       }
 
       const submittedApp = await res.json();
@@ -658,7 +643,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Offered: {formatSalaryRange(job.salary_range_min, job.salary_range_max, job.salary_currency)} · {job.interview_duration_mins}m AI Voice Session
+                Offered: {job.salary_range_min ? `$${Number(job.salary_range_min).toLocaleString()} - $${Number(job.salary_range_max).toLocaleString()} ${job.salary_currency}` : 'Competitive'} · {job.interview_duration_mins}m AI Voice Session
               </p>
             </div>
           </div>
