@@ -5,6 +5,7 @@ import {
   DollarSign, ShieldCheck, Trash2, Plus, HelpCircle, Eye, Check,
   GraduationCap, Award, FolderGit2, Code2
 } from 'lucide-react';
+import { formatMoney, formatSalaryRange } from '../../utils/currency';
 
 export default function ApplicationWizard({ job, authUser, isOpen, onClose, onApplicationSubmitted }) {
   if (!isOpen || !job) return null;
@@ -83,12 +84,6 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
       }
     };
   }, [cameraStream]);
-
-  // Format currency
-  const formatMoney = (val, curr = 'USD') => {
-    if (!val) return '$0';
-    return `$${Number(val).toLocaleString()} ${curr}`;
-  };
 
   // -------------------------------------------------------------
   // STEP 1 -> STEP 2: Create initial Draft Application in Backend
@@ -643,7 +638,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Offered: {job.salary_range_min ? `$${Number(job.salary_range_min).toLocaleString()} - $${Number(job.salary_range_max).toLocaleString()} ${job.salary_currency}` : 'Competitive'} · {job.interview_duration_mins}m AI Voice Session
+                Offered: {formatSalaryRange(job.salary_range_min, job.salary_range_max, job.salary_currency)} · {job.interview_duration_mins}m AI Voice Session
               </p>
             </div>
           </div>
@@ -2000,4 +1995,3 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
     </div>
   );
 }
-

@@ -176,7 +176,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
               </p>
               <p className="text-xs text-slate-300 pt-1">
                 {applications.length > 0
-                  ? 'Your AI-guided voice interview is calibrated against clear rubric standards. Review role details, verify readiness, and enter your session.'
+                  ? 'Review the role details, verify your device readiness, and enter your scheduled session.'
                   : 'You have not submitted any applications yet. Browse open positions configured by hiring teams, apply, and complete your evaluation.'}
               </p>
             </div>
@@ -313,7 +313,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         {!loading && activeJob && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
             
-            {/* Left Column: Application Details & Rubric Blueprint (7 cols) */}
+            {/* Left Column: Application Details & Skills (7 cols) */}
             <div className="lg:col-span-7 space-y-6">
               <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-6">
                 <div className="flex items-start justify-between gap-4">
@@ -353,74 +353,32 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
                     <div className="text-slate-400">Experience Bar</div>
                     <div className="font-bold text-slate-800 dark:text-slate-200 mt-0.5">{activeJob.total_experience_years}+ Years</div>
                   </div>
-                  <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800">
-                    <div className="text-slate-400">Integrity Tier</div>
-                    <div className="font-bold text-slate-800 dark:text-slate-200 mt-0.5">{activeJob.integrity_policy_tier}</div>
-                  </div>
-                  <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800">
-                    <div className="text-slate-400">Pacing Profile</div>
-                    <div className="font-bold text-slate-800 dark:text-slate-200 mt-0.5">{activeJob.pacing_strictness}</div>
-                  </div>
                 </div>
 
-                {/* Evaluated Skills & Target Rubrics */}
+                {/* Skills needed for the role; rubric anchors remain recruiter-only. */}
                 <div className="space-y-3 pt-2">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between">
-                    <span>What You'll Be Evaluated On ({activeJob.skills?.length || 0} Core Dimensions)</span>
-                    <span className="text-[10px] text-indigo-500 font-semibold">Calibrated Rubrics L1-L5</span>
+                    <span>Skills Needed for This Role ({activeJob.skills?.length || 0})</span>
                   </h3>
 
                   <div className="space-y-2.5">
                     {activeJob.skills?.map((skill) => (
                       <div
                         key={skill.id}
-                        className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/70 dark:border-slate-800 space-y-2"
+                        className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/70 dark:border-slate-800"
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <span className={`text-[10px] font-black px-2 py-0.5 rounded-md ${
-                              skill.priority_tier === 'P0'
-                                ? 'bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800'
-                                : 'bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800'
-                            }`}>
-                              {skill.priority_tier}
-                            </span>
                             <span className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
                               {skill.name}
                             </span>
                           </div>
-                          <span className="text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400">
-                            {skill.weight_percentage}% weight
-                          </span>
-                        </div>
-
-                        {/* Benchmark rubric highlight */}
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900/80 p-2.5 rounded-xl border border-slate-100 dark:border-slate-800/80">
-                          <strong className="text-slate-700 dark:text-slate-200">Target Standard (L3-L4):</strong>{' '}
-                          {skill.rubric_l3 || skill.rubric_l4 || 'Demonstrates clean production reasoning, optimal space/time bounds, and explicit architectural trade-offs.'}
                         </div>
                       </div>
                     ))}
                   </div>
                 </div>
 
-                {/* Question Allocation Overview */}
-                {activeJob.question_plans && activeJob.question_plans.length > 0 && (
-                  <div className="p-4 rounded-2xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50 space-y-2">
-                    <div className="flex items-center justify-between text-xs font-bold text-indigo-900 dark:text-indigo-200">
-                      <span>Mathematical Interview Budget</span>
-                      <span>~2.0 min per cycle</span>
-                    </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-[11px]">
-                      {activeJob.question_plans.map((p) => (
-                        <div key={p.id} className="bg-white dark:bg-slate-900 p-2 rounded-xl border border-indigo-100/60 dark:border-indigo-900/40">
-                          <div className="font-semibold text-slate-800 dark:text-slate-200 truncate">{p.skill_name}</div>
-                          <div className="text-indigo-600 dark:text-indigo-400 font-bold">{p.allocated_questions} questions ({p.time_allocation_minutes}m)</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
             </div>
 
@@ -588,10 +546,10 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
 
             <div className="space-y-2">
               <h3 className="text-2xl font-black text-slate-900 dark:text-white">
-                AI Voice Interview Room Calibrated
+                AI Voice Interview Ready
               </h3>
               <p className="text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-                The autonomous AI interviewer is queued with {activeJob?.skills?.length || 4} rubric dimensions for{' '}
+                Your session is prepared for the skills listed for{' '}
                 <strong className="text-slate-800 dark:text-slate-200">{activeJob?.job_title}</strong>.
               </p>
             </div>
@@ -600,8 +558,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
               <div className="font-bold text-slate-700 dark:text-slate-300">Live Session Rules:</div>
               <ul className="space-y-1 text-slate-500 dark:text-slate-400 list-disc list-inside">
                 <li>Speak naturally; the AI adapts pacing and probes deeper based on your answers.</li>
-                <li>You have {activeJob?.interview_duration_mins || 20} minutes with grace extension permitted.</li>
-                <li>Proctoring integrity checks run continuously in the background.</li>
+                <li>You have {activeJob?.interview_duration_mins || 20} minutes for the session.</li>
               </ul>
             </div>
 
@@ -625,4 +582,3 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     </div>
   );
 }
-

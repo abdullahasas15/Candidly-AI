@@ -5,6 +5,7 @@ import {
   RefreshCw, Check
 } from 'lucide-react';
 import ApplicantDetailModal from './ApplicantDetailModal';
+import { formatMoney } from '../../utils/currency';
 
 export default function JobDetailModal({ job, isOpen, onClose }) {
   if (!isOpen || !job) return null;
@@ -18,7 +19,10 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
     if (!job?.id) return;
     setLoadingApplicants(true);
     try {
-      const res = await fetch(`/api/jobs/${job.id}/applications`);
+      const token = localStorage.getItem('candidly-auth-token');
+      const res = await fetch(`/api/jobs/${job.id}/applications`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      });
       if (res.ok) {
         const data = await res.json();
         setApplicants(data);
@@ -38,11 +42,6 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
     setApplicants((prev) =>
       prev.map((app) => (app.id === updatedApp.id ? updatedApp : app))
     );
-  };
-
-  const formatMoney = (val, curr = 'USD') => {
-    if (!val) return 'Not Stated';
-    return `$${Number(val).toLocaleString()} ${curr}`;
   };
 
   const getStatusBadge = (status) => {

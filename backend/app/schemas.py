@@ -18,8 +18,8 @@ class SkillResponse(BaseModel):
     job_id: str
     name: str
     category: str
-    priority_tier: str
-    weight_percentage: float
+    priority_tier: Optional[str] = None
+    weight_percentage: Optional[float] = None
     rubric_l1: Optional[str] = None
     rubric_l2: Optional[str] = None
     rubric_l3: Optional[str] = None
@@ -61,7 +61,7 @@ class CustomQuestionResponse(BaseModel):
     category: str
     difficulty_level: str
     expected_key_points: List[str] = []
-    priority_tier: str
+    priority_tier: Optional[str] = None
     question_type: str = "text"
     is_required: bool = True
     options: List[str] = []
@@ -141,32 +141,41 @@ class JobResponse(BaseModel):
     employment_type: str
     workplace_model: str
     permitted_locations: List[str]
-    min_degree_level: str
-    degree_enforcement_type: str
-    accepted_majors: List[str]
-    min_cgpa: str
-    cgpa_strict_filter: bool
+    min_degree_level: Optional[str] = None
+    degree_enforcement_type: Optional[str] = None
+    accepted_majors: List[str] = []
+    min_cgpa: Optional[str] = None
+    cgpa_strict_filter: Optional[bool] = None
     grad_year_start: Optional[int] = None
     grad_year_end: Optional[int] = None
-    total_experience_years: float
-    domain_experience_years: float
-    leadership_required: bool
-    interview_duration_mins: int
-    allow_grace_extension: bool
-    max_followup_depth: int
-    pacing_strictness: str
-    interviewer_tone: str
-    integrity_policy_tier: str
+    total_experience_years: Optional[float] = None
+    domain_experience_years: Optional[float] = None
+    leadership_required: Optional[bool] = None
+    interview_duration_mins: Optional[int] = None
+    allow_grace_extension: Optional[bool] = None
+    max_followup_depth: Optional[int] = None
+    pacing_strictness: Optional[str] = None
+    interviewer_tone: Optional[str] = None
+    integrity_policy_tier: Optional[str] = None
     salary_range_min: Optional[float] = None
     salary_range_max: Optional[float] = None
     salary_currency: Optional[str] = "USD"
     recruiter_id: Optional[str] = None
-    status: str
-    created_at: datetime
+    status: str = "active"
+    created_at: Optional[datetime] = None
     skills: List[SkillResponse] = []
     certifications: List[CertificationResponse] = []
     custom_questions: List[CustomQuestionResponse] = []
     question_plans: List[QuestionPlanResponse] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+class CandidateApplicationPublicResponse(BaseModel):
+    id: str
+    job_id: str
+    status: str
+    applied_at: datetime
+    job: Optional[JobResponse] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -432,6 +441,3 @@ class InterviewSessionResponse(BaseModel):
     questions: List[InterviewQuestionResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
-
-
-

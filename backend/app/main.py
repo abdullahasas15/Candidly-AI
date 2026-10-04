@@ -20,7 +20,7 @@ from backend.app.schemas import (
     JobApplicationCreate, JobApplicationUpdate, JobApplicationResponse, JobApplicationListItem,
     CandidateResumeResponse, ResumeDiscrepancyFlagResponse, CandidateIdVerificationResponse,
     TokenResponse, InterviewSessionCreate, InterviewSessionResponse,
-    InterviewQuestionCreate, InterviewQuestionResponse
+    InterviewQuestionCreate, InterviewQuestionResponse, CandidateApplicationPublicResponse
 )
 from backend.app.budgeting import calculate_question_budget
 from backend.app.services.auth import (
@@ -79,6 +79,57 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def _public_job_payload(job: JobPosting) -> dict:
+    """Return only role information intended for candidate-facing clients."""
+    return {
+        "id": job.id,
+        "job_title": job.job_title,
+        "department": job.department,
+        "job_description": job.job_description,
+        "seniority_level": job.seniority_level,
+        "employment_type": job.employment_type,
+        "workplace_model": job.workplace_model,
+        "permitted_locations": job.permitted_locations or [],
+        "min_degree_level": job.min_degree_level,
+        "degree_enforcement_type": job.degree_enforcement_type,
+        "accepted_majors": job.accepted_majors or [],
+        "min_cgpa": job.min_cgpa,
+        "cgpa_strict_filter": job.cgpa_strict_filter,
+        "grad_year_start": job.grad_year_start,
+        "grad_year_end": job.grad_year_end,
+        "total_experience_years": job.total_experience_years,
+        "domain_experience_years": job.domain_experience_years,
+        "leadership_required": job.leadership_required,
+        "interview_duration_mins": job.interview_duration_mins,
+        "salary_range_min": job.salary_range_min,
+        "salary_range_max": job.salary_range_max,
+        "salary_currency": job.salary_currency or "USD",
+        "status": job.status,
+        "created_at": job.created_at,
+        "skills": [
+            {
+                "id": skill.id,
+                "job_id": skill.job_id,
+                "name": skill.name,
+                "category": skill.category,
+            }
+            for skill in (job.skills or [])
+        ],
+        "custom_questions": [
+            {
+                "id": question.id,
+                "job_id": question.job_id,
+                "question_text": question.question_text,
+                "category": question.category,
+                "difficulty_level": question.difficulty_level,
+                "question_type": question.question_type,
+                "is_required": question.is_required,
+                "options": question.options or [],
+            }
+            for question in (job.custom_questions or [])
+        ],
+    }
+
 @app.get("/api/health")
 async def health_check():
     return {
@@ -88,7 +139,11 @@ async def health_check():
     }
 
 @app.get("/api/jobs", response_model=List[JobResponse])
-async def list_jobs(db: AsyncSession = Depends(get_db)):
+async def list_jobs(
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    is_recruiter = current_user and current_user.role == "recruiter"
     stmt = (
         select(JobPosting)
         .options(
@@ -99,12 +154,22 @@ async def list_jobs(db: AsyncSession = Depends(get_db)):
         )
         .order_by(JobPosting.created_at.desc())
     )
+    if is_recruiter:
+        stmt = stmt.where(JobPosting.recruiter_id == current_user.id)
+    else:
+        stmt = stmt.where(JobPosting.status == "active")
     result = await db.execute(stmt)
     jobs = result.scalars().all()
-    return jobs
+    if is_recruiter:
+        return jobs
+    return [_public_job_payload(job) for job in jobs]
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
+async def get_job(
+    job_id: str,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     stmt = (
         select(JobPosting)
         .where(JobPosting.id == job_id)
@@ -119,12 +184,18 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     job = result.scalars().first()
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
-    return job
+    if current_user and current_user.role == "recruiter":
+        if job.recruiter_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Job posting not found")
+        return job
+    if job.status != "active":
+        raise HTTPException(status_code=404, detail="Job posting not found")
+    return _public_job_payload(job)
 
 @app.post("/api/jobs", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
 async def create_job(
     payload: JobCreate,
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: User = Depends(require_role("recruiter")),
     db: AsyncSession = Depends(get_db)
 ):
     # 1. Create JobPosting instance
@@ -133,6 +204,7 @@ async def create_job(
         job_title=payload.job_title,
         recruiter_id=recruiter_id,
         department=payload.department,
+        job_description=payload.job_description.strip() or "N/A",
         seniority_level=payload.seniority_level,
         employment_type=payload.employment_type,
         workplace_model=payload.workplace_model,
@@ -224,14 +296,20 @@ async def create_job(
     await db.commit()
 
     # Refresh with relations loaded
-    return await get_job(job.id, db)
+    return await get_job(job.id, current_user=current_user, db=db)
 
 @app.delete("/api/jobs/{job_id}")
-async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_job(
+    job_id: str,
+    current_user: User = Depends(require_role("recruiter")),
+    db: AsyncSession = Depends(get_db)
+):
     stmt = select(JobPosting).where(JobPosting.id == job_id)
     result = await db.execute(stmt)
     job = result.scalars().first()
     if not job:
+        raise HTTPException(status_code=404, detail="Job posting not found")
+    if job.recruiter_id != current_user.id:
         raise HTTPException(status_code=404, detail="Job posting not found")
     await db.delete(job)
     await db.commit()
@@ -391,23 +469,15 @@ async def get_me(
 # Candidate Portal & Application Endpoints
 # ---------------------------------------------------------
 
-@app.get("/api/candidate/applications", response_model=List[JobApplicationResponse])
+@app.get("/api/candidate/applications", response_model=List[CandidateApplicationPublicResponse])
 async def list_candidate_applications(
-    user_id: Optional[str] = None,
-    email: Optional[str] = None,
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: User = Depends(require_role("candidate")),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Retrieve applications for the candidate.
     NEVER automatically applies candidate to any job. Returns empty list if no applications submitted.
     """
-    target_user_id = user_id or (current_user.id if current_user else None)
-    target_email = email or (current_user.email if current_user else None)
-
-    if not target_user_id and not target_email:
-        return []
-
     stmt = (
         select(JobApplication)
         .options(
@@ -422,19 +492,20 @@ async def list_candidate_applications(
         .order_by(JobApplication.applied_at.desc())
     )
 
-    if target_user_id and target_email:
-        stmt = stmt.where(
-            (JobApplication.candidate_id == target_user_id) |
-            (JobApplication.email.ilike(target_email))
-        )
-    elif target_user_id:
-        stmt = stmt.where(JobApplication.candidate_id == target_user_id)
-    else:
-        stmt = stmt.where(JobApplication.email.ilike(target_email))
+    stmt = stmt.where(JobApplication.candidate_id == current_user.id)
 
     result = await db.execute(stmt)
     applications = result.scalars().all()
-    return applications
+    return [
+        {
+            "id": app.id,
+            "job_id": app.job_id,
+            "status": app.status,
+            "applied_at": app.applied_at,
+            "job": _public_job_payload(app.job),
+        }
+        for app in applications
+    ]
 
 
 @app.post("/api/candidate/apply/{job_id}", response_model=JobApplicationResponse)
@@ -853,7 +924,19 @@ async def finalize_application_submission(
 
 
 @app.get("/api/jobs/{job_id}/applications", response_model=List[JobApplicationResponse])
-async def list_job_applications(job_id: str, db: AsyncSession = Depends(get_db)):
+async def list_job_applications(
+    job_id: str,
+    current_user: User = Depends(require_role("recruiter")),
+    db: AsyncSession = Depends(get_db)
+):
+    job_stmt = select(JobPosting).where(
+        JobPosting.id == job_id,
+        JobPosting.recruiter_id == current_user.id
+    )
+    job_result = await db.execute(job_stmt)
+    if not job_result.scalars().first():
+        raise HTTPException(status_code=404, detail="Job posting not found")
+
     stmt = (
         select(JobApplication)
         .where(JobApplication.job_id == job_id)
@@ -870,9 +953,19 @@ async def list_job_applications(job_id: str, db: AsyncSession = Depends(get_db))
 
 
 @app.get("/api/applications/{application_id}", response_model=JobApplicationResponse)
-async def get_application(application_id: str, db: AsyncSession = Depends(get_db)):
+async def get_application(
+    application_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     app = await get_application_with_relations(application_id, db)
     if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+    is_owner = (
+        (current_user.role == "recruiter" and app.job and app.job.recruiter_id == current_user.id)
+        or (current_user.role == "candidate" and app.candidate_id == current_user.id)
+    )
+    if not is_owner:
         raise HTTPException(status_code=404, detail="Application not found")
     return app
 
@@ -916,5 +1009,3 @@ async def update_application_status(
     app.status = new_status
     await db.commit()
     return await get_application_with_relations(application_id, db)
-
-

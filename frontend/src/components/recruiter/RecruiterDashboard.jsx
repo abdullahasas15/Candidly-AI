@@ -6,6 +6,7 @@ import {
 import Logo from '../Logo';
 import JobCreationModal from './JobCreationModal';
 import JobDetailModal from './JobDetailModal';
+import { formatSalaryRange } from '../../utils/currency';
 
 export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOut }) {
   const [jobs, setJobs] = useState([]);
@@ -47,7 +48,11 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
     e.stopPropagation();
     if (!window.confirm('Are you sure you want to delete this job posting?')) return;
     try {
-      const res = await fetch(`/api/jobs/${jobId}`, { method: 'DELETE' });
+      const token = localStorage.getItem('candidly-auth-token');
+      const res = await fetch(`/api/jobs/${jobId}`, {
+        method: 'DELETE',
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      });
       if (res.ok) {
         setJobs((prev) => prev.filter((j) => j.id !== jobId));
       }
@@ -347,7 +352,7 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
                         <>
                           <span>•</span>
                           <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                            ${Number(job.salary_range_min).toLocaleString()} - ${Number(job.salary_range_max).toLocaleString()} {job.salary_currency}
+                            {formatSalaryRange(job.salary_range_min, job.salary_range_max, job.salary_currency)}
                           </span>
                         </>
                       )}
@@ -422,4 +427,3 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
     </div>
   );
 }
-

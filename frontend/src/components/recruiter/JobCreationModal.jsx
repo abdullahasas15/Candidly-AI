@@ -16,6 +16,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
     // 1. Role Metadata
     job_title: '',
     department: '',
+    job_description: '',
     seniority_level: 'Mid-Level (L4)',
     employment_type: 'Full-Time',
     workplace_model: 'Remote',
@@ -276,6 +277,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
       const payload = {
         job_title: formData.job_title.trim(),
         department: formData.department.trim(),
+        job_description: formData.job_description.trim() || 'N/A',
         seniority_level: formData.seniority_level,
         employment_type: formData.employment_type,
         workplace_model: formData.workplace_model,
@@ -460,6 +462,22 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     onChange={(e) => setFormData({ ...formData, department: e.target.value })}
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500"
                   />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Job Description
+                  </label>
+                  <textarea
+                    rows={5}
+                    placeholder="Describe the role, key responsibilities, required qualifications, and preferred qualifications."
+                    value={formData.job_description}
+                    onChange={(e) => setFormData({ ...formData, job_description: e.target.value })}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500 resize-y"
+                  />
+                  <span className="text-[11px] text-slate-400 mt-1 block">
+                    Shown to candidates as the role overview and used as context for the AI interviewer.
+                  </span>
                 </div>
 
                 <div>
@@ -1264,4 +1282,3 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
     </div>
   );
 }
-

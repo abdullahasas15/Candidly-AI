@@ -4,6 +4,7 @@ import {
   ChevronRight, ArrowRight, ShieldCheck, CheckCircle2, Sparkles,
   X, Filter, Building2, BookOpen
 } from 'lucide-react';
+import { formatSalaryRange } from '../../utils/currency';
 
 export default function CandidateJobListing({ onSelectJobForApplication }) {
   const [jobs, setJobs] = useState([]);
@@ -39,21 +40,6 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
     fetchJobs();
   }, []);
 
-  const formatSalary = (min, max, currency = 'USD') => {
-    if (!min && !max) return 'Competitive compensation';
-    const currSymbol = currency === 'USD' || currency === 'CAD' || currency === 'AUD' || currency === 'SGD' ? '$'
-      : currency === 'EUR' ? '€'
-      : currency === 'GBP' ? '£'
-      : currency === 'INR' ? '₹'
-      : `${currency} `;
-
-    if (min && max) {
-      return `${currSymbol}${Number(min).toLocaleString()} - ${currSymbol}${Number(max).toLocaleString()} ${currency}`;
-    }
-    if (min) return `From ${currSymbol}${Number(min).toLocaleString()} ${currency}`;
-    return `Up to ${currSymbol}${Number(max).toLocaleString()} ${currency}`;
-  };
-
   // Filtered jobs
   const departments = ['All', ...new Set(jobs.map((j) => j.department).filter(Boolean))];
   const workplaces = ['All', 'Remote', 'Hybrid', 'On-site'];
@@ -87,7 +73,7 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
             Explore Open Engineering Positions
           </h2>
           <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400">
-            Every position features calibrated 5-tier rubrics, transparent salary bands, and AI voice interviews.
+            Review the role description, requirements, compensation, and skills before applying.
           </p>
         </div>
 
@@ -203,7 +189,7 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                     <div>
                       <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Offered Salary Band</div>
                       <div className="text-xs font-black text-emerald-700 dark:text-emerald-300">
-                        {formatSalary(job.salary_range_min, job.salary_range_max, job.salary_currency)}
+                        {formatSalaryRange(job.salary_range_min, job.salary_range_max, job.salary_currency)}
                       </div>
                     </div>
                   </div>
@@ -223,19 +209,15 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                 {/* Skills strip */}
                 <div className="space-y-1 pt-2 border-t border-slate-100 dark:border-slate-800">
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    Evaluated Competencies ({job.skills?.length || 0})
+                    Skills Needed ({job.skills?.length || 0})
                   </div>
                   <div className="flex flex-wrap gap-1.5">
                     {job.skills?.slice(0, 4).map((s, idx) => (
                       <span
                         key={idx}
-                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${
-                          s.priority_tier === 'P0'
-                            ? 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900'
-                            : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
-                        }`}
+                        className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
                       >
-                        {s.name} ({s.weight_percentage}%)
+                        {s.name}
                       </span>
                     ))}
                     {(job.skills?.length || 0) > 4 && (
@@ -293,7 +275,7 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                   {inspectingJob.job_title}
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {inspectingJob.interview_duration_mins} Minutes AI Voice Evaluation · {inspectingJob.pacing_strictness} Pacing · {inspectingJob.integrity_policy_tier} Proctoring
+                  {inspectingJob.interview_duration_mins} minute session
                 </p>
               </div>
 
@@ -386,41 +368,26 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                 </div>
               </div>
 
-              {/* Evaluated Competencies & 5-Level Rubrics */}
+              {/* Skills needed for the role; recruiter-only rubric anchors are intentionally omitted. */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white">
                     <Layers className="w-4 h-4 text-indigo-600" />
-                    <span>Calibrated Competency Dimensions</span>
+                    <span>Skills Needed for This Role</span>
                   </div>
-                  <span className="text-[11px] font-semibold text-slate-400">Targeting L3 (Proficient) Baseline</span>
                 </div>
 
                 <div className="space-y-3">
                   {inspectingJob.skills?.map((skill, idx) => (
                     <div
                       key={idx}
-                      className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-2"
+                      className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800"
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <span className={`text-[10px] font-black px-2 py-0.5 rounded ${
-                            skill.priority_tier === 'P0'
-                              ? 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
-                              : 'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300'
-                          }`}>
-                            {skill.priority_tier} {skill.priority_tier === 'P0' ? 'Mandatory' : 'Core'}
-                          </span>
                           <span className="font-bold text-slate-900 dark:text-white text-sm">{skill.name}</span>
                           <span className="text-slate-400">({skill.category})</span>
                         </div>
-                        <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400">{skill.weight_percentage}%</span>
-                      </div>
-
-                      {/* L3 Rubric Highlight */}
-                      <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800/80 border border-slate-100 dark:border-slate-700 text-[11px]">
-                        <span className="font-bold text-slate-700 dark:text-slate-200 block mb-0.5">Benchmark Expectation (L3):</span>
-                        <p className="text-slate-600 dark:text-slate-300">{skill.rubric_l3 || 'Demonstrates clean production reasoning with optimal space/time bounds.'}</p>
                       </div>
                     </div>
                   ))}
@@ -458,4 +425,3 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
     </div>
   );
 }
-
