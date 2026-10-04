@@ -444,56 +444,43 @@ async def apply_to_job(
     current_user: Optional[User] = Depends(get_optional_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    try:
-        candidate_id = (payload or {}).get("user_id") or (current_user.id if current_user else None)
-        if candidate_id:
-            user_check = await db.execute(select(User).where(User.id == candidate_id))
-            if not user_check.scalars().first():
-                candidate_id = None
-        
-        # Verify job exists
-        job_stmt = select(JobPosting).where(JobPosting.id == job_id)
-        j_res = await db.execute(job_stmt)
-        job = j_res.scalars().first()
-        if not job:
-            raise HTTPException(status_code=404, detail="Job posting not found")
+    candidate_id = (payload or {}).get("user_id") or (current_user.id if current_user else None)
+    
+    # Verify job exists
+    job_stmt = select(JobPosting).where(JobPosting.id == job_id)
+    j_res = await db.execute(job_stmt)
+    job = j_res.scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job posting not found")
 
-        candidate_email = (payload or {}).get("email") or (current_user.email if current_user else "candidate@example.com")
-        candidate_name = (payload or {}).get("full_name") or (current_user.full_name if current_user else "Applicant")
+    candidate_email = (payload or {}).get("email") or (current_user.email if current_user else "candidate@example.com")
+    candidate_name = (payload or {}).get("full_name") or (current_user.full_name if current_user else "Applicant")
 
-        # Check existing application
-        app_stmt = select(JobApplication).where(
-            JobApplication.job_id == job_id,
-            (JobApplication.candidate_id == candidate_id) if candidate_id else (JobApplication.email.ilike(candidate_email))
-        )
-        existing_res = await db.execute(app_stmt)
-        existing = existing_res.scalars().first()
-        if existing:
-            return await get_application_with_relations(existing.id, db)
+    # Check existing application
+    app_stmt = select(JobApplication).where(
+        JobApplication.job_id == job_id,
+        (JobApplication.candidate_id == candidate_id) | (JobApplication.email.ilike(candidate_email))
+    )
+    existing_res = await db.execute(app_stmt)
+    existing = existing_res.scalars().first()
+    if existing:
+        return await get_application_with_relations(existing.id, db)
 
-        new_app = JobApplication(
-            job_id=job_id,
-            candidate_id=candidate_id,
-            full_name=candidate_name,
-            email=candidate_email,
-            status="submitted",
-            self_reported_experience_years=(payload or {}).get("self_reported_experience_years", 3.0),
-            fit_pitch=(payload or {}).get("fit_pitch", "Excited to apply and interview for this role."),
-            expected_salary=(payload or {}).get("expected_salary", job.salary_range_min or 120000.0),
-            expected_salary_currency=job.salary_currency or "USD"
-        )
-        db.add(new_app)
-        await db.commit()
+    new_app = JobApplication(
+        job_id=job_id,
+        candidate_id=candidate_id,
+        full_name=candidate_name,
+        email=candidate_email,
+        status="submitted",
+        self_reported_experience_years=(payload or {}).get("self_reported_experience_years", 3.0),
+        fit_pitch=(payload or {}).get("fit_pitch", "Excited to apply and interview for this role."),
+        expected_salary=(payload or {}).get("expected_salary", job.salary_range_min or 120000.0),
+        expected_salary_currency=job.salary_currency or "USD"
+    )
+    db.add(new_app)
+    await db.commit()
 
-        return await get_application_with_relations(new_app.id, db)
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to apply for job: {str(e)}"
-        )
+    return await get_application_with_relations(new_app.id, db)
 
 
 # ---------------------------------------------------------
@@ -526,69 +513,32 @@ async def create_application(
     current_user: Optional[User] = Depends(get_optional_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    try:
-        # Verify target job exists
-        job_stmt = select(JobPosting).where(JobPosting.id == payload.job_id)
-        j_res = await db.execute(job_stmt)
-        job = j_res.scalars().first()
-        if not job:
-            raise HTTPException(status_code=404, detail="Target job posting not found")
+    # Verify target job exists
+    job_stmt = select(JobPosting).where(JobPosting.id == payload.job_id)
+    j_res = await db.execute(job_stmt)
+    job = j_res.scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Target job posting not found")
 
-        candidate_id = payload.candidate_id or (current_user.id if current_user else None)
-        if candidate_id:
-            user_check = await db.execute(select(User).where(User.id == candidate_id))
-            if not user_check.scalars().first():
-                # Check if there is a user matching this email
-                user_by_email = await db.execute(select(User).where(User.email.ilike(payload.email.strip())))
-                matched = user_by_email.scalars().first()
-                candidate_id = matched.id if matched else None
+    candidate_id = payload.candidate_id or (current_user.id if current_user else None)
 
-        # Check existing application for this job and candidate/email
-        existing_stmt = select(JobApplication).where(
-            JobApplication.job_id == payload.job_id,
-            (JobApplication.email.ilike(payload.email.strip().lower())) |
-            ((JobApplication.candidate_id == candidate_id) if candidate_id else False)
-        )
-        existing_res = await db.execute(existing_stmt)
-        existing_app = existing_res.scalars().first()
-        if existing_app:
-            existing_app.full_name = payload.full_name.strip()
-            if payload.phone:
-                existing_app.phone = payload.phone.strip()
-            if payload.linkedin_url:
-                existing_app.linkedin_url = payload.linkedin_url.strip()
-            if payload.portfolio_url:
-                existing_app.portfolio_url = payload.portfolio_url.strip()
-            if candidate_id:
-                existing_app.candidate_id = candidate_id
-            await db.commit()
-            return await get_application_with_relations(existing_app.id, db)
-
-        app = JobApplication(
-            job_id=payload.job_id,
-            candidate_id=candidate_id,
-            full_name=payload.full_name.strip(),
-            email=payload.email.strip().lower(),
-            phone=payload.phone.strip() if payload.phone else None,
-            linkedin_url=payload.linkedin_url.strip() if payload.linkedin_url else None,
-            portfolio_url=payload.portfolio_url.strip() if payload.portfolio_url else None,
-            status="submitted",
-            self_reported_experience_years=payload.self_reported_experience_years,
-            fit_pitch=payload.fit_pitch,
-            expected_salary=payload.expected_salary,
-            expected_salary_currency=payload.expected_salary_currency or (job.salary_currency if job else "USD") or "USD"
-        )
-        db.add(app)
-        await db.commit()
-        return await get_application_with_relations(app.id, db)
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create application draft: {str(e)}"
-        )
+    app = JobApplication(
+        job_id=payload.job_id,
+        candidate_id=candidate_id,
+        full_name=payload.full_name.strip(),
+        email=payload.email.strip().lower(),
+        phone=payload.phone.strip() if payload.phone else None,
+        linkedin_url=payload.linkedin_url.strip() if payload.linkedin_url else None,
+        portfolio_url=payload.portfolio_url.strip() if payload.portfolio_url else None,
+        status="submitted",
+        self_reported_experience_years=payload.self_reported_experience_years,
+        fit_pitch=payload.fit_pitch,
+        expected_salary=payload.expected_salary,
+        expected_salary_currency=payload.expected_salary_currency or "USD"
+    )
+    db.add(app)
+    await db.commit()
+    return await get_application_with_relations(app.id, db)
 
 
 @app.post("/api/applications/{application_id}/resume")

@@ -50,6 +50,9 @@ class CustomQuestionCreate(BaseModel):
     difficulty_level: str = "Mid-Senior"
     expected_key_points: List[str] = []
     priority_tier: str = "P0"
+    question_type: str = "text" # text, textarea, yes_no, single_choice
+    is_required: bool = True
+    options: List[str] = []
 
 class CustomQuestionResponse(BaseModel):
     id: str
@@ -59,6 +62,9 @@ class CustomQuestionResponse(BaseModel):
     difficulty_level: str
     expected_key_points: List[str] = []
     priority_tier: str
+    question_type: str = "text"
+    is_required: bool = True
+    options: List[str] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -78,6 +84,7 @@ class JobCreate(BaseModel):
     # Role Identity & Metadata
     job_title: str
     department: str
+    job_description: str = "N/A"
     seniority_level: str = "Mid-Level (L4)"
     employment_type: str = "Full-Time"
     workplace_model: str = "Remote"
@@ -129,6 +136,7 @@ class JobResponse(BaseModel):
     id: str
     job_title: str
     department: str
+    job_description: str = "N/A"
     seniority_level: str
     employment_type: str
     workplace_model: str
@@ -303,6 +311,9 @@ class JobApplicationCreate(BaseModel):
     fit_pitch: Optional[str] = None
     expected_salary: Optional[float] = None
     expected_salary_currency: str = "USD"
+    screening_answers: List[Dict[str, Any]] = []
+    work_authorization: Optional[str] = "Authorized"
+    visa_sponsorship_needed: bool = False
 
 class JobApplicationUpdate(BaseModel):
     full_name: Optional[str] = None
@@ -315,6 +326,9 @@ class JobApplicationUpdate(BaseModel):
     expected_salary: Optional[float] = None
     expected_salary_currency: Optional[str] = None
     status: Optional[str] = None
+    screening_answers: Optional[List[Dict[str, Any]]] = None
+    work_authorization: Optional[str] = None
+    visa_sponsorship_needed: Optional[bool] = None
 
 class JobApplicationResponse(BaseModel):
     id: str
@@ -331,6 +345,9 @@ class JobApplicationResponse(BaseModel):
     fit_pitch: Optional[str] = None
     expected_salary: Optional[float] = None
     expected_salary_currency: str
+    screening_answers: List[Dict[str, Any]] = []
+    work_authorization: Optional[str] = "Authorized"
+    visa_sponsorship_needed: bool = False
     created_at: datetime
     updated_at: datetime
 

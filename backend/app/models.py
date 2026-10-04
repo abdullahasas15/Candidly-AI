@@ -12,6 +12,7 @@ class JobPosting(Base):
     # 1. Role Identity & Metadata Fields
     job_title = Column(String(255), nullable=False)
     department = Column(String(255), nullable=False)
+    job_description = Column(Text, default="N/A", nullable=False)
     seniority_level = Column(String(100), nullable=False, default="Mid-Level (L4)") # Intern, Entry-Level (L3), Mid-Level (L4), Senior (L5), Lead
     employment_type = Column(String(100), nullable=False, default="Full-Time") # Full-Time, Part-Time, Contract, Internship
     workplace_model = Column(String(100), nullable=False, default="Remote") # Remote, Hybrid, On-site
@@ -105,6 +106,9 @@ class JobCustomQuestion(Base):
     difficulty_level = Column(String(50), default="Mid-Senior")
     expected_key_points = Column(JSON, default=list) # Array of 3-4 bullet points
     priority_tier = Column(String(20), default="P0")
+    question_type = Column(String(50), default="text") # text, textarea, yes_no, single_choice
+    is_required = Column(Boolean, default=True)
+    options = Column(JSON, default=list) # Options for single_choice/multiple_choice
 
     job = relationship("JobPosting", back_populates="custom_questions")
 
@@ -179,6 +183,11 @@ class JobApplication(Base):
     fit_pitch = Column(Text, nullable=True)
     expected_salary = Column(Float, nullable=True)
     expected_salary_currency = Column(String(10), default="USD")
+
+    # Application Screening & Workday/LinkedIn Compliance
+    screening_answers = Column(JSON, default=list) # [{ question_id, question_text, answer }]
+    work_authorization = Column(String(100), default="Authorized") # Authorized, Requires Sponsorship, etc.
+    visa_sponsorship_needed = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
