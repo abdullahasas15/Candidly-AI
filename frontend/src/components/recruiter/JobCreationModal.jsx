@@ -1,8 +1,281 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   X, Plus, Trash2, CheckCircle2, AlertTriangle, Clock, ShieldCheck,
-  Award, BookOpen, Briefcase, Settings2, HelpCircle, Layers, Sparkles, ArrowRight
+  Award, BookOpen, Briefcase, Settings2, HelpCircle, Layers, Sparkles,
+  ArrowRight, RefreshCw, Cpu, Database, Server, Terminal, ChevronDown, ChevronUp
 } from 'lucide-react';
+import BlueprintReviewEditor from './BlueprintReviewEditor';
+
+const VAGUE_SKILL_NAMES = new Set([
+  'projects', 'project', 'work', 'general', 'misc', 'miscellaneous',
+  'responsibilities', 'experience', 'tasks', 'duties'
+]);
+
+const SENIORITY_OPTIONS = [
+  { value: 'entry', label: 'Entry-Level (L2-L3)', shortLabel: 'Entry' },
+  { value: 'mid', label: 'Mid-Level (L3-L4)', shortLabel: 'Mid' },
+  { value: 'senior', label: 'Senior (L4-L5)', shortLabel: 'Senior' },
+  { value: 'lead', label: 'Lead / Principal (L5+)', shortLabel: 'Lead' },
+];
+
+const TEMPLATE_CARD_META = {
+  sde: {
+    icon: Terminal,
+    color: 'from-blue-600 to-indigo-600',
+    tag: 'Core Engineering',
+  },
+  ai_engineer: {
+    icon: Cpu,
+    color: 'from-purple-600 to-pink-600',
+    tag: 'GenAI & Applied ML',
+  },
+  devops: {
+    icon: Server,
+    color: 'from-amber-600 to-orange-600',
+    tag: 'Cloud & Infrastructure',
+  },
+  data_engineer: {
+    icon: Database,
+    color: 'from-emerald-600 to-teal-600',
+    tag: 'Pipelines & Warehousing',
+  },
+};
+
+const ROLE_DETAILS = {
+  sde: {
+    department: 'Core Platform & Infrastructure',
+    accepted_majors_str: 'Computer Science, Software Engineering, Computer Engineering, Electrical Engineering, Mathematics',
+    getSalary: (sen) => {
+      switch (sen) {
+        case 'entry': return { min: 105000, max: 140000 };
+        case 'senior': return { min: 180000, max: 235000 };
+        case 'lead': return { min: 230000, max: 295000 };
+        case 'mid':
+        default: return { min: 140000, max: 185000 };
+      }
+    },
+    getYoe: (sen) => {
+      switch (sen) {
+        case 'entry': return { total: 1.0, domain: 1.0, grad_start: 2022, grad_end: 2026, leadership: false };
+        case 'senior': return { total: 6.0, domain: 5.0, grad_start: 2012, grad_end: 2020, leadership: true };
+        case 'lead': return { total: 9.0, domain: 7.0, grad_start: 2008, grad_end: 2017, leadership: true };
+        case 'mid':
+        default: return { total: 3.5, domain: 2.5, grad_start: 2018, grad_end: 2023, leadership: false };
+      }
+    },
+    getDescription: (sen) => {
+      const levelLabel = sen === 'entry' ? 'Entry-Level' : sen === 'senior' ? 'Senior' : sen === 'lead' ? 'Staff / Lead' : 'Mid-Level';
+      return `### Role Overview & Mission
+We are seeking a high-caliber ${levelLabel} Software Development Engineer (SDE) to join our Core Platform team. In this role, you will design, build, and maintain high-throughput backend microservices, resilient event streaming pipelines, and clean API contracts supporting millions of daily active users.
+
+### Key Responsibilities
+- Architect, implement, and maintain reliable, scalable backend services and REST/gRPC endpoints with strict latency SLAs.
+- Optimize algorithmic complexity, database indexing, and memory allocation patterns for performance-critical hot paths.
+- Write robust, automated test suites (unit, integration, and chaos testing) to guarantee backward compatibility and zero downtime deployments.
+- Collaborate with cross-functional product, infrastructure, and security teams to translate system requirements into clean, decoupled architectures.
+- Participate in peer design reviews, observability monitoring (metrics, tracing, logs), and blameless post-mortem investigations.
+
+### Technical Requirements & Qualifications
+- Solid foundation in Computer Science fundamentals: data structures, algorithmic complexity (Big-O), concurrency, and memory management.
+- Demonstrated hands-on proficiency in modern backend languages such as Go, Python, Java, Rust, or TypeScript/Node.js.
+- Strong practical knowledge of relational (PostgreSQL, MySQL) and NoSQL (Redis, DynamoDB) datastores, caching strategies, and transaction isolation levels.
+- Familiarity with containerized workflows (Docker, Kubernetes) and CI/CD automated deployment pipelines.
+- Excellent verbal and written technical communication skills, with an emphasis on system trade-off analysis.
+
+### Technology Stack
+- Languages: Go, Python, Java, TypeScript
+- Storage: PostgreSQL, Redis, Apache Kafka
+- Infrastructure: AWS / GCP, Docker, Kubernetes, Terraform, Datadog`;
+    },
+    getScreeningQuestions: (sen) => [
+      {
+        question_text: 'Describe a complex technical challenge or distributed systems issue you investigated and resolved. Walk us through how you identified the bottleneck, the trade-offs you evaluated, and how you verified the fix.',
+        category: 'Core Technical',
+        difficulty_level: sen === 'entry' ? 'Entry' : sen === 'senior' || sen === 'lead' ? 'Senior' : 'Mid',
+        expected_key_points_str: 'Systematically isolates root cause using metrics, traces, or profiling\nExplains trade-offs between computational complexity and memory usage\nVerifies resolution with rigorous benchmark testing or automated regression suites',
+        priority_tier: 'P0',
+        question_type: 'textarea',
+        is_required: true,
+      }
+    ]
+  },
+
+  ai_engineer: {
+    department: 'Applied AI & Intelligent Systems',
+    accepted_majors_str: 'Computer Science, Artificial Intelligence, Data Science, Computational Linguistics, Statistics, Robotics',
+    getSalary: (sen) => {
+      switch (sen) {
+        case 'entry': return { min: 115000, max: 155000 };
+        case 'senior': return { min: 195000, max: 260000 };
+        case 'lead': return { min: 250000, max: 330000 };
+        case 'mid':
+        default: return { min: 155000, max: 205000 };
+      }
+    },
+    getYoe: (sen) => {
+      switch (sen) {
+        case 'entry': return { total: 1.0, domain: 1.0, grad_start: 2022, grad_end: 2026, leadership: false };
+        case 'senior': return { total: 6.0, domain: 5.0, grad_start: 2012, grad_end: 2020, leadership: true };
+        case 'lead': return { total: 9.0, domain: 7.0, grad_start: 2008, grad_end: 2017, leadership: true };
+        case 'mid':
+        default: return { total: 3.5, domain: 2.5, grad_start: 2018, grad_end: 2023, leadership: false };
+      }
+    },
+    getDescription: (sen) => {
+      const levelLabel = sen === 'entry' ? 'Entry-Level' : sen === 'senior' ? 'Senior' : sen === 'lead' ? 'Staff / Lead' : 'Mid-Level';
+      return `### Role Overview & Mission
+We are hiring a talented ${levelLabel} AI Engineer specializing in Generative AI, Large Language Models (LLMs), and agentic workflows. You will design, build, and deploy production-grade AI applications, advanced Retrieval-Augmented Generation (RAG) architectures, and real-time multimodal inference pipelines.
+
+### Key Responsibilities
+- Architect and operationalize high-accuracy RAG pipelines using semantic chunking, dense vector retrieval, and cross-encoder reranking.
+- Implement robust tool-calling agent frameworks with deterministic structured JSON schemas and safety guardrails.
+- Build systematic evaluation benchmarks (Ragas, TruLens, DeepEval) tracking faithfulness, answer relevancy, and hallucination rates.
+- Optimize LLM inference latency and token economics through prompt compression, semantic caching, and speculative decoding.
+- Integrate real-time audio and speech pipelines with WebRTC/WebSocket streaming interfaces.
+
+### Technical Requirements & Qualifications
+- Proven hands-on experience developing applications with state-of-the-art foundation models (Gemini, Claude, GPT-4, Llama).
+- Deep understanding of vector database index topologies (HNSW, IVFFlat) and hybrid search (BM25 + dense embeddings).
+- Proficiency in Python, modern async frameworks (FastAPI, AsyncIO), and AI orchestration tools (LangChain, LlamaIndex, LiteLLM).
+- Experience designing automated evaluation harnesses and prompt red-teaming for security (prompt injection, jailbreaking).
+- Familiarity with fine-tuning techniques (LoRA, QLoRA) and model quantization (GGUF, AWQ, vLLM).
+
+### Technology Stack
+- AI Frameworks: Google GenAI SDK, OpenAI SDK, LangChain, vLLM
+- Vector Datastores: Pinecone, Qdrant, Chroma, pgvector
+- Backend & Cloud: Python (FastAPI), Redis, Docker, GCP Vertex AI / AWS Bedrock`;
+    },
+    getScreeningQuestions: (sen) => [
+      {
+        question_text: 'Walk through an end-to-end RAG or LLM agent pipeline you built for production. How did you handle document chunking, hallucination detection, retrieval evaluation, and inference latency optimization?',
+        category: 'Core Technical',
+        difficulty_level: sen === 'entry' ? 'Entry' : sen === 'senior' || sen === 'lead' ? 'Senior' : 'Mid',
+        expected_key_points_str: 'Explains chunking trade-offs and semantic vector search\nDetails automated evaluation metrics for hallucination and retrieval recall\nDemonstrates caching, prompt optimization, or streaming latency controls',
+        priority_tier: 'P0',
+        question_type: 'textarea',
+        is_required: true,
+      }
+    ]
+  },
+
+  data_engineer: {
+    department: 'Data Platform & Analytics',
+    accepted_majors_str: 'Computer Science, Data Science, Information Systems, Software Engineering, Applied Mathematics',
+    getSalary: (sen) => {
+      switch (sen) {
+        case 'entry': return { min: 100000, max: 135000 };
+        case 'senior': return { min: 175000, max: 230000 };
+        case 'lead': return { min: 225000, max: 290000 };
+        case 'mid':
+        default: return { min: 135000, max: 180000 };
+      }
+    },
+    getYoe: (sen) => {
+      switch (sen) {
+        case 'entry': return { total: 1.0, domain: 1.0, grad_start: 2022, grad_end: 2026, leadership: false };
+        case 'senior': return { total: 6.0, domain: 5.0, grad_start: 2012, grad_end: 2020, leadership: true };
+        case 'lead': return { total: 9.0, domain: 7.0, grad_start: 2008, grad_end: 2017, leadership: true };
+        case 'mid':
+        default: return { total: 3.5, domain: 2.5, grad_start: 2018, grad_end: 2023, leadership: false };
+      }
+    },
+    getDescription: (sen) => {
+      const levelLabel = sen === 'entry' ? 'Entry-Level' : sen === 'senior' ? 'Senior' : sen === 'lead' ? 'Staff / Lead' : 'Mid-Level';
+      return `### Role Overview & Mission
+We are seeking a driven ${levelLabel} Data Engineer to architect, build, and maintain enterprise-scale data pipelines, lakehouse architectures, and real-time streaming infrastructure powering critical business intelligence and machine learning models.
+
+### Key Responsibilities
+- Architect robust batch and real-time event streaming pipelines handling terabytes of structured and unstructured data daily.
+- Model scalable data warehouses and lakehouses adhering to Kimball dimensional modeling, medallion architecture, and data mesh principles.
+- Enforce automated data quality validation (Great Expectations, dbt tests) and schema evolution guardrails.
+- Optimize BigQuery / Snowflake / Spark query performance, partition pruning, and cluster sizing to minimize compute spend.
+- Collaborate with data scientists and analytics engineers to deliver production-ready feature stores and clean data marts.
+
+### Technical Requirements & Qualifications
+- Advanced proficiency in SQL and Python for data transformation, ingestion, and distributed computing (PySpark, DuckDB).
+- Hands-on experience with modern workflow orchestration frameworks (Airflow, Prefect, Dagster).
+- Practical knowledge of modern cloud data warehouses (BigQuery, Snowflake, Databricks) and open table formats (Apache Iceberg, Delta Lake).
+- Strong understanding of streaming technologies such as Apache Kafka, Pulsar, or AWS Kinesis.
+- Demonstrated experience implementing CI/CD testing for data pipelines using dbt or Dataform.
+
+### Technology Stack
+- Orchestration & Transformation: Apache Airflow, dbt, Apache Spark
+- Storage & Warehouse: Google BigQuery, Snowflake, Apache Iceberg, PostgreSQL
+- Streaming: Apache Kafka, Debezium (CDC)
+- Languages: Python, SQL, Scala`;
+    },
+    getScreeningQuestions: (sen) => [
+      {
+        question_text: 'Describe an end-to-end data pipeline you architected for batch or streaming data. How did you handle schema drift, backpressure, idempotency, and late-arriving records?',
+        category: 'Core Technical',
+        difficulty_level: sen === 'entry' ? 'Entry' : sen === 'senior' || sen === 'lead' ? 'Senior' : 'Mid',
+        expected_key_points_str: 'Explains exactly-once or at-least-once delivery semantics and idempotency\nDescribes schema validation and handling of malformed records via dead-letter queues\nAnalyzes partitioning, clustering, and compute resource cost optimization',
+        priority_tier: 'P0',
+        question_type: 'textarea',
+        is_required: true,
+      }
+    ]
+  },
+
+  devops: {
+    department: 'Cloud Infrastructure & SRE',
+    accepted_majors_str: 'Computer Science, Computer Systems Engineering, Information Technology, Cybersecurity, Cloud Computing',
+    getSalary: (sen) => {
+      switch (sen) {
+        case 'entry': return { min: 105000, max: 140000 };
+        case 'senior': return { min: 180000, max: 235000 };
+        case 'lead': return { min: 230000, max: 295000 };
+        case 'mid':
+        default: return { min: 140000, max: 185000 };
+      }
+    },
+    getYoe: (sen) => {
+      switch (sen) {
+        case 'entry': return { total: 1.0, domain: 1.0, grad_start: 2022, grad_end: 2026, leadership: false };
+        case 'senior': return { total: 6.0, domain: 5.0, grad_start: 2012, grad_end: 2020, leadership: true };
+        case 'lead': return { total: 9.0, domain: 7.0, grad_start: 2008, grad_end: 2017, leadership: true };
+        case 'mid':
+        default: return { total: 3.5, domain: 2.5, grad_start: 2018, grad_end: 2023, leadership: false };
+      }
+    },
+    getDescription: (sen) => {
+      const levelLabel = sen === 'entry' ? 'Entry-Level' : sen === 'senior' ? 'Senior' : sen === 'lead' ? 'Staff / Lead' : 'Mid-Level';
+      return `### Role Overview & Mission
+We are looking for an experienced ${levelLabel} DevOps & Site Reliability Engineer (SRE) to manage our mission-critical multi-region cloud infrastructure, ensure 99.99% system availability, and accelerate developer velocity with automated CI/CD tooling.
+
+### Key Responsibilities
+- Architect, provision, and maintain resilient multi-cluster Kubernetes environments and cloud resources using Terraform (Infrastructure-as-Code).
+- Design and automate robust CI/CD pipelines (GitHub Actions, ArgoCD) supporting progressive canary deployments and instant automated rollbacks.
+- Establish comprehensive observability stacks (Prometheus, Grafana, OpenTelemetry, Datadog) with actionable SLI/SLO dashboards.
+- Lead incident response, on-call operational escalations, and blameless post-mortems to eliminate single points of failure.
+- Implement security best practices, secrets management (Vault, AWS Secrets Manager), and zero-trust IAM policies.
+
+### Technical Requirements & Qualifications
+- Extensive practical experience running production container workloads on Kubernetes (EKS, GKE) and Docker.
+- Strong scripting and automation skills in Python, Go, or Bash.
+- Deep expertise in Infrastructure as Code (Terraform, Pulumi) and GitOps deployment workflows (ArgoCD, Flux).
+- Thorough understanding of networking protocols (TCP/IP, DNS, TLS, HTTP/2, gRPC, VPC peering) and load balancing.
+- Proven track record defining and managing Service Level Objectives (SLOs) and Error Budgets.
+
+### Technology Stack
+- Orchestration: Kubernetes, Docker, Helm, ArgoCD
+- Cloud & IaC: AWS, Google Cloud, Terraform
+- Observability: Prometheus, Grafana, OpenTelemetry, Datadog
+- CI/CD: GitHub Actions, GitLab CI`;
+    },
+    getScreeningQuestions: (sen) => [
+      {
+        question_text: 'Describe a severe production infrastructure outage or latency spike you diagnosed and resolved under pressure. What observability signals did you follow, what was the root cause, and what permanent guardrails did you implement?',
+        category: 'Core Technical',
+        difficulty_level: sen === 'entry' ? 'Entry' : sen === 'senior' || sen === 'lead' ? 'Senior' : 'Mid',
+        expected_key_points_str: 'Systematically tracks logs, APM traces, and infrastructure metrics to isolate bottleneck\nExecutes swift, safe mitigation (rollback, traffic shedding, scaling) while keeping stakeholders informed\nImplements automated architectural guardrails or chaos testing to prevent regression',
+        priority_tier: 'P0',
+        question_type: 'textarea',
+        is_required: true,
+      }
+    ]
+  }
+};
 
 export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
   if (!isOpen) return null;
@@ -10,159 +283,325 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
   const [activeStep, setActiveStep] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
+  const [createdJob, setCreatedJob] = useState(null);
+  const [blueprintApproved, setBlueprintApproved] = useState(false);
 
-  // Form State
+  // Role Templates State
+  const [roleTemplates, setRoleTemplates] = useState([]);
+  const [loadingTemplates, setLoadingTemplates] = useState(false);
+  const [hasCustomizedSkills, setHasCustomizedSkills] = useState(false);
+  const [pendingTemplateChange, setPendingTemplateChange] = useState(null);
+  const [expandedSkillIdx, setExpandedSkillIdx] = useState(0);
+
+  // Form State initialized with SDE Entry Defaults
   const [formData, setFormData] = useState({
+    // Role Template Metadata
+    role_key: 'sde',
+    role_template_id: null,
+    role_template_version: null,
+
     // 1. Role Metadata
-    job_title: '',
-    department: '',
-    job_description: '',
-    seniority_level: 'Mid-Level (L4)',
+    job_title: 'Software Development Engineer (SDE) (Entry)',
+    department: 'Core Platform & Infrastructure',
+    job_description: ROLE_DETAILS.sde.getDescription('entry'),
+    seniority_level: 'entry',
     employment_type: 'Full-Time',
     workplace_model: 'Remote',
-    permitted_locations_str: 'Global Remote, United States, India',
-    salary_range_min: 130000,
-    salary_range_max: 175000,
+    permitted_locations_str: 'Global Remote, United States, Canada, United Kingdom, India',
+    salary_range_min: 105000,
+    salary_range_max: 140000,
     salary_currency: 'USD',
 
-    // 2. Academic Metrics
+    // 2. Academic & Experience Thresholds
     min_degree_level: "Bachelor's Degree (B.S. / B.E. / B.Tech)",
     degree_enforcement_type: 'Equivalent Professional Experience Allowed',
-    accepted_majors_str: 'Computer Science, Software Engineering, Information Technology, Electrical Engineering',
+    accepted_majors_str: ROLE_DETAILS.sde.accepted_majors_str,
     min_cgpa: '3.0 / 4.0',
     cgpa_strict_filter: false,
-    grad_year_start: '',
-    grad_year_end: '',
-
-    // 3. Experience Metrics
-    total_experience_years: 3.0,
-    domain_experience_years: 2.0,
+    grad_year_start: 2022,
+    grad_year_end: 2026,
+    total_experience_years: 1.0,
+    domain_experience_years: 1.0,
     leadership_required: false,
 
-    // 4. Certifications
+    // Certifications
     certifications: [
-      { name: 'AWS Certified Solutions Architect', issuing_org: 'Amazon Web Services', priority_tier: 'P1', verification_required: true }
+      { name: 'AWS Certified Solutions Architect - Associate', issuing_org: 'Amazon Web Services', priority_tier: 'P1', verification_required: false },
+      { name: 'Google Cloud Associate Cloud Engineer', issuing_org: 'Google Cloud', priority_tier: 'P2', verification_required: false }
     ],
 
-    // 5. Skills & Rubrics
-    skills: [
-      {
-        name: 'Data Structures & Algorithms',
-        category: 'Core Technical',
-        priority_tier: 'P0',
-        weight_percentage: 35,
-        rubric_l1: 'Fails basic algorithmic analysis; uses O(N^2) loops where O(N) is trivial.',
-        rubric_l2: 'Understands basic syntax and hash tables but cannot optimize auxiliary space.',
-        rubric_l3: 'Clean production-grade solution with verified optimal time/space complexity.',
-        rubric_l4: 'Addresses memory locality, amortized runtime, and cache friendliness proactively.',
-        rubric_l5: 'Deep low-level hardware cache hierarchy analysis and lock-free algorithmic primitives.'
-      },
-      {
-        name: 'System Design & Scalability',
-        category: 'Domain & Architectural',
-        priority_tier: 'P0',
-        weight_percentage: 30,
-        rubric_l1: 'Proposes single-server monoliths; ignores caching and database replication.',
-        rubric_l2: 'Mentions caching but cannot explain cache invalidation or replication lag trade-offs.',
-        rubric_l3: 'Designs functional distributed system with load balancers, Redis, and read-replicas.',
-        rubric_l4: 'Addresses distributed consensus, circuit breakers, idempotency, and backpressure.',
-        rubric_l5: 'Deep trade-offs on engine internals (LSM vs B-Tree, Paxos vs Raft) and cost vs SLAs.'
-      },
-      {
-        name: 'Database Architecture & Indexing',
-        category: 'Tooling & Frameworks',
-        priority_tier: 'P1',
-        weight_percentage: 20,
-        rubric_l1: 'Lacks understanding of indexing internals; queries unindexed large tables.',
-        rubric_l2: 'Understands primary keys but cannot diagnose composite index order or lock contention.',
-        rubric_l3: 'Configures appropriate indexes (B-Tree, Hash); balances normalized vs denormalized schemas.',
-        rubric_l4: 'Analyzes transaction isolation levels (MVCC, phantom reads, and sharding keys).',
-        rubric_l5: 'Designs distributed-SQL layers with multi-region quorum reads and conflict-free types.'
-      },
-      {
-        name: 'Technical Communication',
-        category: 'Soft & Cultural',
-        priority_tier: 'P1',
-        weight_percentage: 15,
-        rubric_l1: 'Disorganized thought process; unable to articulate reasons for technical choices.',
-        rubric_l2: 'Explains decisions when prompted but struggles to proactively frame trade-offs.',
-        rubric_l3: 'Communicates with structured clarity (top-down articulation) before solving.',
-        rubric_l4: 'Articulates nuanced trade-offs clearly; proactively invites architecture critique.',
-        rubric_l5: 'Exemplary leadership presence; explains complex concepts with razor-sharp brevity.'
-      }
-    ],
+    // 3. Competencies & Rubrics
+    skills: [],
 
-    // 6. Interview Policy
-    interview_duration_mins: 20,
+    // 4. Interview Policy
+    interview_duration_mins: 30,
     allow_grace_extension: true,
     max_followup_depth: 1,
     pacing_strictness: 'Balanced',
     interviewer_tone: 'Direct, technical, tech-lead caliber; probes for architectural trade-offs; warm but concise.',
     integrity_policy_tier: 'Moderate',
 
-    // 7. Custom Questions
-    custom_questions: [
-      {
-        question_text: 'Explain how you design a rate limiter handling 100k RPS with low latency.',
-        category: 'Domain & Architectural',
-        difficulty_level: 'Mid-Senior',
-        expected_key_points_str: 'Proposes Redis sliding window or token bucket\nAddresses race conditions via Lua scripts\nHandles cluster failover and HTTP 429 backoff',
-        priority_tier: 'P0'
-      }
-    ]
+    // 5. Custom Screening Questions
+    custom_questions: ROLE_DETAILS.sde.getScreeningQuestions('entry')
   });
+
+  // Fetch Role Templates on mount
+  useEffect(() => {
+    let isMounted = true;
+    async function loadTemplates() {
+      setLoadingTemplates(true);
+      try {
+        const token = localStorage.getItem('candidly-auth-token');
+        const headers = token ? { Authorization: `Bearer ${token}` } : {};
+        const res = await fetch('/api/role-templates', { headers });
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted) {
+            setRoleTemplates(data);
+            const sdeTpl = data.find(t => t.role_key === 'sde') || data[0];
+            if (sdeTpl && (!formData.role_template_id || formData.role_key === 'sde')) {
+              applyRoleTemplate(sdeTpl, formData.seniority_level || 'entry');
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load role templates:', err);
+      } finally {
+        if (isMounted) setLoadingTemplates(false);
+      }
+    }
+    loadTemplates();
+    return () => { isMounted = false; };
+  }, []);
+
+  // Helper to extract skills and rubrics from template for given seniority
+  const extractSkillsForTemplate = (template, seniority) => {
+    if (!template || !template.skills) return [];
+    const sNorm = (seniority || 'mid').toLowerCase().trim();
+    let seniorityKey = 'mid';
+    if (sNorm.includes('entry') || sNorm.includes('intern') || sNorm.includes('junior')) {
+      seniorityKey = 'entry';
+    } else if (sNorm.includes('lead') || sNorm.includes('staff') || sNorm.includes('principal')) {
+      seniorityKey = 'lead';
+    } else if (sNorm.includes('senior') || sNorm.includes('sr')) {
+      seniorityKey = 'senior';
+    } else {
+      seniorityKey = 'mid';
+    }
+
+    const profiles = template.seniority_profiles || {};
+    const profile = profiles[seniorityKey] || profiles['mid'] || profiles['entry'] || {};
+    const allSkills = template.skills || [];
+    const result = [];
+
+    allSkills.forEach((def) => {
+      const skey = def.key || def.skill_key;
+      const cfg = profile[skey];
+      // Filter out explicitly excluded skills
+      if (cfg && cfg.included === false) return;
+      if (!cfg && Object.keys(profile).length > 0) return;
+
+      result.push({
+        template_skill_key: skey,
+        name: def.name || skey,
+        category: def.category || 'Core Technical',
+        priority_tier: cfg?.tier || cfg?.priority_tier || 'P1',
+        weight_percentage: parseFloat(cfg?.weight ?? cfg?.weight_percentage ?? 20),
+        target_level_min: cfg?.target_level_min || 'L2',
+        target_level_max: cfg?.target_level_max || 'L4',
+        source: 'template',
+        description: def.description || '',
+        rubric_l1: def.rubric_l1 || '',
+        rubric_l2: def.rubric_l2 || '',
+        rubric_l3: def.rubric_l3 || '',
+        rubric_l4: def.rubric_l4 || '',
+        rubric_l5: def.rubric_l5 || '',
+      });
+    });
+
+    if (result.length === 0 && allSkills.length > 0) {
+      const defaultWeight = Math.round(100 / allSkills.length);
+      allSkills.forEach((def) => {
+        const skey = def.key || def.skill_key;
+        result.push({
+          template_skill_key: skey,
+          name: def.name || skey,
+          category: def.category || 'Core Technical',
+          priority_tier: 'P1',
+          weight_percentage: defaultWeight,
+          target_level_min: 'L2',
+          target_level_max: 'L4',
+          source: 'template',
+          description: def.description || '',
+          rubric_l1: def.rubric_l1 || '',
+          rubric_l2: def.rubric_l2 || '',
+          rubric_l3: def.rubric_l3 || '',
+          rubric_l4: def.rubric_l4 || '',
+          rubric_l5: def.rubric_l5 || '',
+        });
+      });
+    }
+
+    return result;
+  };
+
+  // Apply Role Template to formData
+  const applyRoleTemplate = (template, seniority = formData.seniority_level) => {
+    if (!template) {
+      setFormData(prev => ({
+        ...prev,
+        role_key: 'custom',
+        role_template_id: null,
+        role_template_version: null,
+      }));
+      return;
+    }
+
+    const shortSen = SENIORITY_OPTIONS.find(o => o.value === seniority)?.shortLabel || 'Mid';
+    const computedTitle = `${template.display_name} (${shortSen})`;
+    const skills = extractSkillsForTemplate(template, seniority);
+
+    const certs = (template.suggested_certifications || []).map(c => ({
+      name: c.name || '',
+      issuing_org: c.issuing_org || '',
+      priority_tier: c.priority_tier || 'P1',
+      verification_required: !!c.verification_required,
+    }));
+
+    const details = ROLE_DETAILS[template.role_key] || {
+      department: 'Engineering',
+      accepted_majors_str: 'Computer Science, Software Engineering, Information Technology, Electrical Engineering',
+      getSalary: () => ({ min: 120000, max: 160000 }),
+      getYoe: () => ({ total: 2.0, domain: 2.0, grad_start: 2020, grad_end: 2026, leadership: false }),
+      getDescription: () => template.description || 'Full-stack software development and platform engineering.',
+      getScreeningQuestions: () => ([{
+        question_text: 'Describe a complex technical challenge you solved and how you arrived at the solution.',
+        category: 'Core Technical',
+        difficulty_level: 'Mid',
+        expected_key_points_str: 'Identifies root cause systematically\nExplains trade-offs considered\nVerifies resolution with metrics or tests',
+        priority_tier: 'P0',
+        question_type: 'textarea',
+        is_required: true,
+      }])
+    };
+
+    const salary = details.getSalary(seniority);
+    const yoe = details.getYoe(seniority);
+    const desc = details.getDescription(seniority);
+    const screening = details.getScreeningQuestions(seniority);
+
+    setFormData(prev => ({
+      ...prev,
+      role_key: template.role_key,
+      role_template_id: template.id,
+      role_template_version: template.version,
+      job_title: computedTitle,
+      department: details.department,
+      job_description: desc,
+      seniority_level: seniority,
+      employment_type: 'Full-Time',
+      workplace_model: 'Remote',
+      permitted_locations_str: 'Global Remote, United States, Canada, United Kingdom, India',
+      salary_range_min: salary.min,
+      salary_range_max: salary.max,
+      salary_currency: 'USD',
+
+      min_degree_level: "Bachelor's Degree (B.S. / B.E. / B.Tech)",
+      degree_enforcement_type: 'Equivalent Professional Experience Allowed',
+      accepted_majors_str: details.accepted_majors_str,
+      min_cgpa: '3.0 / 4.0',
+      cgpa_strict_filter: false,
+      grad_year_start: yoe.grad_start || '',
+      grad_year_end: yoe.grad_end || '',
+      total_experience_years: yoe.total,
+      domain_experience_years: yoe.domain,
+      leadership_required: yoe.leadership,
+
+      certifications: certs,
+      skills,
+
+      interview_duration_mins: template.default_duration_mins || 30,
+      interviewer_tone: template.default_interviewer_tone || prev.interviewer_tone,
+      pacing_strictness: template.default_pacing || 'Balanced',
+      allow_grace_extension: true,
+      max_followup_depth: seniority === 'entry' ? 1 : 2,
+      integrity_policy_tier: 'Moderate',
+
+      custom_questions: screening,
+    }));
+    setHasCustomizedSkills(false);
+  };
+
+  // Handle switching template with confirmation if skills were edited
+  const handleSelectTemplate = (template) => {
+    if (hasCustomizedSkills && formData.skills.length > 0) {
+      setPendingTemplateChange({ template, seniority: formData.seniority_level });
+      return;
+    }
+    applyRoleTemplate(template, formData.seniority_level);
+  };
+
+  // Handle switching seniority with confirmation if skills were edited
+  const handleSelectSeniority = (newSeniority) => {
+    if (hasCustomizedSkills && formData.skills.length > 0) {
+      const currentTpl = roleTemplates.find(t => t.role_key === formData.role_key);
+      setPendingTemplateChange({ template: currentTpl, seniority: newSeniority });
+      return;
+    }
+    const currentTpl = roleTemplates.find(t => t.role_key === formData.role_key);
+    if (currentTpl) {
+      applyRoleTemplate(currentTpl, newSeniority);
+    } else {
+      setFormData(prev => ({ ...prev, seniority_level: newSeniority }));
+    }
+  };
+
+  const confirmPendingChange = () => {
+    if (pendingTemplateChange) {
+      applyRoleTemplate(pendingTemplateChange.template, pendingTemplateChange.seniority);
+      setPendingTemplateChange(null);
+    }
+  };
+
+  // Title vs Seniority Mismatch Warning
+  const titleMismatchWarning = useMemo(() => {
+    const titleLower = (formData.job_title || '').toLowerCase();
+    const sen = formData.seniority_level;
+    const isEntryWord = /\b(intern|junior|entry|associate|l2|l3|sde\s*1|sde-1|engineer\s*1|engineer-1)\b/i.test(titleLower);
+    const isSeniorWord = /\b(senior|sr|lead|staff|principal|director|l5|l6|sde\s*3|sde-3)\b/i.test(titleLower);
+
+    if (isEntryWord && (sen === 'mid' || sen === 'senior' || sen === 'lead')) {
+      return `Job title indicates an entry/junior role, but Seniority is calibrated to "${sen.toUpperCase()}". Please verify this is intentional.`;
+    }
+    if (isSeniorWord && sen === 'entry') {
+      return `Job title indicates a senior or lead role, but Seniority is calibrated to "ENTRY". Please verify this is intentional.`;
+    }
+    return null;
+  }, [formData.job_title, formData.seniority_level]);
 
   // Calculate sum of skill weights
   const totalWeight = useMemo(() => {
     return formData.skills.reduce((sum, s) => sum + (parseFloat(s.weight_percentage) || 0), 0);
   }, [formData.skills]);
 
-  // Live Mathematical Question Budget Calculation (Part 2)
-  const questionBudget = useMemo(() => {
+  // Duration Fit Markers
+  const durationFitInfo = useMemo(() => {
     const duration = parseInt(formData.interview_duration_mins, 10) || 20;
     const overhead = duration <= 15 ? 3.0 : duration <= 20 ? 3.5 : duration <= 30 ? 4.0 : duration <= 45 ? 5.0 : 6.0;
     const activeEvalTime = Math.max(2.0, duration - overhead);
-    const totalCoreQuestions = Math.round(activeEvalTime / 2.0);
-
-    // Calculate allocation
-    let totalAssigned = 0;
-    const items = formData.skills.map((s) => {
-      const weight = parseFloat(s.weight_percentage) || 0;
-      const rawQuota = (totalCoreQuestions * weight) / 100.0;
-      let baseInt = Math.floor(rawQuota);
-      if (s.priority_tier === 'P0' && baseInt < 1 && totalCoreQuestions > 0) {
-        baseInt = 1;
-      }
-      const remainder = rawQuota - Math.floor(rawQuota);
-      totalAssigned += baseInt;
-      return {
-        name: s.name || 'Untitled Skill',
-        priority: s.priority_tier,
-        weight,
-        allocated: baseInt,
-        remainder
-      };
-    });
-
-    const leftover = totalCoreQuestions - totalAssigned;
-    if (leftover > 0 && items.length > 0) {
-      items.sort((a, b) => b.remainder - a.remainder);
-      for (let i = 0; i < leftover; i++) {
-        items[i % items.length].allocated += 1;
-      }
-    }
+    // 2.0 min per expectation
+    const coreCapacity = Math.round(activeEvalTime / 2.0);
 
     return {
       duration,
-      overhead,
       activeEvalTime,
-      totalCoreQuestions,
-      items
+      coreCapacity,
     };
-  }, [formData.interview_duration_mins, formData.skills]);
+  }, [formData.interview_duration_mins]);
 
   // Handlers for Skills
   const handleAddSkill = () => {
+    setHasCustomizedSkills(true);
     setFormData((prev) => ({
       ...prev,
       skills: [
@@ -172,6 +611,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
           category: 'Core Technical',
           priority_tier: 'P1',
           weight_percentage: 10,
+          source: 'recruiter',
           rubric_l1: '',
           rubric_l2: '',
           rubric_l3: '',
@@ -180,9 +620,11 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
         }
       ]
     }));
+    setExpandedSkillIdx(formData.skills.length);
   };
 
   const handleUpdateSkill = (index, field, value) => {
+    setHasCustomizedSkills(true);
     setFormData((prev) => {
       const updated = [...prev.skills];
       updated[index] = { ...updated[index], [field]: value };
@@ -191,6 +633,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
   };
 
   const handleRemoveSkill = (index) => {
+    setHasCustomizedSkills(true);
     setFormData((prev) => ({
       ...prev,
       skills: prev.skills.filter((_, i) => i !== index)
@@ -223,7 +666,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
     }));
   };
 
-  // Handlers for Custom Questions
+  // Handlers for Custom Screening Questions
   const handleAddQuestion = () => {
     setFormData((prev) => ({
       ...prev,
@@ -234,7 +677,9 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
           category: 'Core Technical',
           difficulty_level: 'Mid-Senior',
           expected_key_points_str: '',
-          priority_tier: 'P0'
+          priority_tier: 'P0',
+          question_type: 'text',
+          is_required: true,
         }
       ]
     }));
@@ -255,26 +700,43 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
     }));
   };
 
-  // Form Submit
+  // Form Submit / Create Job Draft
   const handleSubmit = async (e) => {
-    e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     setErrorMsg(null);
+
+    if (createdJob) {
+      setActiveStep(6);
+      return createdJob;
+    }
 
     if (!formData.job_title.trim() || !formData.department.trim()) {
       setErrorMsg('Please enter both Job Title and Department.');
       setActiveStep(1);
-      return;
+      return null;
     }
 
     if (Math.round(totalWeight) !== 100) {
-      setErrorMsg(`Skill weightages must equal exactly 100%. Current sum is ${totalWeight}%.`);
-      setActiveStep(4);
-      return;
+      setErrorMsg(`Competency weightages must equal exactly 100%. Current sum is ${Math.round(totalWeight)}%.`);
+      setActiveStep(3);
+      return null;
+    }
+
+    // Check for vague skills
+    for (const s of formData.skills) {
+      if (VAGUE_SKILL_NAMES.has(s.name.trim().toLowerCase())) {
+        setErrorMsg(`Competency name "${s.name}" is too vague. Please rename it (e.g. "Practical Software Projects").`);
+        setActiveStep(3);
+        return null;
+      }
     }
 
     setSubmitting(true);
     try {
       const payload = {
+        role_key: formData.role_key || 'custom',
+        role_template_id: formData.role_template_id,
+        role_template_version: formData.role_template_version,
         job_title: formData.job_title.trim(),
         department: formData.department.trim(),
         job_description: formData.job_description.trim() || 'N/A',
@@ -306,6 +768,10 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
           category: s.category,
           priority_tier: s.priority_tier,
           weight_percentage: parseFloat(s.weight_percentage),
+          template_skill_key: s.template_skill_key,
+          target_level_min: s.target_level_min,
+          target_level_max: s.target_level_max,
+          source: s.source || 'recruiter',
           rubric_l1: s.rubric_l1,
           rubric_l2: s.rubric_l2,
           rubric_l3: s.rubric_l3,
@@ -322,8 +788,11 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
           question_text: q.question_text.trim(),
           category: q.category,
           difficulty_level: q.difficulty_level,
-          expected_key_points: q.expected_key_points_str.split('\n').map((k) => k.trim()).filter(Boolean),
-          priority_tier: q.priority_tier
+          expected_key_points: (q.expected_key_points_str || '').split('\n').map((k) => k.trim()).filter(Boolean),
+          priority_tier: q.priority_tier,
+          question_type: q.question_type || 'text',
+          is_required: q.is_required !== false,
+          options: q.options || [],
         }))
       };
 
@@ -345,22 +814,24 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
       }
 
       const created = await res.json();
-      onJobCreated(created);
-      onClose();
+      setCreatedJob(created);
+      setActiveStep(6);
+      return created;
     } catch (err) {
       setErrorMsg(err.message);
+      return null;
     } finally {
       setSubmitting(false);
     }
   };
 
   const steps = [
-    { num: 1, label: 'Role Metadata', icon: Briefcase },
-    { num: 2, label: 'Academic Criteria', icon: BookOpen },
-    { num: 3, label: 'Experience & Certs', icon: Award },
-    { num: 4, label: 'Skills & 5-Level Rubrics', icon: Layers },
-    { num: 5, label: 'AI Interviewer Policy', icon: Settings2 },
-    { num: 6, label: 'Custom Questions & Budget', icon: HelpCircle }
+    { num: 1, label: 'Role & Template', icon: Briefcase },
+    { num: 2, label: 'Thresholds & Certs', icon: BookOpen },
+    { num: 3, label: 'Competencies & Rubrics', icon: Layers },
+    { num: 4, label: 'Interviewer Policy', icon: Settings2 },
+    { num: 5, label: 'Screening Questions', icon: HelpCircle },
+    { num: 6, label: 'Interview Blueprint', icon: Sparkles }
   ];
 
   return (
@@ -375,10 +846,10 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
             </div>
             <div>
               <h2 className="text-xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-                Configure New Autonomous Role Policy
+                Configure Autonomous Job & Interview Blueprint
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Calibrates interview persona, 5-level rubrics, and the real-time question planner.
+                Ground interview delivery in calibrated role templates, seniority-tuned rubrics, and predictable budgeting.
               </p>
             </div>
           </div>
@@ -392,32 +863,39 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
         </div>
 
         {/* Step Navigation Bar */}
-        <div className="flex overflow-x-auto border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 px-6 scrollbar-none">
-          {steps.map((step) => {
-            const Icon = step.icon;
-            const isActive = activeStep === step.num;
-            return (
-              <button
-                key={step.num}
-                type="button"
-                onClick={() => setActiveStep(step.num)}
-                className={`flex items-center gap-2 py-3.5 px-4 text-xs font-bold border-b-2 whitespace-nowrap transition-all ${
-                  isActive
-                    ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900/70'
-                    : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
-                }`}
-              >
-                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${
-                  isActive
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
-                }`}>
-                  {step.num}
-                </span>
-                <span>{step.label}</span>
-              </button>
-            );
-          })}
+        <div className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/90 p-2 sm:px-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5">
+            {steps.map((step) => {
+              const Icon = step.icon;
+              const isActive = activeStep === step.num;
+              const isPast = activeStep > step.num;
+              return (
+                <button
+                  key={step.num}
+                  type="button"
+                  onClick={() => setActiveStep(step.num)}
+                  className={`flex items-center gap-2 py-2 px-2.5 rounded-xl text-xs font-semibold transition-all text-left ${
+                    isActive
+                      ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-500'
+                      : isPast
+                      ? 'bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200/50 dark:border-emerald-800/40 hover:bg-emerald-100/60'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
+                  }`}
+                >
+                  <span className={`w-5 h-5 rounded-lg flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
+                    isActive
+                      ? 'bg-white/20 text-white'
+                      : isPast
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                  }`}>
+                    {isPast ? <CheckCircle2 className="w-3 h-3" /> : step.num}
+                  </span>
+                  <span className="truncate">{step.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Error Banner */}
@@ -431,9 +909,134 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
         {/* Modal Scrollable Form Body */}
         <form onSubmit={handleSubmit} className="p-6 overflow-y-auto flex-1 space-y-6">
           
-          {/* STEP 1: Role Identity & Metadata */}
+          {/* STEP 1: Role Identity & Template Picker */}
           {activeStep === 1 && (
-            <div className="space-y-4 text-xs">
+            <div className="space-y-6 text-xs">
+              
+              {/* Template Picker Cards */}
+              <div>
+                <label className="block font-bold text-slate-900 dark:text-white text-sm mb-2">
+                  Select Calibrated Role Template
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                  {roleTemplates.map((tpl) => {
+                    const meta = TEMPLATE_CARD_META[tpl.role_key] || {
+                      icon: Terminal,
+                      color: 'from-blue-600 to-indigo-600',
+                      tag: 'Standard Role'
+                    };
+                    const Icon = meta.icon;
+                    const isSelected = formData.role_key === tpl.role_key;
+
+                    return (
+                      <div
+                        key={tpl.role_key}
+                        onClick={() => handleSelectTemplate(tpl)}
+                        className={`p-4 rounded-2xl border cursor-pointer transition-all flex flex-col justify-between ${
+                          isSelected
+                            ? 'border-indigo-600 bg-indigo-50/50 dark:bg-indigo-950/40 ring-2 ring-indigo-500/30'
+                            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 hover:border-slate-300 dark:hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className={`w-8 h-8 rounded-lg bg-gradient-to-br ${meta.color} text-white flex items-center justify-center shadow-sm`}>
+                              <Icon className="w-4 h-4" />
+                            </div>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                              {meta.tag}
+                            </span>
+                          </div>
+                          <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                            {tpl.display_name}
+                          </h4>
+                          <p className="text-[11px] text-slate-500 line-clamp-2">
+                            {tpl.description}
+                          </p>
+                        </div>
+                        <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px] text-slate-400">
+                          <span>{tpl.skills?.length || 5} Competencies</span>
+                          {isSelected && (
+                            <span className="text-indigo-600 dark:text-indigo-400 font-bold flex items-center gap-1">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> Selected
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Custom Role Option */}
+                  <div
+                    onClick={() => handleSelectTemplate(null)}
+                    className={`p-4 rounded-2xl border cursor-pointer transition-all flex flex-col justify-between ${
+                      formData.role_key === 'custom'
+                        ? 'border-indigo-600 bg-indigo-50/50 dark:bg-indigo-950/40 ring-2 ring-indigo-500/30'
+                        : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 hover:border-slate-300 dark:hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="space-y-2">
+                      <div className="w-8 h-8 rounded-lg bg-slate-700 text-white flex items-center justify-center">
+                        <Plus className="w-4 h-4" />
+                      </div>
+                      <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                        Custom Role
+                      </h4>
+                      <p className="text-[11px] text-slate-500 line-clamp-2">
+                        Build specialized competencies and rubric tiers from scratch.
+                      </p>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 text-[10px] text-slate-400">
+                      {formData.role_key === 'custom' ? (
+                        <span className="text-indigo-600 dark:text-indigo-400 font-bold flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Selected
+                        </span>
+                      ) : (
+                        <span>Recruiter-defined</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Seniority Level Picker */}
+              <div>
+                <label className="block font-bold text-slate-900 dark:text-white mb-1.5">
+                  Target Seniority Level
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {SENIORITY_OPTIONS.map((opt) => {
+                    const isSelected = formData.seniority_level === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => handleSelectSeniority(opt.value)}
+                        className={`py-2 px-3 rounded-xl border text-left transition-all ${
+                          isSelected
+                            ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-bold shadow-sm'
+                            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="text-xs">{opt.label}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Title Mismatch Warning Banner */}
+              {titleMismatchWarning && (
+                <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 flex items-start gap-2.5 text-amber-800 dark:text-amber-200">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                  <div className="text-[11px]">
+                    <span className="font-bold">Seniority Calibration Notice: </span>
+                    {titleMismatchWarning}
+                  </div>
+                </div>
+              )}
+
+              {/* Basic Fields */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
@@ -442,7 +1045,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   <input
                     type="text"
                     required
-                    placeholder="e.g. Senior Distributed Systems Engineer"
+                    placeholder="e.g. Software Development Engineer (Entry)"
                     value={formData.job_title}
                     onChange={(e) => setFormData({ ...formData, job_title: e.target.value })}
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500"
@@ -469,33 +1072,15 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     Job Description
                   </label>
                   <textarea
-                    rows={5}
-                    placeholder="Describe the role, key responsibilities, required qualifications, and preferred qualifications."
+                    rows={7}
+                    placeholder="Describe role mission, team responsibilities, and expected competencies."
                     value={formData.job_description}
                     onChange={(e) => setFormData({ ...formData, job_description: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500 resize-y"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500 resize-y font-mono text-xs leading-relaxed"
                   />
                   <span className="text-[11px] text-slate-400 mt-1 block">
-                    Shown to candidates as the role overview and used as context for the AI interviewer.
+                    Pre-populated with calibrated role mission, responsibilities, qualifications, and technology stack. Fully editable.
                   </span>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Seniority Level
-                  </label>
-                  <select
-                    value={formData.seniority_level}
-                    onChange={(e) => setFormData({ ...formData, seniority_level: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  >
-                    <option>Intern</option>
-                    <option>Entry-Level (L3)</option>
-                    <option>Mid-Level (L4)</option>
-                    <option>Senior (L5)</option>
-                    <option>Lead / Principal</option>
-                  </select>
-                  <span className="text-[11px] text-slate-400 mt-1 block">Dictates foundational question difficulty and rubric strictness.</span>
                 </div>
 
                 <div>
@@ -529,13 +1114,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   </select>
                 </div>
 
-                <div>
+                <div className="md:col-span-2">
                   <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
                     Permitted Locations / Timezones
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. United States, Canada, India, Global Remote"
+                    placeholder="e.g. Global Remote, United States, India"
                     value={formData.permitted_locations_str}
                     onChange={(e) => setFormData({ ...formData, permitted_locations_str: e.target.value })}
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
@@ -544,16 +1129,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 </div>
               </div>
 
-              {/* Compensation & Salary Band Section */}
+              {/* Compensation & Salary Band */}
               <div className="pt-4 border-t border-slate-200 dark:border-slate-800">
                 <div className="flex items-center justify-between mb-3">
                   <div>
-                    <h4 className="font-bold text-slate-900 dark:text-white text-sm">Compensation & Salary Band</h4>
-                    <p className="text-[11px] text-slate-400">Target annual compensation range displayed to prospective applicants.</p>
+                    <h4 className="font-bold text-slate-900 dark:text-white text-sm">Target Annual Compensation Band</h4>
+                    <p className="text-[11px] text-slate-400">Displayed transparently to prospective candidates.</p>
                   </div>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800">
-                    Transparent Pay Policy
-                  </span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -564,7 +1146,6 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     <input
                       type="number"
                       step="1000"
-                      placeholder="e.g. 130000"
                       value={formData.salary_range_min || ''}
                       onChange={(e) => setFormData({ ...formData, salary_range_min: e.target.value })}
                       className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
@@ -578,7 +1159,6 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     <input
                       type="number"
                       step="1000"
-                      placeholder="e.g. 175000"
                       value={formData.salary_range_max || ''}
                       onChange={(e) => setFormData({ ...formData, salary_range_max: e.target.value })}
                       className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
@@ -597,10 +1177,8 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       <option value="USD">USD ($)</option>
                       <option value="EUR">EUR (€)</option>
                       <option value="GBP">GBP (£)</option>
-                      <option value="CAD">CAD ($)</option>
-                      <option value="AUD">AUD ($)</option>
                       <option value="INR">INR (₹)</option>
-                      <option value="SGD">SGD ($)</option>
+                      <option value="CAD">CAD ($)</option>
                     </select>
                   </div>
                 </div>
@@ -608,169 +1186,177 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
             </div>
           )}
 
-          {/* STEP 2: Academic & Educational Criteria */}
+          {/* STEP 2: Candidate Thresholds & Certifications */}
           {activeStep === 2 && (
-            <div className="space-y-4 text-xs">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Minimum Degree Level Required
-                  </label>
-                  <select
-                    value={formData.min_degree_level}
-                    onChange={(e) => setFormData({ ...formData, min_degree_level: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  >
-                    <option>High School Diploma / GED</option>
-                    <option>Associate Degree</option>
-                    <option>Bachelor's Degree (B.S. / B.E. / B.Tech)</option>
-                    <option>Master's Degree (M.S. / M.E. / M.Tech)</option>
-                    <option>Doctorate (Ph.D.)</option>
-                  </select>
-                </div>
+            <div className="space-y-6 text-xs">
+              
+              {/* Academic Thresholds */}
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-2">
+                  Academic & Educational Criteria
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Minimum Degree Level Required
+                    </label>
+                    <select
+                      value={formData.min_degree_level}
+                      onChange={(e) => setFormData({ ...formData, min_degree_level: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    >
+                      <option>High School Diploma / GED</option>
+                      <option>Associate Degree</option>
+                      <option>Bachelor's Degree (B.S. / B.E. / B.Tech)</option>
+                      <option>Master's Degree (M.S. / M.E. / M.Tech)</option>
+                      <option>Doctorate (Ph.D.)</option>
+                    </select>
+                  </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Degree Requirement Enforcement Type
-                  </label>
-                  <select
-                    value={formData.degree_enforcement_type}
-                    onChange={(e) => setFormData({ ...formData, degree_enforcement_type: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  >
-                    <option>Mandatory (Hard Knockout)</option>
-                    <option>Preferred (Bonus Score)</option>
-                    <option>Equivalent Professional Experience Allowed</option>
-                  </select>
-                  <span className="text-[11px] text-slate-400 mt-1 block">Equivalent experience waives degree if candidate has +2 yrs per missing tier.</span>
-                </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Degree Requirement Enforcement Type
+                    </label>
+                    <select
+                      value={formData.degree_enforcement_type}
+                      onChange={(e) => setFormData({ ...formData, degree_enforcement_type: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    >
+                      <option>Mandatory (Hard Knockout)</option>
+                      <option>Preferred (Bonus Score)</option>
+                      <option>Equivalent Professional Experience Allowed</option>
+                    </select>
+                  </div>
 
-                <div className="md:col-span-2">
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Accepted Fields of Study (Majors)
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.accepted_majors_str}
-                    onChange={(e) => setFormData({ ...formData, accepted_majors_str: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  />
-                  <span className="text-[11px] text-slate-400 mt-1 block">Comma-separated majors matched semantically against candidate transcripts.</span>
-                </div>
+                  <div className="md:col-span-2">
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Accepted Fields of Study (Majors)
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.accepted_majors_str}
+                      onChange={(e) => setFormData({ ...formData, accepted_majors_str: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    />
+                    <span className="text-[11px] text-slate-400 mt-1 block">Comma-separated majors matched semantically against candidate transcripts.</span>
+                  </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Minimum Academic Performance (CGPA / GPA)
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.min_cgpa}
-                    onChange={(e) => setFormData({ ...formData, min_cgpa: e.target.value })}
-                    placeholder="e.g. 3.0 / 4.0 or 7.0 / 10.0"
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  />
-                </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Minimum CGPA / GPA Threshold
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.min_cgpa}
+                      onChange={(e) => setFormData({ ...formData, min_cgpa: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    />
+                  </div>
 
-                <div className="flex items-center gap-3 pt-6">
-                  <input
-                    type="checkbox"
-                    id="cgpa_strict"
-                    checked={formData.cgpa_strict_filter}
-                    onChange={(e) => setFormData({ ...formData, cgpa_strict_filter: e.target.checked })}
-                    className="w-4 h-4 text-indigo-600 rounded"
-                  />
-                  <label htmlFor="cgpa_strict" className="text-slate-700 dark:text-slate-300 font-semibold cursor-pointer">
-                    Enforce CGPA as strict knockout filter (rather than tiebreaker)
-                  </label>
-                </div>
+                  <div className="flex items-center gap-3 pt-6">
+                    <input
+                      type="checkbox"
+                      id="cgpa_strict"
+                      checked={formData.cgpa_strict_filter}
+                      onChange={(e) => setFormData({ ...formData, cgpa_strict_filter: e.target.checked })}
+                      className="w-4 h-4 text-indigo-600 rounded"
+                    />
+                    <label htmlFor="cgpa_strict" className="text-slate-700 dark:text-slate-300 font-semibold cursor-pointer">
+                      Enforce CGPA as strict knockout filter
+                    </label>
+                  </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Graduation Year Start (Optional)
-                  </label>
-                  <input
-                    type="number"
-                    placeholder="e.g. 2021"
-                    value={formData.grad_year_start}
-                    onChange={(e) => setFormData({ ...formData, grad_year_start: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  />
-                </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Graduation Year (Earliest)
+                    </label>
+                    <input
+                      type="number"
+                      placeholder="e.g. 2020"
+                      value={formData.grad_year_start}
+                      onChange={(e) => setFormData({ ...formData, grad_year_start: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    />
+                    <span className="text-[11px] text-slate-400 mt-1 block">Earliest eligible cohort graduation year.</span>
+                  </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Graduation Year End (Optional)
-                  </label>
-                  <input
-                    type="number"
-                    placeholder="e.g. 2025"
-                    value={formData.grad_year_end}
-                    onChange={(e) => setFormData({ ...formData, grad_year_end: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  />
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Graduation Year (Latest)
+                    </label>
+                    <input
+                      type="number"
+                      placeholder="e.g. 2026"
+                      value={formData.grad_year_end}
+                      onChange={(e) => setFormData({ ...formData, grad_year_end: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    />
+                    <span className="text-[11px] text-slate-400 mt-1 block">Latest eligible cohort graduation year.</span>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
 
-          {/* STEP 3: Experience & Certifications Matrix */}
-          {activeStep === 3 && (
-            <div className="space-y-6 text-xs">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Total Professional Experience (Years)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.5"
-                    value={formData.total_experience_years}
-                    onChange={(e) => setFormData({ ...formData, total_experience_years: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Role-Specific / Domain Experience (Years)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.5"
-                    value={formData.domain_experience_years}
-                    onChange={(e) => setFormData({ ...formData, domain_experience_years: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
-                  />
-                </div>
-
-                <div className="md:col-span-2 flex items-center gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
-                  <input
-                    type="checkbox"
-                    id="leadership"
-                    checked={formData.leadership_required}
-                    onChange={(e) => setFormData({ ...formData, leadership_required: e.target.checked })}
-                    className="w-4 h-4 text-indigo-600 rounded"
-                  />
+              {/* Professional Experience Metrics */}
+              <div className="pt-4 border-t border-slate-200 dark:border-slate-800">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-2">
+                  Experience Metrics
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label htmlFor="leadership" className="font-bold text-slate-900 dark:text-white cursor-pointer block">
-                      Leadership & Project Ownership Required
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Total Experience (Years)
                     </label>
-                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                      When enabled, the AI automatically allocates at least one scenario-based behavioral ownership question.
-                    </span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={formData.total_experience_years}
+                      onChange={(e) => setFormData({ ...formData, total_experience_years: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      Domain / Role Experience (Years)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={formData.domain_experience_years}
+                      onChange={(e) => setFormData({ ...formData, domain_experience_years: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    />
+                  </div>
+
+                  <div className="md:col-span-2 flex items-center gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                    <input
+                      type="checkbox"
+                      id="leadership"
+                      checked={formData.leadership_required}
+                      onChange={(e) => setFormData({ ...formData, leadership_required: e.target.checked })}
+                      className="w-4 h-4 text-indigo-600 rounded"
+                    />
+                    <div>
+                      <label htmlFor="leadership" className="font-bold text-slate-900 dark:text-white cursor-pointer block">
+                        Leadership & Project Ownership Required
+                      </label>
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Allocates behavioral scenario probe on system ownership and stakeholder alignment.
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
 
               {/* Certifications Matrix */}
-              <div className="space-y-3 pt-4 border-t border-slate-200 dark:border-slate-800">
+              <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                      Professional Certifications & Accreditations Matrix
+                      Suggested Certifications & Accreditations
                     </h3>
                     <p className="text-[11px] text-slate-500">
-                      P0 Mandatory (license to practice), P1 Highly Preferred (triggers verification question), P2 Bonus.
+                      Prefilled from the selected role template. P0 = mandatory, P1 = preferred, P2 = bonus.
                     </p>
                   </div>
                   <button
@@ -783,260 +1369,289 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   </button>
                 </div>
 
-                <div className="space-y-2.5">
-                  {formData.certifications.map((c, idx) => (
-                    <div
-                      key={idx}
-                      className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center"
-                    >
-                      <div className="sm:col-span-4">
-                        <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Certification Name</label>
-                        <input
-                          type="text"
-                          placeholder="e.g. AWS Solutions Architect Professional"
-                          value={c.name}
-                          onChange={(e) => handleUpdateCert(idx, 'name', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
-                        />
+                {formData.certifications.length === 0 ? (
+                  <div className="p-4 rounded-xl border border-dashed border-slate-300 dark:border-slate-800 text-center text-slate-400">
+                    No certifications added. Click "Add Certification" if this role requires specific credentials.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {formData.certifications.map((c, idx) => (
+                      <div
+                        key={idx}
+                        className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center"
+                      >
+                        <div className="sm:col-span-4">
+                          <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Certification Name</label>
+                          <input
+                            type="text"
+                            value={c.name}
+                            onChange={(e) => handleUpdateCert(idx, 'name', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                          />
+                        </div>
+                        <div className="sm:col-span-3">
+                          <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Issuing Body</label>
+                          <input
+                            type="text"
+                            value={c.issuing_org}
+                            onChange={(e) => handleUpdateCert(idx, 'issuing_org', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Priority</label>
+                          <select
+                            value={c.priority_tier}
+                            onChange={(e) => handleUpdateCert(idx, 'priority_tier', e.target.value)}
+                            className="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                          >
+                            <option>P0</option>
+                            <option>P1</option>
+                            <option>P2</option>
+                          </select>
+                        </div>
+                        <div className="sm:col-span-2 flex items-center gap-1.5 pt-3 sm:pt-0">
+                          <input
+                            type="checkbox"
+                            id={`cert_v_${idx}`}
+                            checked={c.verification_required}
+                            onChange={(e) => handleUpdateCert(idx, 'verification_required', e.target.checked)}
+                            className="w-3.5 h-3.5 text-indigo-600 rounded"
+                          />
+                          <label htmlFor={`cert_v_${idx}`} className="text-[11px] text-slate-600 dark:text-slate-400 cursor-pointer">
+                            Verify Credential
+                          </label>
+                        </div>
+                        <div className="sm:col-span-1 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveCert(idx)}
+                            className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/50"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
-                      <div className="sm:col-span-3">
-                        <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Issuing Body</label>
-                        <input
-                          type="text"
-                          placeholder="e.g. AWS, CNCF"
-                          value={c.issuing_org}
-                          onChange={(e) => handleUpdateCert(idx, 'issuing_org', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
-                        />
-                      </div>
-                      <div className="sm:col-span-2">
-                        <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Priority</label>
-                        <select
-                          value={c.priority_tier}
-                          onChange={(e) => handleUpdateCert(idx, 'priority_tier', e.target.value)}
-                          className="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
-                        >
-                          <option>P0</option>
-                          <option>P1</option>
-                          <option>P2</option>
-                        </select>
-                      </div>
-                      <div className="sm:col-span-2 flex items-center gap-1.5 pt-3 sm:pt-0">
-                        <input
-                          type="checkbox"
-                          id={`cert_v_${idx}`}
-                          checked={c.verification_required}
-                          onChange={(e) => handleUpdateCert(idx, 'verification_required', e.target.checked)}
-                          className="w-3.5 h-3.5 text-indigo-600 rounded"
-                        />
-                        <label htmlFor={`cert_v_${idx}`} className="text-[11px] text-slate-600 dark:text-slate-400 cursor-pointer">
-                          Verify ID
-                        </label>
-                      </div>
-                      <div className="sm:col-span-1 flex justify-end">
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveCert(idx)}
-                          className="p-1.5 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
-          {/* STEP 4: Skills Taxonomy & 5-Level Rubrics */}
-          {activeStep === 4 && (
+          {/* STEP 3: Competencies & 5-Level Rubrics */}
+          {activeStep === 3 && (
             <div className="space-y-6 text-xs">
-              
-              {/* Weightage Validation Progress Bar */}
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold text-slate-800 dark:text-slate-200">
-                      Total Competency Weightage
-                    </span>
-                    {Math.round(totalWeight) === 100 ? (
-                      <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-bold">
-                        <CheckCircle2 className="w-3.5 h-3.5" /> Exactly 100% Calibrated
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400 font-bold">
-                        <AlertTriangle className="w-3.5 h-3.5" /> Must equal 100% (Current: {totalWeight}%)
-                      </span>
-                    )}
-                  </div>
-                  <span className="font-mono font-black text-sm text-indigo-600 dark:text-indigo-400">
-                    {totalWeight}% / 100%
-                  </span>
-                </div>
-
-                <div className="h-2.5 w-full bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full transition-all duration-300 ${
-                      Math.round(totalWeight) === 100
-                        ? 'bg-emerald-500'
-                        : totalWeight > 100
-                        ? 'bg-rose-500'
-                        : 'bg-indigo-600'
-                    }`}
-                    style={{ width: `${Math.min(100, totalWeight)}%` }}
-                  />
-                </div>
-              </div>
-
-              {/* Skills List */}
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
                   <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                    Configured Competencies & 5-Level Rubric Anchors
+                    Role Competencies & 5-Level Behavioral Rubrics
                   </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Weights must sum to exactly 100%. Budgeting assigns ~2m per primary expectation.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={handleAddSkill}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>Add Skill</span>
+                    <span>Add Competency</span>
                   </button>
                 </div>
+              </div>
 
-                {formData.skills.map((skill, idx) => (
-                  <div
-                    key={idx}
-                    className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-4"
-                  >
-                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
-                      <div className="sm:col-span-5">
-                        <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Skill Name</label>
-                        <input
-                          type="text"
-                          placeholder="e.g. Distributed System Design"
-                          value={skill.name}
-                          onChange={(e) => handleUpdateSkill(idx, 'name', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-                        />
+              {/* Weight & Duration Fit Summary Bar */}
+              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-700 dark:text-slate-300">Total Weight:</span>
+                  <span className={`px-2.5 py-0.5 rounded-full font-bold text-xs ${
+                    Math.round(totalWeight) === 100
+                      ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-300'
+                      : 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border border-rose-300'
+                  }`}>
+                    {Math.round(totalWeight)}% / 100%
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  <span>Interview Duration: <strong>{durationFitInfo.duration}m</strong> (~{durationFitInfo.coreCapacity} core competencies covered live)</span>
+                </div>
+              </div>
+
+              {/* Skills List */}
+              <div className="space-y-3">
+                {formData.skills.map((skill, idx) => {
+                  const isVague = VAGUE_SKILL_NAMES.has((skill.name || '').trim().toLowerCase());
+                  const isExpanded = expandedSkillIdx === idx;
+                  const isP0 = skill.priority_tier === 'P0';
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`rounded-2xl border transition-all ${
+                        isExpanded
+                          ? 'border-indigo-500/50 bg-white dark:bg-slate-900/70 shadow-md'
+                          : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/30'
+                      }`}
+                    >
+                      {/* Skill Header */}
+                      <div className="p-3.5 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 flex-1 min-w-[200px]">
+                          <span className={`w-6 h-6 rounded-lg flex items-center justify-center font-bold text-xs ${
+                            isP0 ? 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300' : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                          }`}>
+                            {skill.priority_tier}
+                          </span>
+                          <input
+                            type="text"
+                            value={skill.name}
+                            placeholder="Competency name (e.g. Core CS Fundamentals)"
+                            onChange={(e) => handleUpdateSkill(idx, 'name', e.target.value)}
+                            className="font-bold text-slate-900 dark:text-white bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 text-sm focus:outline-none flex-1"
+                          />
+                        </div>
+
+                        {/* Badges & Meta */}
+                        <div className="flex items-center gap-2">
+                          {/* Duration fit marker */}
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            isP0
+                              ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 border border-emerald-200'
+                              : 'bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 border border-blue-200'
+                          }`}>
+                            {isP0 ? 'Primary Core (~2m/exp)' : 'Secondary (~2m/exp)'}
+                          </span>
+
+                          {/* Source */}
+                          {skill.source && (
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">
+                              {skill.source}
+                            </span>
+                          )}
+
+                          {/* Weight */}
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="1"
+                              max="100"
+                              value={skill.weight_percentage}
+                              onChange={(e) => handleUpdateSkill(idx, 'weight_percentage', e.target.value)}
+                              className="w-14 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-center font-bold text-xs"
+                            />
+                            <span className="text-slate-400">%</span>
+                          </div>
+
+                          {/* Expand/Collapse Toggle */}
+                          <button
+                            type="button"
+                            onClick={() => setExpandedSkillIdx(isExpanded ? null : idx)}
+                            className="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-500"
+                          >
+                            {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          </button>
+
+                          {/* Delete */}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveSkill(idx)}
+                            className="p-1 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950 text-rose-500"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
 
-                      <div className="sm:col-span-3">
-                        <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Category</label>
-                        <select
-                          value={skill.category}
-                          onChange={(e) => handleUpdateSkill(idx, 'category', e.target.value)}
-                          className="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                        >
-                          <option>Core Technical</option>
-                          <option>Tooling & Frameworks</option>
-                          <option>Domain & Architectural</option>
-                          <option>Soft & Cultural</option>
-                        </select>
-                      </div>
+                      {/* Vague Warning */}
+                      {isVague && (
+                        <div className="mx-3.5 mb-2 p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 text-amber-800 dark:text-amber-300 text-[11px] flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span>Vague competency name detected. Please be specific (e.g. "Practical Software Projects").</span>
+                        </div>
+                      )}
 
-                      <div className="sm:col-span-2">
-                        <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Priority</label>
-                        <select
-                          value={skill.priority_tier}
-                          onChange={(e) => handleUpdateSkill(idx, 'priority_tier', e.target.value)}
-                          className="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                        >
-                          <option value="P0">P0 (Mandatory)</option>
-                          <option value="P1">P1 (Core)</option>
-                          <option value="P2">P2 (Secondary)</option>
-                        </select>
-                      </div>
+                      {/* Expanded Rubrics Editor */}
+                      {isExpanded && (
+                        <div className="p-3.5 pt-0 border-t border-slate-100 dark:border-slate-800 space-y-2 mt-2">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-2">
+                            <div>
+                              <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Category</label>
+                              <select
+                                value={skill.category}
+                                onChange={(e) => handleUpdateSkill(idx, 'category', e.target.value)}
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                              >
+                                <option>Core Technical</option>
+                                <option>Domain & Architectural</option>
+                                <option>Tooling & Frameworks</option>
+                                <option>Soft & Cultural</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Priority Tier</label>
+                              <select
+                                value={skill.priority_tier}
+                                onChange={(e) => handleUpdateSkill(idx, 'priority_tier', e.target.value)}
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                              >
+                                <option>P0</option>
+                                <option>P1</option>
+                                <option>P2</option>
+                              </select>
+                            </div>
+                          </div>
 
-                      <div className="sm:col-span-1">
-                        <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Weight %</label>
-                        <input
-                          type="number"
-                          value={skill.weight_percentage}
-                          onChange={(e) => handleUpdateSkill(idx, 'weight_percentage', e.target.value)}
-                          className="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold"
-                        />
-                      </div>
-
-                      <div className="sm:col-span-1 flex justify-end">
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveSkill(idx)}
-                          className="p-1.5 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
+                          {/* 5-Level Rubrics */}
+                          <div className="space-y-1.5">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase">Observable 5-Level Rubric Tiers</span>
+                            {[
+                              { key: 'rubric_l1', label: 'L1 Novice', color: 'text-rose-500' },
+                              { key: 'rubric_l2', label: 'L2 Developing', color: 'text-amber-500' },
+                              { key: 'rubric_l3', label: 'L3 Competent', color: 'text-blue-500' },
+                              { key: 'rubric_l4', label: 'L4 Advanced', color: 'text-indigo-500' },
+                              { key: 'rubric_l5', label: 'L5 Expert', color: 'text-emerald-500' },
+                            ].map((lvl) => (
+                              <div key={lvl.key} className="flex items-start gap-2">
+                                <span className={`w-20 font-bold text-[10px] mt-1.5 ${lvl.color}`}>{lvl.label}</span>
+                                <input
+                                  type="text"
+                                  value={skill[lvl.key] || ''}
+                                  placeholder={`Behavioral indicators for ${lvl.label}...`}
+                                  onChange={(e) => handleUpdateSkill(idx, lvl.key, e.target.value)}
+                                  className="flex-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
-
-                    {/* 5-Level Rubrics Expandable */}
-                    <div className="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-                      <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
-                        5-Level Behavioral Rubrics (L1–L5)
-                      </div>
-                      <div className="grid grid-cols-1 gap-2">
-                        <input
-                          type="text"
-                          placeholder="L1 (Incompetent): Fails basic fundamentals; proposes broken anti-patterns."
-                          value={skill.rubric_l1}
-                          onChange={(e) => handleUpdateSkill(idx, 'rubric_l1', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-rose-200/80 dark:border-rose-900/50 bg-rose-50/40 dark:bg-rose-950/10 text-xs"
-                        />
-                        <input
-                          type="text"
-                          placeholder="L2 (Developing): Knows surface theory, names tools, but cannot explain internals or failure modes."
-                          value={skill.rubric_l2}
-                          onChange={(e) => handleUpdateSkill(idx, 'rubric_l2', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-amber-200/80 dark:border-amber-900/50 bg-amber-50/40 dark:bg-amber-950/10 text-xs"
-                        />
-                        <input
-                          type="text"
-                          placeholder="L3 (Proficient / Baseline): Delivers clean, production-grade answer with sound reasoning."
-                          value={skill.rubric_l3}
-                          onChange={(e) => handleUpdateSkill(idx, 'rubric_l3', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-blue-200/80 dark:border-blue-900/50 bg-blue-50/40 dark:bg-blue-950/10 text-xs"
-                        />
-                        <input
-                          type="text"
-                          placeholder="L4 (Advanced): Proactively identifies edge cases, distributed failure scenarios, and latency bottlenecks."
-                          value={skill.rubric_l4}
-                          onChange={(e) => handleUpdateSkill(idx, 'rubric_l4', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-indigo-200/80 dark:border-indigo-900/50 bg-indigo-50/40 dark:bg-indigo-950/10 text-xs"
-                        />
-                        <input
-                          type="text"
-                          placeholder="L5 (Expert): Demonstrates systems-level mastery; low-level engine internals, cost vs SLAs, hardware constraints."
-                          value={skill.rubric_l5}
-                          onChange={(e) => handleUpdateSkill(idx, 'rubric_l5', e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200/80 dark:border-emerald-900/50 bg-emerald-50/40 dark:bg-emerald-950/10 text-xs"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
 
-          {/* STEP 5: AI Interviewer Policy & Pacing */}
-          {activeStep === 5 && (
+          {/* STEP 4: AI Interviewer Policy & Pacing */}
+          {activeStep === 4 && (
             <div className="space-y-4 text-xs">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Interview Duration
+                    Interview Session Duration
                   </label>
                   <select
                     value={formData.interview_duration_mins}
                     onChange={(e) => setFormData({ ...formData, interview_duration_mins: e.target.value })}
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm font-semibold"
                   >
-                    <option value={15}>15 Minutes (~6 Core Questions)</option>
-                    <option value={20}>20 Minutes (~8 Core Questions)</option>
-                    <option value={30}>30 Minutes (~13 Core Questions)</option>
-                    <option value={45}>45 Minutes (~20 Core Questions)</option>
-                    <option value={60}>60 Minutes (~27 Core Questions)</option>
+                    <option value={15}>15 Minutes (~5-6 Expectations)</option>
+                    <option value={20}>20 Minutes (~7-8 Expectations)</option>
+                    <option value={30}>30 Minutes (~12-13 Expectations)</option>
+                    <option value={45}>45 Minutes (~18-20 Expectations)</option>
+                    <option value={60}>60 Minutes (~25-27 Expectations)</option>
                   </select>
                 </div>
 
@@ -1049,8 +1664,8 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     onChange={(e) => setFormData({ ...formData, max_followup_depth: e.target.value })}
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
                   >
-                    <option value={1}>1 Follow-up (Recommended standard)</option>
-                    <option value={2}>2 Follow-ups (Deep architectural probe)</option>
+                    <option value={1}>1 Follow-up (Standard)</option>
+                    <option value={2}>2 Follow-ups (Deep probe)</option>
                   </select>
                 </div>
 
@@ -1097,14 +1712,14 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       Enable Optional +5 Minute Grace Period Extension
                     </label>
                     <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                      Prompts candidate at T-1 minute if in the middle of a high-value technical explanation.
+                      Offers candidate extra time if answering a deep architectural question at session close.
                     </span>
                   </div>
                 </div>
 
                 <div className="md:col-span-2">
                   <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    Interviewer Conversational Tone & Persona
+                    Interviewer Conversational Tone & Persona Prompt
                   </label>
                   <textarea
                     rows={2}
@@ -1117,119 +1732,164 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
             </div>
           )}
 
-          {/* STEP 6: Custom Questions & Live Mathematical Question Budget */}
-          {activeStep === 6 && (
-            <div className="space-y-6 text-xs">
-              
-              {/* Real-time Question Budget Mathematics Card */}
-              <div className="p-5 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-900/60 space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h3 className="text-sm font-extrabold text-indigo-950 dark:text-indigo-100 flex items-center gap-2">
-                      <Clock className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-                      Live Mathematical Question Budget (Part 2 Formula)
-                    </h3>
-                    <p className="text-[11px] text-indigo-800/80 dark:text-indigo-300/80">
-                      Duration: {questionBudget.duration}m · Overhead: {questionBudget.overhead}m · Active Eval Time: {questionBudget.activeEvalTime}m
-                    </p>
-                  </div>
-                  <div className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 font-extrabold text-sm shadow-sm">
-                    {questionBudget.totalCoreQuestions} Core Questions Planned
-                  </div>
+          {/* STEP 5: Application Screening Questions */}
+          {activeStep === 5 && (
+            <div className="space-y-4 text-xs">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    Application Screening Questions (Optional)
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Questions answered by candidate during job application before interview scheduling.
+                  </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={handleAddQuestion}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Question</span>
+                </button>
+              </div>
 
-                {/* Skill Allocation Grid */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                  {questionBudget.items.map((item, idx) => (
+              {formData.custom_questions.length === 0 ? (
+                <div className="p-6 rounded-2xl border border-dashed border-slate-300 dark:border-slate-800 text-center text-slate-400">
+                  No screening questions added. Candidates will proceed directly from resume upload to interview scheduling.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {formData.custom_questions.map((q, idx) => (
                     <div
                       key={idx}
-                      className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-indigo-100 dark:border-indigo-900 shadow-sm space-y-1"
+                      className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-3"
                     >
-                      <div className="flex items-center justify-between font-bold text-slate-800 dark:text-slate-200">
-                        <span className="truncate max-w-[120px]">{item.name}</span>
-                        <span className="text-indigo-600 dark:text-indigo-400">{item.allocated} Qs</span>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">
+                            Question Prompt
+                          </label>
+                          <input
+                            type="text"
+                            value={q.question_text}
+                            onChange={(e) => handleUpdateQuestion(idx, 'question_text', e.target.value)}
+                            placeholder="e.g. Describe a high-scale architecture project you designed..."
+                            className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-medium"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveQuestion(idx)}
+                          className="p-2 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950 rounded-xl"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
-                      <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-                        <span>Weight: {item.weight}%</span>
-                        <span>~{(item.allocated * 2.0).toFixed(1)} mins</span>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Type</label>
+                          <select
+                            value={q.question_type || 'textarea'}
+                            onChange={(e) => handleUpdateQuestion(idx, 'question_type', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                          >
+                            <option value="textarea">Paragraph / Essay</option>
+                            <option value="text">Single Line Text</option>
+                            <option value="yes_no">Yes / No Binary</option>
+                            <option value="single_choice">Single Choice</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Difficulty</label>
+                          <select
+                            value={q.difficulty_level}
+                            onChange={(e) => handleUpdateQuestion(idx, 'difficulty_level', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                          >
+                            <option>Junior</option>
+                            <option>Mid-Senior</option>
+                            <option>Staff / Principal</option>
+                          </select>
+                        </div>
+                        <div className="flex items-center gap-2 pt-4">
+                          <input
+                            type="checkbox"
+                            id={`q_req_${idx}`}
+                            checked={q.is_required !== false}
+                            onChange={(e) => handleUpdateQuestion(idx, 'is_required', e.target.checked)}
+                            className="w-4 h-4 text-indigo-600 rounded"
+                          />
+                          <label htmlFor={`q_req_${idx}`} className="text-slate-700 dark:text-slate-300 font-semibold cursor-pointer">
+                            Required to submit
+                          </label>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">
+                          Expected Key Points (one per line)
+                        </label>
+                        <textarea
+                          rows={2}
+                          value={q.expected_key_points_str || ''}
+                          onChange={(e) => handleUpdateQuestion(idx, 'expected_key_points_str', e.target.value)}
+                          placeholder="Points to evaluate in candidate answer..."
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                        />
                       </div>
                     </div>
                   ))}
                 </div>
-              </div>
+              )}
+            </div>
+          )}
 
-              {/* Custom Questions Section */}
-              <div className="space-y-4 pt-2">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                      Custom Scenario Questions (Optional)
+          {/* STEP 6: Interview Blueprint & Review Editor */}
+          {activeStep === 6 && (
+            <div className="space-y-6 text-xs">
+              {!createdJob ? (
+                <div className="p-8 text-center space-y-5 bg-slate-50 dark:bg-slate-900/60 rounded-3xl border border-slate-200 dark:border-slate-800">
+                  <div className="w-14 h-14 rounded-2xl bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mx-auto shadow-sm">
+                    <Sparkles className="w-7 h-7" />
+                  </div>
+                  <div className="max-w-md mx-auto space-y-1">
+                    <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                      Synthesize Role Interview Blueprint
                     </h3>
-                    <p className="text-[11px] text-slate-500">
-                      Define specific questions with objective Expected Key Points for the real-time turn evaluator.
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Save calibrated role parameters to synthesize anchor questions, escalation challenges, probes, and live time budgeting.
                     </p>
                   </div>
                   <button
                     type="button"
-                    onClick={handleAddQuestion}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100"
+                    disabled={submitting}
+                    onClick={handleSubmit}
+                    className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 hover:-translate-y-0.5 transition-all disabled:opacity-50"
                   >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add Question</span>
+                    {submitting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Saving Job & Opening Blueprint...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" />
+                        <span>Save Role & Generate Blueprint</span>
+                      </>
+                    )}
                   </button>
                 </div>
-
-                {formData.custom_questions.map((q, idx) => (
-                  <div
-                    key={idx}
-                    className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-3"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-slate-700 dark:text-slate-300">Custom Question #{idx + 1}</span>
-                        <select
-                          value={q.priority_tier}
-                          onChange={(e) => handleUpdateQuestion(idx, 'priority_tier', e.target.value)}
-                          className="px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[11px]"
-                        >
-                          <option>P0</option>
-                          <option>P1</option>
-                          <option>P2</option>
-                        </select>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveQuestion(idx)}
-                        className="p-1.5 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-
-                    <textarea
-                      rows={2}
-                      placeholder="e.g. How do you design an idempotent payment processing consumer?"
-                      value={q.question_text}
-                      onChange={(e) => handleUpdateQuestion(idx, 'question_text', e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                    />
-
-                    <div>
-                      <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">
-                        Expected Key Points (1 per line)
-                      </label>
-                      <textarea
-                        rows={2}
-                        placeholder="Mentions idempotency key persistence&#10;Addresses distributed locking via Redis&#10;Handles network timeouts gracefully"
-                        value={q.expected_key_points_str}
-                        onChange={(e) => handleUpdateQuestion(idx, 'expected_key_points_str', e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-
+              ) : (
+                <BlueprintReviewEditor
+                  job={createdJob}
+                  onApproved={(approvedBp) => {
+                    setBlueprintApproved(true);
+                    onJobCreated(createdJob);
+                  }}
+                />
+              )}
             </div>
           )}
 
@@ -1254,7 +1914,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 </button>
               )}
 
-              {activeStep < 6 ? (
+              {activeStep < 5 ? (
                 <button
                   type="button"
                   onClick={() => setActiveStep((prev) => prev + 1)}
@@ -1263,14 +1923,42 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   <span>Next Step</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
+              ) : activeStep === 5 ? (
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => {
+                    if (createdJob) {
+                      setActiveStep(6);
+                    } else {
+                      handleSubmit();
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-md shadow-indigo-600/20"
+                >
+                  {submitting ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving Role...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Proceed to Blueprint</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </>
+                  )}
+                </button>
               ) : (
                 <button
-                  type="submit"
-                  disabled={submitting}
-                  className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-md transition-all disabled:opacity-50"
+                  type="button"
+                  onClick={() => {
+                    if (createdJob) onJobCreated(createdJob);
+                    onClose();
+                  }}
+                  className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 shadow-md transition-all"
                 >
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>{submitting ? 'Saving to Database...' : 'Deploy Calibrated Job'}</span>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  <span>Done / Close</span>
                 </button>
               )}
             </div>
@@ -1279,6 +1967,41 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
         </form>
 
       </div>
+
+      {/* Confirmation Modal when changing template or seniority after custom edits */}
+      {pendingTemplateChange && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-amber-50 dark:bg-amber-950/60 text-amber-600 flex items-center justify-center">
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-base text-slate-900 dark:text-white">
+                Reset Role Competencies?
+              </h3>
+              <p className="text-xs text-slate-500 mt-1">
+                You have custom edits to the competencies or rubrics. Switching the role template or seniority will reset them to the calibrated template defaults.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setPendingTemplateChange(null)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                Keep Current Edits
+              </button>
+              <button
+                type="button"
+                onClick={confirmPendingChange}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 shadow-md"
+              >
+                Reset to Template
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

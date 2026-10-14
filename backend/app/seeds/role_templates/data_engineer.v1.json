@@ -1,0 +1,254 @@
+{
+  "role_key": "data_engineer",
+  "display_name": "Data Engineer",
+  "description": "Designs large-scale data warehouses, dimensional models, batch and streaming pipelines, data orchestration (Airflow/Dagster), and distributed query optimization.",
+  "version": 1,
+  "default_duration_mins": 30,
+  "default_interviewer_tone": "Direct, analytical, data-systems focused; probes for data modeling trade-offs, pipeline idempotency, schema evolution, and query optimization.",
+  "default_pacing": "Balanced",
+  "suggested_certifications": [
+    {
+      "name": "Google Cloud Professional Data Engineer",
+      "issuing_org": "Google Cloud",
+      "priority_tier": "P0"
+    },
+    {
+      "name": "AWS Certified Data Engineer - Associate",
+      "issuing_org": "Amazon Web Services",
+      "priority_tier": "P1"
+    },
+    {
+      "name": "Databricks Certified Data Engineer Professional",
+      "issuing_org": "Databricks",
+      "priority_tier": "P1"
+    }
+  ],
+  "question_style_notes": {
+    "entry": "Verbal problem-solving on SQL joins, grouping, window functions, and basic star schema tables. No assumption of multi-petabyte distributed clusters.",
+    "mid": "Idempotent backfills, pipeline orchestration DAGs, partition pruning in BigQuery/Snowflake, data quality assertions (dbt tests), and schema migration.",
+    "senior": "Streaming watermark mechanics, exactly-once processing guarantees, lakehouse storage formats (Iceberg/Delta), cost vs query latency trade-offs, and data governance.",
+    "lead": "Enterprise data architecture, mesh governance, cross-organization data contracts, privacy compliance, and distributed storage strategy."
+  },
+  "skills": [
+    {
+      "key": "sql_data_modeling",
+      "name": "SQL & Data Modeling",
+      "category": "Core Technical",
+      "description": "Constructs normalized (3NF) and dimensional (Star/Snowflake) schemas, Slowly Changing Dimensions (SCD Type 1/2), and complex SQL window functions.",
+      "spoken_topic_label": "SQL and data modeling",
+      "rubric_l1": "Writes unindexed queries with Cartesian joins; cannot explain differences between OLTP and OLAP modeling.",
+      "rubric_l2": "Writes basic SELECT queries with INNER/LEFT joins but struggles with window functions (ROW_NUMBER, LAG/LEAD) or surrogate keys.",
+      "rubric_l3": "Designs dimensional star schemas with fact and dimension tables, implements SCD Type 2 logic, and writes optimized analytical SQL.",
+      "rubric_l4": "Diagnoses query execution plans (spill to disk, shuffle hash joins), implements partition clustering, and models wide denormalized event stores.",
+      "rubric_l5": "Architects advanced data models supporting bi-temporal analysis and unified semantic layers for complex analytical workloads.",
+      "expectation_bank": {
+        "L2": [
+          "Explains the difference between relational transactional schemas (OLTP) and analytical warehouse schemas (OLAP).",
+          "Writes SQL queries utilizing aggregation functions (GROUP BY, HAVING) and multiple join types.",
+          "Identifies primary keys, foreign keys, and unique constraints in table definitions."
+        ],
+        "L3": [
+          "Designs dimensional star schema models with clearly defined fact tables, dimension tables, and grain definitions.",
+          "Applies advanced SQL window functions (PARTITION BY, RANK, LAG/LEAD) to perform complex sequential analyses.",
+          "Models historical record changes using Slowly Changing Dimensions (SCD Type 2 with effective dates)."
+        ],
+        "L4": [
+          "Analyzes database query execution plans to identify table scan bottlenecks and memory spill overhead.",
+          "Optimizes columnar storage query performance using date partitioning, clustering keys, and z-ordering.",
+          "Designs surrogate key generation strategies that eliminate distributed join collisions."
+        ],
+        "L5": [
+          "Designs unified semantic data layers that standardize analytical business metric definitions across tools.",
+          "Designs bi-temporal data models capturing both transaction time and valid business time simultaneously."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose you need to find the latest transaction for each user from a table with millions of purchases; talk me through how you would write and optimize that SQL query.",
+        "mid_prompt": "Walk me through how you modeled a dimensional schema to track customer account tier upgrades and downgrades over time while maintaining historical reporting accuracy.",
+        "senior_prompt": "Walk me through how you redesigned a slow-running analytical query that was causing massive memory spills to disk on your cloud data warehouse."
+      }
+    },
+    {
+      "key": "pipeline_design",
+      "name": "Pipeline Design (batch/streaming, orchestration)",
+      "category": "Architecture",
+      "description": "Engineers robust batch and real-time streaming data pipelines using Airflow, Dagster, Kafka, Spark Streaming, or Flink with idempotent backfills.",
+      "spoken_topic_label": "pipeline design and orchestration",
+      "rubric_l1": "Relies on manual cron scripts executing loose Python scripts; pipelines fail on retries causing duplicate data.",
+      "rubric_l2": "Creates simple DAGs in Airflow but lacks idempotency, dynamic task mapping, backfill strategies, or sensor timeout management.",
+      "rubric_l3": "Builds fully idempotent batch pipelines with atomic partition swaps, backfill support, dead-letter queues, and orchestration sensors.",
+      "rubric_l4": "Architects real-time streaming pipelines with event-time windowing, watermarks, late-arriving data handling, and exactly-once semantics.",
+      "rubric_l5": "Designs hybrid streaming-batch architectures (Kappa/Medallion) processing high-volume event streams with low-latency freshness.",
+      "expectation_bank": {
+        "L2": [
+          "Defines DAG task dependencies and scheduling intervals in an orchestration tool like Airflow.",
+          "Explains the difference between batch scheduled pipelines and event-driven streaming ingestion.",
+          "Applies basic retry policies with exponential backoff on flaky pipeline tasks."
+        ],
+        "L3": [
+          "Ensures pipeline idempotency by implementing atomic table or partition replacement on retried runs.",
+          "Designs historical backfill workflows capable of reprocessing historical dates without corrupting live data.",
+          "Routes corrupted or unparseable input records into dead-letter queues for asynchronous investigation."
+        ],
+        "L4": [
+          "Architects event-time streaming pipelines utilizing watermarking to gracefully process late-arriving records.",
+          "Implements transactional outbox patterns and deduplication ensuring end-to-end exactly-once semantics.",
+          "Optimizes orchestrator resource utilization using dynamic task mapping and asynchronous deferrable operators."
+        ],
+        "L5": [
+          "Architects unified Lakehouse Medallion pipelines (Bronze, Silver, Gold) balancing real-time streaming ingestion with heavy batch aggregations.",
+          "Engineers multi-region active pipeline failovers ensuring uninterrupted analytics during cloud zone outages."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose a scheduled daily data pipeline fails halfway through; talk me through what steps you take to ensure re-running it does not duplicate data.",
+        "mid_prompt": "Walk me through how you designed a pipeline to backfill two years of historical data while production pipelines continued running concurrently.",
+        "senior_prompt": "Walk me through how you architected a streaming pipeline to handle out-of-order and late-arriving events while keeping downstream reporting metrics accurate."
+      }
+    },
+    {
+      "key": "data_quality",
+      "name": "Data Quality & Reliability",
+      "category": "Tooling",
+      "description": "Enforces automated data testing (dbt tests, Great Expectations), schema drift detection, data contracts, and data lineage tracking.",
+      "spoken_topic_label": "data quality and reliability",
+      "rubric_l1": "No automated validation; downstream dashboards silently display incorrect or missing data for weeks.",
+      "rubric_l2": "Runs manual SQL sanity checks after pipeline completion but lacks automated pre-load assertion gates or anomaly alerts.",
+      "rubric_l3": "Integrates automated dbt tests (uniqueness, referential integrity), Great Expectations suites, and circuit-breaker alerts before table promotion.",
+      "rubric_l4": "Enforces upstream software data contracts, automated schema drift alerts, volume anomaly detection, and end-to-end column lineage.",
+      "rubric_l5": "Architects automated self-healing data reconciliation loops and proactive data observability monitors across analytical tables.",
+      "expectation_bank": {
+        "L2": [
+          "Applies basic data validation checks verifying non-null constraints and unique primary keys.",
+          "Interprets pipeline failure notifications and traces which specific validation rule failed.",
+          "Validates column data types before attempting type conversion operations."
+        ],
+        "L3": [
+          "Integrates automated test suites (dbt test, Great Expectations) verifying referential integrity and accepted value ranges.",
+          "Implements staging-to-production promotion gates that block table swaps if row count drops anomalously.",
+          "Logs structured data quality audit tables capturing test execution history and anomaly metrics."
+        ],
+        "L4": [
+          "Enforces formal data contracts between software engineering producers and downstream data warehouse consumers.",
+          "Deploys statistical anomaly detection catching subtle distribution shifts and unexpected null spikes in real time.",
+          "Traces column-level lineage from raw source ingestion through intermediate transforms to BI dashboards."
+        ],
+        "L5": [
+          "Designs automated reconciliation loops that automatically backfill and heal data discrepancies between source OLTP and warehouse systems.",
+          "Establishes data reliability metrics and automated anomaly remediation policies for critical analytical datasets."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose an upstream service changes a column name without notifying you; talk me through how automated schema checks can prevent downstream report corruption.",
+        "mid_prompt": "Walk me through how you implemented automated quality checks in your pipelines to catch data anomalies before business users noticed them.",
+        "senior_prompt": "Walk me through how you established and enforced data contracts between operational microservices and your central data warehouse."
+      }
+    },
+    {
+      "key": "distributed_processing",
+      "name": "Distributed Processing",
+      "category": "Core Technical",
+      "description": "Optimizes distributed compute frameworks (PySpark, Spark SQL, Trino, Flink), partition skew, shuffle operations, and memory management.",
+      "spoken_topic_label": "distributed data processing",
+      "rubric_l1": "Collects full distributed datasets into driver memory with .collect(); unaware of partitions or worker nodes.",
+      "rubric_l2": "Writes basic PySpark DataFrame transformations but triggers accidental shuffles, Cartesian products, and OOM executor crashes.",
+      "rubric_l3": "Diagnoses Spark execution DAGs, optimizes partition counts, resolves data skew via salting, and tunes broadcast joins.",
+      "rubric_l4": "Tunes executor memory fraction (storage vs execution), garbage collection pauses, dynamic allocation, and off-heap memory.",
+      "rubric_l5": "Customizes distributed query planners (Catalyst/Trino), engineers native C++ execution backends (Velox/Gluten), and scales petabyte workloads.",
+      "expectation_bank": {
+        "L2": [
+          "Explains the roles of driver nodes, executor workers, and cluster managers in distributed compute runtimes.",
+          "Distinguishes between narrow transformations (map, filter) and wide transformations requiring data shuffles (groupBy, join).",
+          "Avoids fetching entire distributed datasets to the driver node using functions like collect."
+        ],
+        "L3": [
+          "Applies broadcast hash joins when joining large distributed tables with small dimension tables to eliminate shuffle overhead.",
+          "Diagnoses and resolves partition data skew using salting techniques or adaptive query execution (AQE).",
+          "Controls partition sizing across shuffle stages using coalesce and repartition appropriately."
+        ],
+        "L4": [
+          "Tunes Spark executor memory overhead, JVM garbage collection configurations, and off-heap memory allocations.",
+          "Analyzes Spark UI event timelines and query DAG stages to eliminate executor stragglers.",
+          "Leverages columnar memory caching and vectorized reader optimizations for Parquet and ORC files."
+        ],
+        "L5": [
+          "Optimizes large-scale distributed query engines across petabyte datasets utilizing native vectorized accelerators (Velox).",
+          "Authors custom Catalyst query optimization rules and Trino connector pushdown predicates."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose a PySpark job is running very slowly on a join between two tables; talk me through what causes data shuffles and how you can optimize it.",
+        "mid_prompt": "Walk me through how you diagnosed a Spark executor out-of-memory error caused by severe data skew on a join key.",
+        "senior_prompt": "Walk me through how you tuned cluster resource allocation, garbage collection, and shuffle partitions for a petabyte-scale batch workload."
+      }
+    },
+    {
+      "key": "cloud_data_platforms",
+      "name": "Cloud Data Platforms",
+      "category": "Architecture",
+      "description": "Architects modern Lakehouse architectures, open table formats (Apache Iceberg, Delta Lake), BigQuery/Snowflake, and cost optimization.",
+      "spoken_topic_label": "cloud data platforms",
+      "rubric_l1": "Dumps raw CSVs into cloud buckets without compression, partitioning, or lifecycle management.",
+      "rubric_l2": "Queries cloud data warehouses (Snowflake, BigQuery) but runs unpartitioned full scans without clustering or concurrency controls.",
+      "rubric_l3": "Designs Lakehouse tables using Apache Iceberg or Delta Lake with ACID transactions, time travel, compaction, and partition pruning.",
+      "rubric_l4": "Architects multi-tiered storage cost optimization (hot/warm/cold tiers), zero-copy clones, and fine-grained column/row masking policies.",
+      "rubric_l5": "Architects scalable cloud lakehouse platforms with cross-catalog querying, partition pruning, and automated storage cost optimization.",
+      "expectation_bank": {
+        "L2": [
+          "Compares columnar storage formats (Parquet) with row-based formats (CSV, JSON) for analytical query efficiency.",
+          "Applies date-based folder partitioning when writing analytical datasets to cloud object storage (S3/GCS).",
+          "Explains the core architecture of serverless cloud data warehouses like BigQuery or Snowflake."
+        ],
+        "L3": [
+          "Implements open table formats (Apache Iceberg / Delta Lake) providing ACID guarantees and time-travel capabilities.",
+          "Schedules automated table maintenance jobs including small file compaction and snapshot expiration.",
+          "Enforces column-level data masking and row-level access control policies to safeguard sensitive personal data."
+        ],
+        "L4": [
+          "Architects storage lifecycle policies migrating historical tables across hot, warm, and archival storage tiers.",
+          "Monitors and caps data warehouse query costs using slot reservations, query budget limits, and warehouse auto-suspend.",
+          "Optimizes data warehouse ingestion utilizing micro-batch streaming pipes (Snowpipe / BigQuery Storage Write API)."
+        ],
+        "L5": [
+          "Designs lakehouse catalog federation enabling unified query access over disparate object storage backends.",
+          "Establishes automated storage and query cost optimization frameworks tracking data warehouse utilization."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose an analytics team complains that querying historical data in a cloud warehouse is costing too much; talk me through what table design changes you would recommend.",
+        "mid_prompt": "Walk me through how you implemented an open table format like Apache Iceberg or Delta Lake to support ACID transactions and table compaction.",
+        "senior_prompt": "Walk me through how you architected an enterprise lakehouse storage layer to balance query latency, ACID guarantees, and cloud storage costs."
+      }
+    }
+  ],
+  "seniority_profiles": {
+    "entry": {
+      "sql_data_modeling": { "included": true, "tier": "P0", "weight": 40.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "pipeline_design": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "data_quality": { "included": true, "tier": "P1", "weight": 25.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "distributed_processing": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "cloud_data_platforms": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" }
+    },
+    "mid": {
+      "sql_data_modeling": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "pipeline_design": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "data_quality": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "cloud_data_platforms": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "distributed_processing": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L3", "target_level_max": "L4" }
+    },
+    "senior": {
+      "pipeline_design": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "distributed_processing": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "cloud_data_platforms": { "included": true, "tier": "P1", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "sql_data_modeling": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "data_quality": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+    },
+    "lead": {
+      "pipeline_design": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "cloud_data_platforms": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "distributed_processing": { "included": true, "tier": "P1", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "sql_data_modeling": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "data_quality": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+    }
+  }
+}

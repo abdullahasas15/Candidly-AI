@@ -1,0 +1,248 @@
+{
+  "role_key": "ai_engineer",
+  "display_name": "AI Engineer (LLM & GenAI)",
+  "description": "Designs, deploys, and optimizes production Generative AI applications, RAG architectures, prompt pipelines, model evaluation suites, and guardrails.",
+  "version": 1,
+  "default_duration_mins": 30,
+  "default_interviewer_tone": "Direct, technical, AI systems-focused; probes for latency, retrieval quality, evaluation metrics, and production failure modes.",
+  "default_pacing": "Balanced",
+  "suggested_certifications": [
+    {
+      "name": "Google Cloud Professional Machine Learning Engineer",
+      "issuing_org": "Google Cloud",
+      "priority_tier": "P1"
+    },
+    {
+      "name": "AWS Certified Machine Learning - Specialty",
+      "issuing_org": "Amazon Web Services",
+      "priority_tier": "P2"
+    }
+  ],
+  "question_style_notes": {
+    "entry": "Verbal problem-solving prompts on embedding retrieval, chunking trade-offs, and basic prompt testing on projects. No assumption of massive production LLM spend.",
+    "mid": "Production RAG evaluation, reranking pipelines, structured tool calling, latency optimization, and hallucinations mitigation.",
+    "senior": "Multi-agent workflows, semantic cache topologies, token cost economics, model distillation/fine-tuning trade-offs, and automated red-teaming.",
+    "lead": "Enterprise AI governance, safety compliance, high-volume inference infrastructure, and foundation model selection strategy."
+  },
+  "skills": [
+    {
+      "key": "llm_rag",
+      "name": "LLM Application Design & RAG",
+      "category": "Core Technical",
+      "description": "Architects Retrieval-Augmented Generation (RAG) systems, semantic routing, vector embeddings, reranking, and context window assembly.",
+      "spoken_topic_label": "LLM application design and RAG",
+      "rubric_l1": "Passes entire raw documents into LLM prompt; ignores chunking, embeddings, or context overflow limits.",
+      "rubric_l2": "Uses basic naive RAG with fixed chunk sizes and cosine similarity; unaware of lost-in-the-middle phenomena or chunk fragmentation.",
+      "rubric_l3": "Designs advanced RAG pipelines utilizing semantic chunking, cross-encoder reranking, hybrid keyword-vector search, and metadata filtering.",
+      "rubric_l4": "Solves complex retrieval failures with query rewriting, hypothetical document embeddings (HyDE), and contextual compression.",
+      "rubric_l5": "Architects multi-hop reasoning graphs, hierarchical summary indices, and dynamic agentic retrieval workflows under tight latency budgets.",
+      "expectation_bank": {
+        "L2": [
+          "Explains the difference between parametric model memory and non-parametric retrieved context.",
+          "Implements basic document chunking strategies and generates vector embeddings using standard embedding models.",
+          "Performs vector similarity queries against vector stores to populate LLM prompt context."
+        ],
+        "L3": [
+          "Constructs hybrid search combining BM25 keyword matching with dense vector similarity.",
+          "Integrates cross-encoder rerankers to reorder candidate chunks prior to prompt injection.",
+          "Applies metadata filtering to isolate retrieval scopes by tenant, date, or document category."
+        ],
+        "L4": [
+          "Implements query decomposition and transformation (HyDE, step-back prompting) to address ambiguous user questions.",
+          "Mitigates the lost-in-the-middle phenomenon by optimizing chunk positioning and context compression.",
+          "Designs semantic caching layers to serve frequent questions without invoking downstream LLMs."
+        ],
+        "L5": [
+          "Architects agentic multi-hop retrieval workflows capable of iteratively querying disparate knowledge bases.",
+          "Benchmarks and tunes embedding vector quantization (HNSW vs IVFPQ) for sub-10ms billion-scale vector search."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose an application needs to answer questions based on a collection of PDF user manuals; talk me through how you would chunk, embed, and retrieve the right sections.",
+        "mid_prompt": "Walk me through how you improved the retrieval precision and recall of a RAG pipeline that frequently returned irrelevant or incomplete document excerpts.",
+        "senior_prompt": "Walk me through how you architected an enterprise RAG system that maintained high response accuracy while strictly respecting multi-tenant document permissions."
+      }
+    },
+    {
+      "key": "prompt_eval",
+      "name": "Prompt & Context Engineering and Evaluation",
+      "category": "Core Technical",
+      "description": "Develops structured prompt strategies, function/tool calling schemas, and automated offline/online LLM evaluation frameworks (Ragas, LLM-as-a-judge).",
+      "spoken_topic_label": "prompt engineering and model evaluation",
+      "rubric_l1": "Relies on manual vibing checks; hardcodes unformatted prompts without temperature or system prompt separation.",
+      "rubric_l2": "Uses few-shot examples and system prompts but lacks automated regression evaluation datasets or systematic metrics.",
+      "rubric_l3": "Implements structured JSON output schemas, rigorous few-shot exemplars, and automated evaluation metrics (faithfulness, answer relevance).",
+      "rubric_l4": "Designs robust LLM-as-a-judge evaluation pipelines with calibration against human ground-truth labels and bias mitigation.",
+      "rubric_l5": "Establishes continuous continuous-eval CI/CD regression gates, synthetic dataset generation, and dynamic context budgeting engines.",
+      "expectation_bank": {
+        "L2": [
+          "Structures prompts separating system directives, user instructions, and few-shot examples.",
+          "Enforces structured JSON output generation using schema enforcement or Pydantic models.",
+          "Collects test prompts to manually evaluate model response quality across iterations."
+        ],
+        "L3": [
+          "Implements automated offline evaluation suites scoring response faithfulness, answer relevance, and context precision.",
+          "Designs tool-calling schemas with strict parameter typing, validation, and error recovery.",
+          "Constructs golden evaluation datasets representing edge cases and adversarial candidate inputs."
+        ],
+        "L4": [
+          "Calibrates LLM-as-a-judge evaluators against human ratings to measure judge correlation and eliminate position bias.",
+          "Designs prompt optimization workflows that systematically reduce input token counts while retaining task accuracy.",
+          "Implements canary evaluation suites that gate model prompt releases on automated quality thresholds."
+        ],
+        "L5": [
+          "Architects synthetic data generation pipelines with self-critique loops to train and evaluate domain-specific judges.",
+          "Develops automated regression detection that catches subtle semantic drift across model upstream provider releases."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose an LLM needs to extract product details from customer support emails and return a strict JSON schema; talk me through how you ensure it adheres to the schema.",
+        "mid_prompt": "Walk me through how you built an automated evaluation pipeline to test whether a prompt modification actually improved answer quality without introducing regressions.",
+        "senior_prompt": "Walk me through how you calibrated an LLM-as-a-judge pipeline to ensure its scoring aligned reliably with human domain expert evaluations."
+      }
+    },
+    {
+      "key": "ml_fundamentals",
+      "name": "ML Fundamentals & Model Selection",
+      "category": "Domain & Architectural",
+      "description": "Evaluates foundational model architectures, parameter sizes, fine-tuning versus prompting trade-offs, and quantizations.",
+      "spoken_topic_label": "machine learning fundamentals and model selection",
+      "rubric_l1": "Views models as black boxes; confuses supervised fine-tuning with RAG; unaware of context window limits.",
+      "rubric_l2": "Knows common model families (OpenAI, Gemini, open-source) but cannot articulate when fine-tuning is justified over RAG or prompting.",
+      "rubric_l3": "Evaluates model selection trade-offs (latency, context size, cost, accuracy) and designs LoRA/PEFT fine-tuning pipelines when appropriate.",
+      "rubric_l4": "Optimizes models via quantization (AWQ, GGUF), knowledge distillation, and preference alignment (DPO, RLHF) for specific tasks.",
+      "rubric_l5": "Architects custom embedding model fine-tuning, domain adaptation on private corpora, and hybrid routing between small and large models.",
+      "expectation_bank": {
+        "L2": [
+          "Compares open-weight models with hosted proprietary API models across latency, privacy, and operating cost.",
+          "Explains the difference between knowledge retrieval (RAG) and behavioral adaptation (fine-tuning).",
+          "Identifies tokenization behavior and explains how special tokens impact prompt execution."
+        ],
+        "L3": [
+          "Selects appropriate model sizes (e.g. 8B vs 70B parameters) based on task complexity, throughput needs, and cost targets.",
+          "Prepares training datasets and executes parameter-efficient fine-tuning (LoRA / QLoRA) for specialized formatting.",
+          "Evaluates tokenizer characteristics across different languages, code, and numerical reasoning."
+        ],
+        "L4": [
+          "Implements model routing layers that direct simple tasks to small fast models and complex queries to frontier reasoning models.",
+          "Applies model quantization techniques to decrease VRAM memory footprint while preserving task perplexity.",
+          "Fine-tunes domain-specific embedding models using contrastive triplet loss to boost domain retrieval."
+        ],
+        "L5": [
+          "Designs model distillation pipelines where frontier models teach compact on-device models for high-throughput edge tasks.",
+          "Formulates alignment strategies utilizing Direct Preference Optimization (DPO) to correct undesirable model behaviors."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose your team needs to decide between using a hosted frontier model API versus self-hosting an open-source model; talk me through the factors you would weigh.",
+        "mid_prompt": "Walk me through how you evaluated whether a specific customer workflow required fine-tuning a model or could be solved through in-context few-shot prompting.",
+        "senior_prompt": "Walk me through how you designed a dynamic model routing architecture that cut LLM operational expenditure without reducing output quality."
+      }
+    },
+    {
+      "key": "production_ai_systems",
+      "name": "Production AI Systems (latency, cost, monitoring, guardrails)",
+      "category": "Architecture",
+      "description": "Engineers production streaming inference, input/output guardrails (NeMo, Llama Guard), token cost management, rate limits, and observability.",
+      "spoken_topic_label": "production AI systems and observability",
+      "rubric_l1": "Deploys blocking LLM calls in UI threads; no monitoring of token costs, rate limits, or safety guardrails.",
+      "rubric_l2": "Implements streaming responses and basic rate limiting but lacks guardrails for prompt injection or system monitoring.",
+      "rubric_l3": "Implements production streaming with TTFT optimization, token spend budgets, and content safety filters (PII, injection defense).",
+      "rubric_l4": "Architects comprehensive guardrail layers (speculative execution, semantic safety checks), fallback model cascades, and distributed tracing.",
+      "rubric_l5": "Designs enterprise-scale inference infrastructure handling thousands of concurrent tokens/sec with sub-second time-to-first-token.",
+      "expectation_bank": {
+        "L2": [
+          "Implements streaming token generation (Server-Sent Events / WebSockets) to reduce perceived user latency.",
+          "Monitors basic API error codes (429 Rate Limit, 503 Overloaded) and implements exponential backoff.",
+          "Applies basic keyword regex or prompt boundary tags to resist obvious prompt injection attempts."
+        ],
+        "L3": [
+          "Instruments time-to-first-token (TTFT) and tokens-per-second (TPS) metrics across production LLM endpoints.",
+          "Integrates input/output guardrails to filter Personally Identifiable Information (PII) and harmful content.",
+          "Configures automated failover cascades to secondary providers when primary LLM APIs experience outages."
+        ],
+        "L4": [
+          "Designs multi-stage defense against indirect prompt injection and jailbreaking across untrusted external documents.",
+          "Optimizes end-to-end user latency using speculative decoding, prompt caching, or streaming parallel tool execution.",
+          "Builds granular cost attribution tracking token expenditure per tenant and user workflow."
+        ],
+        "L5": [
+          "Architects high-throughput self-hosted inference clusters (vLLM / TensorRT-LLM) optimizing continuous batching and KV-cache utilization.",
+          "Establishes automated red-teaming frameworks continuously probing model endpoints for adversarial vulnerabilities."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose users report that your AI assistant feels slow to respond; talk me through how you would measure latency and improve perceived speed.",
+        "mid_prompt": "Walk me through how you defended an AI application that accepts untrusted user uploads against indirect prompt injection attacks.",
+        "senior_prompt": "Walk me through how you architected a high-concurrency LLM service to guarantee sub-second time-to-first-token while controlling operating costs."
+      }
+    },
+    {
+      "key": "data_retrieval_pipelines",
+      "name": "Data & Retrieval Pipelines",
+      "category": "Tooling",
+      "description": "Constructs data ingestion pipelines, document parsing (OCR, tables, layout analysis), vector index synchronization, and deduplication.",
+      "rubric_l1": "Copies unstructured text directly into database without cleaning, schema extraction, or chunk metadata.",
+      "rubric_l2": "Parses basic text files but fails on scanned PDFs, complex tables, duplicate documents, and vector index updates.",
+      "rubric_l3": "Builds robust ETL pipelines extracting text and tables from complex documents, maintaining vector store freshness and metadata sync.",
+      "rubric_l4": "Designs incremental change-data-capture (CDC) pipelines synchronizing enterprise databases with vector indexes with exactly-once semantics.",
+      "rubric_l5": "Architects multimodal ingestion systems handling diagrams, audio, and tables with semantic graph linkages and automated lineage.",
+      "expectation_bank": {
+        "L2": [
+          "Extracts text and structure from standard document formats (Markdown, HTML, plain text).",
+          "Attaches essential metadata (source URI, timestamp, author) to ingested document chunks.",
+          "Handles basic file parsing exceptions and formats inputs cleanly before embedding generation."
+        ],
+        "L3": [
+          "Constructs document ingestion pipelines that accurately preserve tabular structures and section hierarchies.",
+          "Implements document deduplication and near-duplicate hashing (MinHash / SimHash) to prevent index pollution.",
+          "Schedules vector index update jobs that purge stale embeddings when documents are modified or deleted."
+        ],
+        "L4": [
+          "Builds change-data-capture (CDC) pipelines synchronizing transactional database mutations with vector stores in real time.",
+          "Integrates layout-aware vision models to extract complex multi-column documents and embedded charts.",
+          "Establishes automated data validation checks that prevent corrupted or empty chunks from entering production vector indices."
+        ],
+        "L5": [
+          "Architects distributed streaming ingestion pipelines processing millions of daily documents with end-to-end data lineage.",
+          "Constructs hybrid knowledge graphs connecting unstructured text embeddings with structured relational entities."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose you need to ingest technical documentation that includes markdown tables and code snippets; talk me through how you would parse and preserve that structure.",
+        "mid_prompt": "Walk me through how you built a pipeline to keep a vector database synchronized with a live document repository where files are constantly added, updated, and deleted.",
+        "senior_prompt": "Walk me through how you handled ingestion and indexing for complex multimodal documents containing both text and dense architectural diagrams."
+      }
+    }
+  ],
+  "seniority_profiles": {
+    "entry": {
+      "llm_rag": { "included": true, "tier": "P0", "weight": 40.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "prompt_eval": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "data_retrieval_pipelines": { "included": true, "tier": "P1", "weight": 25.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "production_ai_systems": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "ml_fundamentals": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" }
+    },
+    "mid": {
+      "llm_rag": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "prompt_eval": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "production_ai_systems": { "included": true, "tier": "P1", "weight": 25.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "data_retrieval_pipelines": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "ml_fundamentals": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L3", "target_level_max": "L4" }
+    },
+    "senior": {
+      "llm_rag": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "production_ai_systems": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "prompt_eval": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "ml_fundamentals": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "data_retrieval_pipelines": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+    },
+    "lead": {
+      "production_ai_systems": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "llm_rag": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "ml_fundamentals": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "prompt_eval": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "data_retrieval_pipelines": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+    }
+  }
+}

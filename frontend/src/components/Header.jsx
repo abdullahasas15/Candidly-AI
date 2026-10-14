@@ -88,6 +88,13 @@ export default function Header({
               <div className="flex items-center gap-2">
                 <button
                   onClick={onOpenDashboard}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all"
+                >
+                  {authUser.role === 'candidate' ? <Briefcase className="w-3.5 h-3.5" /> : <Building className="w-3.5 h-3.5" />}
+                  <span>{authUser.role === 'candidate' ? 'Explore Jobs' : 'Recruiter Console'}</span>
+                </button>
+                <button
+                  onClick={onOpenDashboard}
                   className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200/80 dark:bg-slate-800/90 dark:hover:bg-slate-700/80 border border-slate-200/80 dark:border-slate-700/80 text-xs font-semibold text-slate-800 dark:text-slate-200 transition-all"
                 >
                   <span className={`w-2 h-2 rounded-full ${authUser.role === 'recruiter' ? 'bg-indigo-500' : 'bg-emerald-500'} animate-pulse`} />

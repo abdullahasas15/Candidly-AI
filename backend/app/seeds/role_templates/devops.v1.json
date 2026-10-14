@@ -1,0 +1,253 @@
+{
+  "role_key": "devops",
+  "display_name": "DevOps & Site Reliability Engineer (SRE)",
+  "description": "Engineers automated release pipelines, Cloud Infrastructure as Code (IaC), Kubernetes container platforms, observability, and incident recovery.",
+  "version": 1,
+  "default_duration_mins": 30,
+  "default_interviewer_tone": "Direct, operational, reliability-focused; probes for failure modes, rollback strategies, infrastructure drift, and incident resolution.",
+  "default_pacing": "Balanced",
+  "suggested_certifications": [
+    {
+      "name": "Certified Kubernetes Administrator (CKA)",
+      "issuing_org": "Cloud Native Computing Foundation (CNCF)",
+      "priority_tier": "P0"
+    },
+    {
+      "name": "AWS Certified DevOps Engineer - Professional",
+      "issuing_org": "Amazon Web Services",
+      "priority_tier": "P1"
+    },
+    {
+      "name": "HashiCorp Certified: Terraform Associate",
+      "issuing_org": "HashiCorp",
+      "priority_tier": "P1"
+    }
+  ],
+  "question_style_notes": {
+    "entry": "Verbal problem-solving on Dockerfile layering, basic CI script syntax, and Linux permission debugging. No assumption of multi-region production clusters.",
+    "mid": "Terraform state locks and drift, zero-downtime blue/green releases, Kubernetes pod eviction causes, and alert routing.",
+    "senior": "Multi-cluster service meshes, disaster recovery failovers, cost governance, infrastructure security policies, and post-mortem incident response.",
+    "lead": "Platform engineering strategy, SLO/error budget governance, chaos engineering adoption, and compliance automation."
+  },
+  "skills": [
+    {
+      "key": "cicd_release",
+      "name": "CI/CD & Release Engineering",
+      "category": "Core Technical",
+      "description": "Builds automated build/test pipelines, container image signing, canary and blue/green deployments, and automated rollbacks.",
+      "spoken_topic_label": "CI/CD and release engineering",
+      "rubric_l1": "Deploys manual tarballs/FTP directly to servers; no automated tests or version control release triggers.",
+      "rubric_l2": "Configures basic GitHub Actions or Jenkins jobs for build/test but lacks environment promotion, secrets management, or automated rollbacks.",
+      "rubric_l3": "Builds secure CI/CD pipelines with immutable container tags, environment gates, automated smoke tests, and rollback triggers.",
+      "rubric_l4": "Implements progressive canary deployments (ArgoCD/Flagger), cryptographic image provenance (Cosign), and automated SLO burn verification.",
+      "rubric_l5": "Architects enterprise-wide ephemeral preview environments, trunk-based release automation, and supply chain security frameworks (SLSA 4).",
+      "expectation_bank": {
+        "L2": [
+          "Configures automated pipeline stages for linting, unit testing, and artifact building.",
+          "Secures build environments using injected repository secrets rather than hardcoded credentials.",
+          "Tags release artifacts with immutable commit SHAs or semantic version numbers."
+        ],
+        "L3": [
+          "Implements zero-downtime blue/green or rolling deployment strategies with automated health check gates.",
+          "Automates immediate rollback procedures when post-deployment smoke tests or health probes fail.",
+          "Separates continuous integration builds from continuous deployment release manifests."
+        ],
+        "L4": [
+          "Implements progressive traffic-splitting canary releases utilizing metric-based analysis (e.g. error rate, p99 latency).",
+          "Signs container images and validates cryptographic provenance in CI prior to cluster deployment.",
+          "Optimizes pipeline execution speed utilizing remote Docker layer caching and parallelized test matrices."
+        ],
+        "L5": [
+          "Architects self-service developer platform pipelines that provision ephemeral preview environments on pull requests.",
+          "Establishes enterprise-wide software supply chain security standards compliance (SLSA Level 3+)."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose a CI build takes 30 minutes because dependencies are re-downloaded on every commit; talk me through how you would optimize that pipeline.",
+        "mid_prompt": "Walk me through how you designed a deployment pipeline to release updates with zero downtime and automated rollbacks if errors spike.",
+        "senior_prompt": "Walk me through how you implemented a progressive canary deployment strategy with automated analysis across a high-traffic production service."
+      }
+    },
+    {
+      "key": "cloud_iac",
+      "name": "Cloud Infrastructure & IaC",
+      "category": "Architecture",
+      "description": "Provisions scalable cloud resources using Terraform, OpenTofu, or Pulumi; manages state locking, module reusability, and drift detection.",
+      "spoken_topic_label": "cloud infrastructure and IaC",
+      "rubric_l1": "Clicks around in cloud provider web consoles; creates unmanaged cloud resources without version control.",
+      "rubric_l2": "Writes monolithic Terraform files with hardcoded variables; struggles with state locking, remote backends, and secret isolation.",
+      "rubric_l3": "Develops modular, reusable IaC with remote state locking, least-privilege IAM roles, VPC isolation, and automated plan reviews.",
+      "rubric_l4": "Implements continuous drift detection, automated policy-as-code enforcement (OPA, Sentinel), and zero-trust VPC peering topologies.",
+      "rubric_l5": "Architects multi-region cloud disaster recovery failover architectures, cloud landing zones, and automated finops cost governance.",
+      "expectation_bank": {
+        "L2": [
+          "Defines standard cloud compute and storage resources using structured Infrastructure as Code manifests.",
+          "Configures remote state backends (e.g. S3 with DynamoDB locking or GCS) to enable safe team collaboration.",
+          "Applies parameterization using input variables and environment-specific variable files."
+        ],
+        "L3": [
+          "Authors reusable, composable Terraform modules with validated input types and explicit outputs.",
+          "Implements least-privilege IAM roles and service account permissions adhering to security best practices.",
+          "Designs secure VPC network topologies separating public edge load balancers from private database subnets."
+        ],
+        "L4": [
+          "Builds automated policy-as-code pipelines using Open Policy Agent (OPA) to prevent insecure infrastructure changes.",
+          "Detects and reconciles infrastructure state drift across multiple accounts without service interruption.",
+          "Architects multi-region VPC peering and transit gateway routing with private service endpoints."
+        ],
+        "L5": [
+          "Architects enterprise landing zones with automated account vending, governance guardrails, and compliance guardrails.",
+          "Develops automated disaster recovery failover pipelines capable of reprovisioning entire cloud environments in minutes."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose your team needs to manage cloud servers using Terraform; talk me through why and how you would configure remote state locking.",
+        "mid_prompt": "Walk me through how you handled a situation where manual console changes caused unexpected Terraform state drift in a production environment.",
+        "senior_prompt": "Walk me through how you architected a multi-account cloud landing zone with automated security policy guardrails."
+      }
+    },
+    {
+      "key": "containers_k8s",
+      "name": "Containers & Kubernetes",
+      "category": "Core Technical",
+      "description": "Architects container lifecycles, Docker multi-stage builds, Kubernetes controllers, Helm charts, Ingress, HPA, and node scheduling.",
+      "spoken_topic_label": "containers and Kubernetes",
+      "rubric_l1": "Runs fat container images containing build tools and secrets; does not understand pod lifecycles or container limits.",
+      "rubric_l2": "Writes standard Dockerfiles and basic Kubernetes Deployment YAMLs but misconfigures CPU/memory requests, limits, and probes.",
+      "rubric_l3": "Authors slim multi-stage container images, configures accurate liveness/readiness probes, resource limits, and Horizontal Pod Autoscaling (HPA).",
+      "rubric_l4": "Diagnoses node pressure, crashloopbackoffs, OOMKilled events; designs PodDisruptionBudgets, node affinities, and custom operators.",
+      "rubric_l5": "Architects multi-tenant Kubernetes clusters, custom CRDs and admission controllers, and eBPF-based service mesh networks (Cilium/Istio).",
+      "expectation_bank": {
+        "L2": [
+          "Constructs multi-stage Dockerfiles that eliminate build toolchains from final production runtime images.",
+          "Explains the difference between Kubernetes Pods, Deployments, and Services.",
+          "Configures basic CPU and memory resource requests and limits on container manifests."
+        ],
+        "L3": [
+          "Configures liveness, readiness, and startup probes to prevent traffic routing to unready or deadlocked pods.",
+          "Implements Horizontal Pod Autoscaling (HPA) responding accurately to CPU, memory, and custom Prometheus metrics.",
+          "Manages application configuration and secrets using ConfigMaps, Secrets, and volume mounts."
+        ],
+        "L4": [
+          "Diagnoses complex cluster issues including OOMKilled pods, node disk pressure, and CrashLoopBackOff states.",
+          "Enforces high availability using PodDisruptionBudgets, topology spread constraints, and anti-affinity rules.",
+          "Authors modular Helm charts or Kustomize overlays supporting multiple staging and production clusters."
+        ],
+        "L5": [
+          "Authors custom Kubernetes Operators and Custom Resource Definitions (CRDs) automating stateful application operations.",
+          "Architects multi-tenant cluster isolation using network policies, admission webhooks, and eBPF network layers."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose a containerized app keeps restarting immediately after deployment in Kubernetes; talk me through how you would inspect and diagnose the issue.",
+        "mid_prompt": "Walk me through how you tuned Kubernetes CPU/memory requests and Horizontal Pod Autoscaling for a service facing sudden traffic spikes.",
+        "senior_prompt": "Walk me through how you designed a multi-tenant Kubernetes cluster topology that enforced strict resource and network isolation across teams."
+      }
+    },
+    {
+      "key": "observability_incident",
+      "name": "Observability & Incident Response",
+      "category": "Tooling",
+      "description": "Implements metrics, structured logging, distributed tracing (OpenTelemetry), SLO/SLA error budgets, and incident command protocols.",
+      "spoken_topic_label": "observability and incident response",
+      "rubric_l1": "No centralized logging; logs in raw unparsed text; learns of outages only when customers complain on social media.",
+      "rubric_l2": "Sets up standard dashboards (CPU/RAM usage) and high-volume alerts; suffers from alert fatigue and lacks distributed tracing.",
+      "rubric_l3": "Instruments OpenTelemetry tracing, RED/USE metrics, structured JSON logs with trace correlation, and actionable symptom-based alerts.",
+      "rubric_l4": "Defines SLIs/SLOs and error budget burn rate alerting; leads live incident triage calls and executes blameless post-mortems.",
+      "rubric_l5": "Architects automated incident self-healing (auto-remediation), proactive chaos engineering experiments, and enterprise reliability culture.",
+      "expectation_bank": {
+        "L2": [
+          "Formats application logs as structured JSON containing timestamps, log levels, and contextual metadata.",
+          "Interprets basic telemetry dashboards visualizing request rates, error codes, and server resource usage.",
+          "Differentiates between metric gauges, counters, and histograms in monitoring tools."
+        ],
+        "L3": [
+          "Instruments OpenTelemetry distributed tracing to trace request lifecycles across microservice boundaries.",
+          "Configures symptom-based alerts tied to customer impact rather than noisy internal resource fluctuations.",
+          "Participates effectively in on-call rotations and systematic incident triage workflows."
+        ],
+        "L4": [
+          "Establishes Service Level Indicators (SLIs) and multi-window burn rate alerts on critical user journeys.",
+          "Analyzes distributed trace flame graphs to isolate downstream latency bottlenecks and database lock stalls.",
+          "Conducts thorough, blameless post-mortem investigations producing preventative remediation tickets."
+        ],
+        "L5": [
+          "Designs automated self-healing mechanisms that isolate or restart malfunctioning service dependencies during incidents.",
+          "Executes automated chaos engineering fault injection in production to validate resilience assumptions."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose your service is throwing intermittent 500 errors; talk me through how structured logging and correlation IDs help you isolate the root cause.",
+        "mid_prompt": "Walk me through how you overhauled a noisy alerting system to eliminate alert fatigue while ensuring critical incidents were caught immediately.",
+        "senior_prompt": "Walk me through how you led the response to a major production outage where telemetry data was contradictory or incomplete."
+      }
+    },
+    {
+      "key": "linux_networking",
+      "name": "Linux & Networking Fundamentals",
+      "category": "Core Technical",
+      "description": "Masters Linux kernel primitives, systemd, process signals, DNS resolution, TCP/IP stack tuning, TLS certificates, and firewalls.",
+      "rubric_l1": "Struggles with basic shell commands and file permissions; does not understand DNS lookup sequence or IP routing.",
+      "rubric_l2": "Navigates Linux file systems and inspects top/ps output but cannot debug network packet drops, DNS caching, or TLS handshake errors.",
+      "rubric_l3": "Debugs network connectivity using tcpdump/curl/dig, inspects systemd unit states, manages file permissions (chmod/chown), and provisions TLS certs.",
+      "rubric_l4": "Tunes Linux kernel sysctl parameters (tcp_tw_reuse, file-max, somaxconn), analyzes strace/lsof outputs, and debugs MTU/routing issues.",
+      "rubric_l5": "Leverages eBPF programs for kernel tracing and packet filtering; designs BGP peering and Software-Defined Networking (SDN) topologies.",
+      "expectation_bank": {
+        "L2": [
+          "Navigates Linux directories, modifies file permissions, and manages background processes using signals (SIGTERM, SIGKILL).",
+          "Traces DNS resolution flows from local resolver cache to authoritative nameservers using dig/nslookup.",
+          "Inspects open network ports and listening sockets using netstat/ss commands."
+        ],
+        "L3": [
+          "Captures and analyzes network packets using tcpdump or Wireshark to isolate connection resets and latency spikes.",
+          "Manages daemon lifecycles, log outputs, and restart policies using systemd unit files.",
+          "Configures TLS/SSL certificates and diagnoses handshake negotiation and certificate authority chain errors."
+        ],
+        "L4": [
+          "Tunes Linux kernel networking parameters (sysctl somaxconn, ephemeral port ranges) to support high-throughput network services.",
+          "Uses strace, lsof, and vmstat to diagnose disk I/O bottlenecks and stalled system calls.",
+          "Troubleshoots network routing, subnet masking, and MTU packet fragmentation across cloud VPC networks."
+        ],
+        "L5": [
+          "Develops custom eBPF kernel probes for real-time security auditing and network traffic shaping.",
+          "Architects BGP routing and software-defined network fabrics interconnecting hybrid on-premise and cloud datacenters."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose a server cannot connect to an external API endpoint; talk me through the step-by-step commands you use to isolate whether it is DNS, firewall, or application failure.",
+        "mid_prompt": "Walk me through a time you used tools like strace, tcpdump, or system logs to diagnose a low-level Linux performance or networking issue.",
+        "senior_prompt": "Walk me through how you tuned Linux kernel socket and networking parameters to handle hundreds of thousands of concurrent client connections."
+      }
+    }
+  ],
+  "seniority_profiles": {
+    "entry": {
+      "cicd_release": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "containers_k8s": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "linux_networking": { "included": true, "tier": "P1", "weight": 30.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "cloud_iac": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "observability_incident": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" }
+    },
+    "mid": {
+      "cloud_iac": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "containers_k8s": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "cicd_release": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "observability_incident": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "linux_networking": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L3", "target_level_max": "L4" }
+    },
+    "senior": {
+      "cloud_iac": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "containers_k8s": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "observability_incident": { "included": true, "tier": "P1", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "cicd_release": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "linux_networking": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+    },
+    "lead": {
+      "cloud_iac": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "observability_incident": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "containers_k8s": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "cicd_release": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "linux_networking": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+    }
+  }
+}

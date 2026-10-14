@@ -46,16 +46,17 @@ export default function AuthModal({
   };
 
   const handleAuthComplete = (authResponse) => {
-    if (authResponse.access_token) {
-      localStorage.setItem('candidly-auth-token', authResponse.access_token);
+    const token = authResponse.access_token;
+    const baseUser = authResponse.user || authResponse;
+    const userWithToken = token ? { ...baseUser, access_token: token } : baseUser;
+    if (token) {
+      localStorage.setItem('candidly-auth-token', token);
+      if (userWithToken?.role) {
+        localStorage.setItem(`candidly-auth-token-${userWithToken.role}`, token);
+      }
     }
-    if (authResponse.user) {
-      localStorage.setItem('candidly-auth-user', JSON.stringify(authResponse.user));
-      onSuccess(authResponse.user);
-    } else {
-      localStorage.setItem('candidly-auth-user', JSON.stringify(authResponse));
-      onSuccess(authResponse);
-    }
+    localStorage.setItem('candidly-auth-user', JSON.stringify(userWithToken));
+    onSuccess(userWithToken);
   };
 
   const handleSubmit = async (e) => {

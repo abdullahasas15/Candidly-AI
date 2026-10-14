@@ -1,12 +1,27 @@
-# Byte-compiled / optimized / DLL files
+# =====================================================================
+# CANDIDLY AI VOICE INTERVIEW PLATFORM - .gitignore
+# =====================================================================
+
+# Environment & Credentials (NEVER commit secrets)
+.env
+.env.*
+.env.local
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python Bytecode & Packaging
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -26,46 +41,52 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Virtual Environments
-.venv/
-venv/
-ENV/
-env/
-
-# Environment variables
-.env
-.env.*
-!.env.example
-
-# IDEs
-.idea/
-*.swp
-*.swo
-
-# macOS
-.DS_Store
-
-# Logs & temp files
-*.log
-logs/
-tmp/
-temp/
-uploads/
-audio_cache/
-
-# Testing & Coverage
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Node / JS
+# Node & Frontend Build Outputs
 node_modules/
+frontend/node_modules/
+frontend/dist/
+.vite/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.claude
+
+# Testing, Cache & Ephemeral Benchmark Results
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+docs/matrix_cache.json
+docs/r3_matrix_results.json
+docs/*.cache.json
+
+# Local Media, Audio & Uploads
+audio_cache/
+recordings/
+uploads/
+tmp/
+temp/
+*.log
+logs/
+
+# Knowledge Graph & Assistant Artifacts
+graphify-out/
+.graphify*
+.claude/
 CLAUDE.md
-graphify-out
-scripts
+.gemini/
 DATABASE_TABLES_AND_LLM_PIPELINE.md
-/Users/mohammadabdullah/Documents/CANDIDLY AI VOICE INTERVIEW PLATFORM/DATABASE_TABLES_AND_LLM_PIPELINE.md
+
+# Operating System & IDE Artifacts
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+
+# Root temporary image crops & debugging captures
+/*.png
+/*.jpg
+/*.jpeg

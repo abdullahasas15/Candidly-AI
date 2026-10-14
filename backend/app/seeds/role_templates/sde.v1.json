@@ -1,0 +1,248 @@
+{
+  "role_key": "sde",
+  "display_name": "Software Development Engineer (SDE)",
+  "description": "Generalist software engineer building robust backend services, data structures, APIs, and scalable distributed architectures.",
+  "version": 1,
+  "default_duration_mins": 30,
+  "default_interviewer_tone": "Direct, technical, tech-lead caliber; probes for architectural trade-offs; warm but concise.",
+  "default_pacing": "Balanced",
+  "suggested_certifications": [
+    {
+      "name": "AWS Certified Solutions Architect - Associate",
+      "issuing_org": "Amazon Web Services",
+      "priority_tier": "P1"
+    },
+    {
+      "name": "Google Cloud Associate Cloud Engineer",
+      "issuing_org": "Google Cloud",
+      "priority_tier": "P2"
+    }
+  ],
+  "question_style_notes": {
+    "entry": "Verbal problem-solving prompts (e.g. streaming data, choosing hash maps vs trees) and coursework/project architecture. No assumption of enterprise production scale.",
+    "mid": "Production trade-offs, API versioning, error boundaries, concurrency bugs, and service boundaries.",
+    "senior": "Distributed failure modes, database indexing and isolation, cross-service consensus, and operational latency profiling.",
+    "lead": "System architecture evolution, SLA vs infrastructure cost balance, engineering standards, and technical incident governance."
+  },
+  "skills": [
+    {
+      "key": "data_structures",
+      "name": "Data Structures & Problem Solving",
+      "category": "Core Technical",
+      "description": "Selects, analyzes, and implements optimal data structures and algorithmic complexity bounds for high-throughput computational workloads.",
+      "spoken_topic_label": "data structures and problem solving",
+      "rubric_l1": "Fails basic algorithmic analysis; defaults to O(N^2) brute-force without recognizing hash table or two-pointer simplifications.",
+      "rubric_l2": "Selects standard collections (arrays, hash maps) correctly but struggles with space-time trade-offs and edge cases like overflow or off-by-one bounds.",
+      "rubric_l3": "Designs clean, production-grade algorithms with verified optimal time and auxiliary space complexity, handling corner cases cleanly.",
+      "rubric_l4": "Optimizes algorithmic trade-offs, amortized complexity, bounded memory collections, and high-throughput data processing under heavy load.",
+      "rubric_l5": "Applies lock-free algorithmic primitives, customized memory allocators, or hardware-aware bitwise structures for ultra-low latency.",
+      "expectation_bank": {
+        "L2": [
+          "Identifies baseline time and auxiliary space complexity for standard array and map operations.",
+          "Selects appropriate built-in data structures (lists, hash sets, queues) to solve standard algorithmic tasks.",
+          "Verifies boundary conditions such as empty collections, single-item inputs, and index boundaries."
+        ],
+        "L3": [
+          "Implements optimal algorithmic solutions meeting strict O(N) or O(N log N) runtime bounds.",
+          "Evaluates auxiliary memory overhead and avoids unnecessary object allocations during hot-path execution.",
+          "Analyzes amortized runtime behavior for dynamic data structures under continuous mutation."
+        ],
+        "L4": [
+          "Restructures algorithmic data access patterns to minimize amortized complexity and auxiliary allocation overhead under heavy load.",
+          "Identifies and eliminates hidden non-linear complexity bottlenecks in core operational loops.",
+          "Designs thread-safe collections utilizing read-write locks or fine-grained concurrency control."
+        ],
+        "L5": [
+          "Architects lock-free or wait-free algorithmic primitives using atomic operations to prevent thread contention.",
+          "Evaluates algorithmic trade-offs against underlying memory bus bandwidth and cache hierarchy constraints."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose you are receiving a continuous stream of numeric events and need to return the top K most frequent items at any moment; talk me through the data structures and complexity trade-offs you would consider.",
+        "mid_prompt": "Walk me through how you diagnosed and resolved an unexpected algorithmic bottleneck in a service whose processing latency degraded as payload volume scaled.",
+        "senior_prompt": "Walk me through how you redesigned a data structure hot path to eliminate memory allocation churn and maximize cache line throughput under peak write load."
+      }
+    },
+    {
+      "key": "cs_fundamentals",
+      "name": "Core CS Fundamentals",
+      "category": "Core Technical",
+      "description": "Applies operating system concepts, concurrency primitives, thread lifecycles, network sockets, and memory models.",
+      "spoken_topic_label": "core computer science fundamentals",
+      "rubric_l1": "Lacks clarity on processes vs threads; confuses stack vs heap memory and socket protocols.",
+      "rubric_l2": "Understands processes vs threads but cannot diagnose race conditions, deadlocks, or socket connection limits.",
+      "rubric_l3": "Correctly employs synchronization primitives (mutexes, semaphores, channels) and explains TCP/UDP connection handshakes.",
+      "rubric_l4": "Diagnoses race conditions, thread starvation, socket exhaustion (TIME_WAIT), and kernel vs user-space context switching overhead.",
+      "rubric_l5": "Architects high-performance non-blocking I/O event loops and reasons about CPU memory barriers and instruction reordering.",
+      "expectation_bank": {
+        "L2": [
+          "Differentiates between stack and heap memory allocation lifecycles.",
+          "Explains the operational differences between process memory isolation and shared thread memory.",
+          "Identifies common socket communication states and HTTP protocol layers."
+        ],
+        "L3": [
+          "Applies mutexes, semaphores, or channels to safeguard shared state across concurrent execution threads.",
+          "Traces network request lifecycles from DNS lookup through TCP 3-way handshake to socket read.",
+          "Prevents common deadlock conditions by establishing consistent lock acquisition ordering."
+        ],
+        "L4": [
+          "Diagnoses subtle race conditions and memory leaks using profiling tools and thread dumps.",
+          "Mitigates OS-level resource limits including file descriptor limits and socket TIME_WAIT exhaustion.",
+          "Explains context switching latency and CPU core affinity trade-offs in multithreaded runtimes."
+        ],
+        "L5": [
+          "Designs asynchronous non-blocking event loops using epoll/kqueue models for massive socket concurrency.",
+          "Analyzes CPU memory visibility models, cache coherence protocols (MESI), and memory barriers."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose two worker threads need to process and increment items in a shared counter queue; talk me through how you ensure data consistency without corrupting memory.",
+        "mid_prompt": "Walk me through a time you tracked down a tricky multithreading race condition or memory leak in a backend service.",
+        "senior_prompt": "Walk me through how you designed a high-concurrency connection handler to prevent thread pool exhaustion and kernel context switching overhead."
+      }
+    },
+    {
+      "key": "backend_api",
+      "name": "Backend & API Design",
+      "category": "Architecture",
+      "description": "Designs robust REST/gRPC interfaces, idempotent write semantics, authentication boundaries, and input validation schemas.",
+      "spoken_topic_label": "backend and API design",
+      "rubric_l1": "Creates inconsistent endpoint schemas, neglects HTTP status codes, and ignores error response bodies.",
+      "rubric_l2": "Implements basic CRUD endpoints with standard HTTP verbs but lacks pagination, idempotency, or contract versioning.",
+      "rubric_l3": "Produces clean RESTful or gRPC APIs with cursor-based pagination, consistent error contracts, and secure request validation.",
+      "rubric_l4": "Designs robust idempotent payment/mutation semantics using deduplication keys, backward-compatible schemas, and rate limiting.",
+      "rubric_l5": "Designs resilient cross-service API contracts, zero-trust authentication boundaries, and automated schema evolution across microservices.",
+      "expectation_bank": {
+        "L2": [
+          "Follows REST conventions for HTTP methods, path parameter naming, and appropriate status codes.",
+          "Implements input validation to reject malformed or missing payload attributes.",
+          "Applies basic offset-based pagination and standard JSON response envelopes."
+        ],
+        "L3": [
+          "Designs robust cursor-based pagination for high-volume collections to prevent database offset degradation.",
+          "Implements idempotency key verification on mutation endpoints to guarantee safe retry behavior.",
+          "Structures uniform API error contracts providing actionable error codes without leaking internal stack traces."
+        ],
+        "L4": [
+          "Architects distributed rate limiting using token bucket or sliding window algorithms across edge gateways.",
+          "Maintains backward and forward schema compatibility across multiple concurrently active API versions.",
+          "Defines granular authentication and role-based authorization boundaries at the API gateway layer."
+        ],
+        "L5": [
+          "Engineers service-level zero-trust authentication boundaries and mutual TLS communication between backend services.",
+          "Designs backward-compatible schema evolution strategies and automated contract testing pipelines across service boundaries."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose you are designing an API endpoint that returns a user's notification feed; talk me through how you would structure the request parameters, pagination, and error responses.",
+        "mid_prompt": "Walk me through how you designed an API endpoint that handles financial transactions or inventory updates to guarantee safe retries without duplicate executions.",
+        "senior_prompt": "Walk me through how you managed a major breaking change in a widely used external API while maintaining zero downtime and backward compatibility."
+      }
+    },
+    {
+      "key": "system_design",
+      "name": "System Design & Scalability",
+      "category": "Architecture",
+      "description": "Architects distributed systems utilizing caching layers, message queues, database sharding, and resilience mechanisms.",
+      "spoken_topic_label": "system design and scalability",
+      "rubric_l1": "Proposes single-server monoliths; ignores caching, replication, and single points of failure.",
+      "rubric_l2": "Mentions Redis and load balancers generically but cannot explain cache invalidation, write policies, or replication lag.",
+      "rubric_l3": "Designs reliable distributed topologies incorporating reverse proxies, read-replicas, asynchronous queues, and cache strategies.",
+      "rubric_l4": "Incorporates circuit breakers, bulkhead isolation, distributed consensus, and idempotent event consumers under network partitions.",
+      "rubric_l5": "Evaluates storage engine trade-offs (LSM vs B-Tree), global active-active quorum, and balances infrastructure cost against SLAs.",
+      "expectation_bank": {
+        "L2": [
+          "Explains the function of reverse proxies, load balancers, and horizontal scaling in backend systems.",
+          "Identifies single points of failure in basic single-node database and application topologies.",
+          "Distinguishes between synchronous HTTP calls and asynchronous message queue delivery."
+        ],
+        "L3": [
+          "Designs resilient multi-tier architectures with read replicas, caching layers, and asynchronous background workers.",
+          "Formulates cache invalidation and write-through/cache-aside strategies preventing stale reads.",
+          "Applies message queues (RabbitMQ/Kafka) to decouple high-load ingestion from slow processing pipelines."
+        ],
+        "L4": [
+          "Implements circuit breakers, retries with exponential backoff and jitter, and backpressure mechanisms.",
+          "Designs database sharding strategies and evaluates rebalancing overhead across partition keys.",
+          "Guarantees message processing semantics (at-least-once with idempotent consumer deduplication)."
+        ],
+        "L5": [
+          "Architects multi-region active-active distributed databases with conflict resolution and tunable quorum consistency.",
+          "Evaluates storage engine trade-offs (LSM trees vs B+ trees) based on read-to-write ratio and write amplification."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose an application needs to store and quickly display user profile pictures; talk me through the architectural components you would use from the browser to cloud storage.",
+        "mid_prompt": "Walk me through how you designed a system that experienced a 10x traffic spike while keeping downstream database latencies within acceptable bounds.",
+        "senior_prompt": "Walk me through how you architected a mission-critical distributed service to survive partial datacenter outages without dropping in-flight client writes."
+      }
+    },
+    {
+      "key": "debugging_testing",
+      "name": "Debugging & Testing",
+      "category": "Tooling",
+      "description": "Diagnoses production incidents, interprets telemetry logs and stack traces, and enforces automated testing strategies.",
+      "rubric_l1": "Relies entirely on print statements; cannot interpret stack traces or write automated test cases.",
+      "rubric_l2": "Writes standard unit tests with mocks but struggles with integration test boundaries and diagnosing intermittent flake.",
+      "rubric_l3": "Constructs comprehensive unit and integration test suites; systematically isolates production bugs using APM and logs.",
+      "rubric_l4": "Profiles CPU/memory flame graphs to isolate production stalls; creates hermetic integration test environments and chaos experiments.",
+      "rubric_l5": "Drives post-mortem root cause analysis culture; builds automated canary rollback pipelines and continuous verification frameworks.",
+      "expectation_bank": {
+        "L2": [
+          "Writes unit tests verifying standard happy-path inputs and common error conditions.",
+          "Interprets stack traces to isolate the originating source file and failing line of code.",
+          "Uses debugger breakpoints and structured logging statements to trace variable mutation."
+        ],
+        "L3": [
+          "Constructs integration tests using test containers or ephemeral databases to verify service boundaries.",
+          "Systematically debugs production errors using centralized logs, correlation IDs, and APM metrics.",
+          "Identifies and eliminates non-deterministic flaky tests in CI pipelines."
+        ],
+        "L4": [
+          "Analyzes memory heaps and CPU flame graphs to identify memory leaks and thread lock contention.",
+          "Simulates network latency and dependency failure modes using chaos engineering techniques.",
+          "Designs contract tests verifying upstream and downstream API schema compatibility."
+        ],
+        "L5": [
+          "Leads complex blameless post-mortem investigations and establishes preventative architectural guardrails.",
+          "Architects automated canary deployment gates that trigger immediate rollbacks on anomalous error budget burn."
+        ]
+      },
+      "question_patterns": {
+        "entry_prompt": "Suppose a unit test passes locally on your laptop but fails intermittently on the CI server; talk me through how you would investigate and isolate the issue.",
+        "mid_prompt": "Walk me through how you investigated a severe production latency spike where the root cause was not immediately apparent from error logs.",
+        "senior_prompt": "Walk me through how you established automated testing and release guardrails to prevent regressions in a system with legacy dependencies."
+      }
+    }
+  ],
+  "seniority_profiles": {
+    "entry": {
+      "data_structures": { "included": true, "tier": "P0", "weight": 40.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "cs_fundamentals": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "debugging_testing": { "included": true, "tier": "P1", "weight": 30.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "backend_api": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" },
+      "system_design": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" }
+    },
+    "mid": {
+      "data_structures": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "backend_api": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "system_design": { "included": true, "tier": "P1", "weight": 25.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "debugging_testing": { "included": true, "tier": "P1", "weight": 15.0, "target_level_min": "L3", "target_level_max": "L4" },
+      "cs_fundamentals": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L3", "target_level_max": "L4" }
+    },
+    "senior": {
+      "system_design": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "backend_api": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "data_structures": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "debugging_testing": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "cs_fundamentals": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+    },
+    "lead": {
+      "system_design": { "included": true, "tier": "P0", "weight": 40.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "backend_api": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "debugging_testing": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "data_structures": { "included": true, "tier": "P1", "weight": 15.0, "target_level_min": "L4", "target_level_max": "L5" },
+      "cs_fundamentals": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+    }
+  }
+}

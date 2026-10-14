@@ -7,6 +7,10 @@ class SkillCreate(BaseModel):
     category: str = "Core Technical"
     priority_tier: str = "P0" # P0, P1, P2
     weight_percentage: float = Field(..., ge=1.0, le=100.0)
+    template_skill_key: Optional[str] = None
+    target_level_min: Optional[str] = None
+    target_level_max: Optional[str] = None
+    source: str = "recruiter" # template, ai_suggested, recruiter
     rubric_l1: Optional[str] = None
     rubric_l2: Optional[str] = None
     rubric_l3: Optional[str] = None
@@ -20,6 +24,10 @@ class SkillResponse(BaseModel):
     category: str
     priority_tier: Optional[str] = None
     weight_percentage: Optional[float] = None
+    template_skill_key: Optional[str] = None
+    target_level_min: Optional[str] = None
+    target_level_max: Optional[str] = None
+    source: Optional[str] = "recruiter"
     rubric_l1: Optional[str] = None
     rubric_l2: Optional[str] = None
     rubric_l3: Optional[str] = None
@@ -80,12 +88,33 @@ class QuestionPlanResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+class RoleTemplateResponse(BaseModel):
+    id: str
+    role_key: str
+    display_name: str
+    description: str
+    version: int = 1
+    default_duration_mins: int = 30
+    default_interviewer_tone: Optional[str] = None
+    default_pacing: str = "Balanced"
+    suggested_certifications: List[Dict[str, Any]] = []
+    skills: List[Dict[str, Any]] = []
+    seniority_profiles: Dict[str, Any] = {}
+    question_style_notes: Dict[str, Any] = {}
+    is_active: bool = True
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class JobCreate(BaseModel):
     # Role Identity & Metadata
+    role_key: str = "custom"
+    role_template_id: Optional[str] = None
+    role_template_version: Optional[int] = None
     job_title: str
     department: str
     job_description: str = "N/A"
-    seniority_level: str = "Mid-Level (L4)"
+    seniority_level: str = "mid" # entry, mid, senior, lead
     employment_type: str = "Full-Time"
     workplace_model: str = "Remote"
     permitted_locations: List[str] = ["Global Remote", "United States", "India"]
@@ -134,6 +163,10 @@ class JobCreate(BaseModel):
 
 class JobResponse(BaseModel):
     id: str
+    role_key: Optional[str] = "custom"
+    role_template_id: Optional[str] = None
+    role_template_version: Optional[int] = None
+    role_display_name: Optional[str] = None
     job_title: str
     department: str
     job_description: str = "N/A"
@@ -167,6 +200,10 @@ class JobResponse(BaseModel):
     certifications: List[CertificationResponse] = []
     custom_questions: List[CustomQuestionResponse] = []
     question_plans: List[QuestionPlanResponse] = []
+    active_blueprint_id: Optional[str] = None
+    blueprint_status: Optional[str] = None
+    blueprint_is_stale: bool = False
+    accepts_applications: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -176,6 +213,27 @@ class CandidateApplicationPublicResponse(BaseModel):
     status: str
     applied_at: datetime
     job: Optional[JobResponse] = None
+    interview_generation_status: Optional[str] = None
+    interview_ready: bool = False
+    interview_completed: bool = False
+    interview_session_status: Optional[str] = None
+    interview_session_id: Optional[str] = None
+    candidate_summary: Optional[str] = None
+    feedback_submitted: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+class AuditEventResponse(BaseModel):
+    id: str
+    actor_id: Optional[str] = None
+    actor_role: Optional[str] = None
+    event_type: str
+    status: str
+    job_id: Optional[str] = None
+    application_id: Optional[str] = None
+    session_id: Optional[str] = None
+    metadata_json: Optional[dict] = None
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -357,6 +415,10 @@ class JobApplicationResponse(BaseModel):
     screening_answers: List[Dict[str, Any]] = []
     work_authorization: Optional[str] = "Authorized"
     visa_sponsorship_needed: bool = False
+    recruiter_decision: Optional[str] = None
+    recruiter_notes: Optional[str] = None
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -381,6 +443,14 @@ class JobApplicationListItem(BaseModel):
     expected_salary_currency: Optional[str] = "USD"
     discrepancy_count: int = 0
     unresolved_discrepancies: int = 0
+    recruiter_decision: Optional[str] = None
+    recruiter_notes: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    overall_score: Optional[float] = None
+    verdict: Optional[str] = None
+    insufficient_evidence: bool = False
+    integrity_flags_count: int = 0
+    interview_completed: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -392,6 +462,7 @@ class JobApplicationListItem(BaseModel):
 class InterviewQuestionCreate(BaseModel):
     session_id: str
     question_index: int
+    skill_id: Optional[str] = None
     skill_name: Optional[str] = None
     skill_category: Optional[str] = None
     priority_tier: Optional[str] = "P0"
@@ -403,6 +474,7 @@ class InterviewQuestionResponse(BaseModel):
     id: str
     session_id: str
     question_index: int
+    skill_id: Optional[str] = None
     skill_name: Optional[str] = None
     skill_category: Optional[str] = None
     priority_tier: Optional[str] = None
@@ -411,9 +483,13 @@ class InterviewQuestionResponse(BaseModel):
     follow_up_depth_allowed: int = 2
     follow_up_count: int = 0
     candidate_answer_transcript: Optional[str] = None
-    evaluation_score: Optional[float] = None
-    evaluation_feedback: Optional[str] = None
+    question_state: str = "not_started"
+    coverage_status: Dict[str, Any] = {}
+    evidence_turn_ids: List[str] = []
+    approved_by_recruiter: bool = False
     created_at: datetime
+    generation_run_id: Optional[str] = None
+    superseded_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -422,7 +498,7 @@ class InterviewSessionCreate(BaseModel):
     job_id: str
     total_questions_planned: int = 5
     duration_planned_mins: int = 20
-    gemini_model_used: str = "gemini-2.5-flash"
+    gemini_model_used: str = "gemini-3.5-flash"
     system_prompt_snapshot: Optional[str] = None
 
 class InterviewSessionResponse(BaseModel):
@@ -430,14 +506,191 @@ class InterviewSessionResponse(BaseModel):
     application_id: str
     job_id: str
     status: str
+    current_phase: str = "greeting"
     total_questions_planned: int
     duration_planned_mins: int
     gemini_model_used: str
     system_prompt_snapshot: Optional[str] = None
+    interviewer_brief: Optional[str] = None
+    running_summary: Optional[str] = None
     current_question_index: int
+    follow_up_count_in_current: int = 0
+    speech_speed: float = 1.0
+    captions_enabled: bool = True
+    is_practice: bool = False
+    recording_consent: bool = False
+    recording_retention_days: int = 0
+    paused_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
     questions: List[InterviewQuestionResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CandidateInterviewQuestionResponse(BaseModel):
+    id: str
+    session_id: str
+    question_index: int
+    skill_name: Optional[str] = None
+    skill_category: Optional[str] = None
+    question_text: str
+    follow_up_depth_allowed: int = 0
+    follow_up_count: int = 0
+    candidate_answer_transcript: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CandidateInterviewSessionResponse(BaseModel):
+    id: str
+    application_id: str
+    job_id: str
+    status: str
+    current_phase: str = "greeting"
+    total_questions_planned: int
+    duration_planned_mins: int
+    current_question_index: int
+    speech_speed: float = 1.0
+    captions_enabled: bool = True
+    is_practice: bool = False
+    recording_consent: bool = False
+    paused_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    questions: List[CandidateInterviewQuestionResponse] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InterviewTranscriptTurnResponse(BaseModel):
+    id: str
+    session_id: str
+    question_id: Optional[str] = None
+    turn_type: str
+    speaker: str
+    text: str
+    spoken_text: Optional[str] = None
+    was_interrupted: bool = False
+    audio_ref: Optional[str] = None
+    stt_confidence: Optional[float] = None
+    stt_final_ms: Optional[float] = None
+    llm_ttft_ms: Optional[float] = None
+    tts_first_audio_ms: Optional[float] = None
+    total_response_ms: Optional[float] = None
+    sequence_number: int
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------
+# Post-Interview Evaluation, Integrity & Candidate Feedback Schemas
+# ---------------------------------------------------------
+
+class EvidenceItemSchema(BaseModel):
+    turn_id: str
+    quote: str
+    verified: bool = True
+
+class InterviewSkillScoreResponse(BaseModel):
+    id: str
+    evaluation_id: str
+    skill_id: Optional[str] = None
+    skill_name: str
+    priority_tier: str = "P0"
+    weight_percentage: float = 0.0
+    level: str = "NOT_ASSESSED"
+    numeric_score: Optional[float] = None
+    rationale: Optional[str] = None
+    evidence_json: List[Dict[str, Any]] = []
+    verified_quote_count: int = 0
+    unverified_quote_count: int = 0
+    low_confidence_warning: bool = False
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class InterviewEvaluationResponse(BaseModel):
+    id: str
+    session_id: str
+    application_id: str
+    job_id: str
+    status: str
+    overall_score: Optional[float] = None
+    verdict: Optional[str] = None
+    insufficient_evidence: bool = False
+    p0_not_assessed_skills: List[str] = []
+    second_pass_triggered: bool = False
+    summary: Optional[str] = None
+    strengths: List[str] = []
+    concerns: List[str] = []
+    candidate_summary: Optional[str] = None
+    model_name: str
+    prompt_version: str = "v1"
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    skill_scores: List[InterviewSkillScoreResponse] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+class CandidateSafeEvaluationSummary(BaseModel):
+    session_id: str
+    application_id: str
+    candidate_summary: Optional[str] = None
+    completed_at: Optional[datetime] = None
+
+class InterviewIntegrityEventCreate(BaseModel):
+    event_type: str
+    details_json: Dict[str, Any] = {}
+
+class InterviewIntegrityEventResponse(BaseModel):
+    id: str
+    session_id: str
+    application_id: Optional[str] = None
+    event_type: str
+    severity: str
+    policy_tier: str
+    details_json: Dict[str, Any] = {}
+    turn_id: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class InterviewFeedbackCreate(BaseModel):
+    rating: int = Field(..., ge=1, le=5)
+    comment: Optional[str] = None
+
+class InterviewFeedbackResponse(BaseModel):
+    id: str
+    session_id: str
+    application_id: Optional[str] = None
+    candidate_id: Optional[str] = None
+    rating: int
+    comment: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class RecruiterDecisionRequest(BaseModel):
+    decision: str # 'advance', 'hold', 'reject'
+    notes: Optional[str] = None
+
+class InterviewQuestionUpdateRequest(BaseModel):
+    question_text: Optional[str] = None
+    expected_key_points: Optional[List[str]] = None
+    priority_tier: Optional[str] = None
+    follow_up_depth_allowed: Optional[int] = None
+    approved_by_recruiter: Optional[bool] = None
+
+class InterviewPlanApprovalRequest(BaseModel):
+    approved: bool = True
+
+class InterviewSessionSettingsUpdate(BaseModel):
+    speech_speed: Optional[float] = Field(None, ge=0.7, le=1.4)
+    captions_enabled: Optional[bool] = None
+    recording_consent: Optional[bool] = None
+

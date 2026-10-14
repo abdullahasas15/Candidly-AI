@@ -48,6 +48,10 @@
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
+  height: 6px;
+}
+::-webkit-scrollbar:horizontal {
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -58,5 +62,16 @@
 }
 .dark ::-webkit-scrollbar-thumb {
   background: #334155;
+}
+
+/* Hide scrollbar utility */
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 

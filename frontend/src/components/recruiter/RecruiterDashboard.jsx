@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Plus, Search, Filter, Briefcase, Clock, ShieldCheck, CheckCircle2,
-  Trash2, Eye, ArrowLeft, Sparkles, RefreshCw, AlertCircle, FileText, LogOut
+  Trash2, Eye, ArrowLeft, Sparkles, RefreshCw, AlertCircle, AlertTriangle, FileText, LogOut, X
 } from 'lucide-react';
 import Logo from '../Logo';
 import JobCreationModal from './JobCreationModal';
@@ -19,13 +19,34 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [selectedJob, setSelectedJob] = useState(null);
+  const [jobToDelete, setJobToDelete] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
+  const [deletingJob, setDeletingJob] = useState(false);
+  const [aiHealth, setAiHealth] = useState(null);
+
+  const getRecruiterToken = () =>
+    authUser?.access_token ||
+    localStorage.getItem('candidly-auth-token-recruiter') ||
+    localStorage.getItem('candidly-auth-token');
+
+  const checkAiHealth = async () => {
+    try {
+      const res = await fetch('/api/health/ai');
+      if (res.ok) {
+        const data = await res.json();
+        setAiHealth(data);
+      }
+    } catch (err) {
+      setAiHealth({ status: 'unavailable', error: err.message });
+    }
+  };
 
   // Fetch jobs from PostgreSQL backend
   const fetchJobs = async () => {
     setLoading(true);
     setError(null);
     try {
-      const token = localStorage.getItem('candidly-auth-token');
+      const token = getRecruiterToken();
       const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
       const res = await fetch('/api/jobs', { headers });
       if (!res.ok) {
@@ -42,22 +63,35 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
 
   useEffect(() => {
     fetchJobs();
+    checkAiHealth();
   }, []);
 
   const handleDeleteJob = async (jobId, e) => {
     e.stopPropagation();
-    if (!window.confirm('Are you sure you want to delete this job posting?')) return;
+    setDeleteError(null);
+    setJobToDelete(jobs.find((job) => job.id === jobId) || null);
+  };
+
+  const confirmDeleteJob = async () => {
+    if (!jobToDelete) return;
+    setDeletingJob(true);
     try {
-      const token = localStorage.getItem('candidly-auth-token');
-      const res = await fetch(`/api/jobs/${jobId}`, {
+      const token = getRecruiterToken();
+      const res = await fetch(`/api/jobs/${jobToDelete.id}`, {
         method: 'DELETE',
         headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
       if (res.ok) {
-        setJobs((prev) => prev.filter((j) => j.id !== jobId));
+        setJobs((prev) => prev.filter((j) => j.id !== jobToDelete.id));
+        setJobToDelete(null);
+      } else {
+        const payload = await res.json().catch(() => ({}));
+        setDeleteError(payload.detail || 'Failed to delete job.');
       }
     } catch (err) {
-      alert('Failed to delete job: ' + err.message);
+      setDeleteError(err.message);
+    } finally {
+      setDeletingJob(false);
     }
   };
 
@@ -131,6 +165,10 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
               </div>
             )}
 
+            <span className="hidden sm:inline-flex items-center px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs font-bold">
+              Manage Jobs & Applicants
+            </span>
+
             <button
               onClick={fetchJobs}
               disabled={loading}
@@ -160,6 +198,25 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
           </div>
         </div>
       </header>
+ 
+      {aiHealth?.status === 'unavailable' && (
+        <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+              <span>
+                <strong>AI Provider Unavailable:</strong> Gemini API is currently unreachable ({aiHealth.error || 'invalid key or network issue'}). Interview Blueprint generation and live AI follow-ups may fail. Please verify your GEMINI_API_KEY.
+              </span>
+            </div>
+            <button
+              onClick={checkAiHealth}
+              className="px-2.5 py-1 rounded-lg bg-amber-200/60 dark:bg-amber-900/40 hover:bg-amber-200 dark:hover:bg-amber-900/60 font-semibold text-[11px] shrink-0 transition-colors"
+            >
+              Retry Check
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Workspace Body */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
@@ -318,6 +375,17 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
                         <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
                           {job.department}
                         </span>
+                        {(!job.active_blueprint_id || job.blueprint_status !== 'approved' || job.blueprint_is_stale) ? (
+                          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3 text-amber-500" />
+                            <span>Needs blueprint approval</span>
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                            <span>Blueprint Approved</span>
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-1.5">
@@ -423,6 +491,33 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
         isOpen={!!selectedJob}
         onClose={() => setSelectedJob(null)}
       />
+
+      {jobToDelete && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Delete job posting?</h3>
+                <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                  <strong>{jobToDelete.job_title}</strong> and all candidate applications, resumes, interview questions, and sessions will be permanently removed.
+                </p>
+              </div>
+              <button onClick={() => setJobToDelete(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Close">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            {deleteError && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-xs font-semibold text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">{deleteError}</p>}
+            <div className="mt-6 flex justify-end gap-3">
+              <button onClick={() => setJobToDelete(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">
+                Cancel
+              </button>
+              <button onClick={confirmDeleteJob} disabled={deletingJob} className="rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-rose-700 disabled:opacity-60">
+                {deletingJob ? 'Deleting...' : 'Delete permanently'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

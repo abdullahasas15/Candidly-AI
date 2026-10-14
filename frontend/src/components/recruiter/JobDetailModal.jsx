@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import {
   X, Award, Clock, ShieldCheck, CheckCircle2, ChevronRight, Layers,
   FileText, AlertCircle, Users, DollarSign, AlertTriangle, Eye, ArrowRight,
-  RefreshCw, Check
+  RefreshCw, Check, Sparkles
 } from 'lucide-react';
 import ApplicantDetailModal from './ApplicantDetailModal';
+import BlueprintReviewEditor from './BlueprintReviewEditor';
 import { formatMoney } from '../../utils/currency';
 
 export default function JobDetailModal({ job, isOpen, onClose }) {
@@ -14,6 +15,9 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
   const [applicants, setApplicants] = useState([]);
   const [loadingApplicants, setLoadingApplicants] = useState(false);
   const [selectedApplicant, setSelectedApplicant] = useState(null);
+  const [sortBy, setSortBy] = useState('score_desc'); // 'score_desc' | 'date_desc' | 'name_asc'
+  const [filterVerdict, setFilterVerdict] = useState('all');
+  const [filterDecision, setFilterDecision] = useState('all');
 
   const fetchApplicants = async () => {
     if (!job?.id) return;
@@ -149,13 +153,17 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
 
           <button
             onClick={() => setActiveTab('plan')}
-            className={`py-3 px-4 border-b-2 transition-all whitespace-nowrap ${
+            className={`py-3 px-4 border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
               activeTab === 'plan'
                 ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900/60'
                 : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
-            Mathematical Plan ({job.question_plans?.length || 0})
+            <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+            <span>Interview Blueprint</span>
+            {(!job.active_blueprint_id || job.blueprint_status !== 'approved' || job.blueprint_is_stale) && (
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+            )}
           </button>
 
           <button
@@ -217,6 +225,49 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
                 </div>
               </div>
 
+              {/* Sort & Filter Controls (Part E2) */}
+              <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-400 text-[10px] uppercase">Sort By:</span>
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-800 dark:text-slate-200"
+                  >
+                    <option value="score_desc">Highest Evidence Score</option>
+                    <option value="date_desc">Application Date (Newest)</option>
+                    <option value="name_asc">Candidate Name (A-Z)</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-bold text-slate-400 text-[10px] uppercase">Verdict:</span>
+                  <select
+                    value={filterVerdict}
+                    onChange={(e) => setFilterVerdict(e.target.value)}
+                    className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-800 dark:text-slate-200"
+                  >
+                    <option value="all">All Verdicts</option>
+                    <option value="HIRE">Hire / Strong Hire</option>
+                    <option value="BORDERLINE">Borderline</option>
+                    <option value="NO_HIRE">No Hire / Lean No Hire</option>
+                  </select>
+
+                  <span className="font-bold text-slate-400 text-[10px] uppercase ml-2">Decision:</span>
+                  <select
+                    value={filterDecision}
+                    onChange={(e) => setFilterDecision(e.target.value)}
+                    className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-800 dark:text-slate-200"
+                  >
+                    <option value="all">All Decisions</option>
+                    <option value="advance">Advanced</option>
+                    <option value="hold">On Hold</option>
+                    <option value="reject">Rejected</option>
+                    <option value="undecided">Undecided</option>
+                  </select>
+                </div>
+              </div>
+
               {/* Applicants Table */}
               {loadingApplicants ? (
                 <div className="py-16 text-center space-y-2">
@@ -237,82 +288,165 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
                     <thead>
                       <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
                         <th className="py-3 px-4">Candidate</th>
-                        <th className="py-3 px-4">Experience Stated / Derived</th>
-                        <th className="py-3 px-4">Expected Compensation</th>
-                        <th className="py-3 px-4">Status</th>
-                        <th className="py-3 px-4">Discrepancy Check</th>
+                        <th className="py-3 px-4">Score & Verdict</th>
+                        <th className="py-3 px-4">Competency Levels</th>
+                        <th className="py-3 px-4">Signals & Flags</th>
+                        <th className="py-3 px-4">Recruiter Decision</th>
                         <th className="py-3 px-4 text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {applicants.map((app) => {
-                        const parsedExp = app.resume?.parsed_structured_data?.total_experience_years || 0.0;
-                        const hasUnresolvedFlags = app.discrepancy_flags?.some((f) => !f.reviewed_by_recruiter);
-                        const hasAnyFlags = (app.discrepancy_flags?.length || 0) > 0;
+                      {applicants
+                        .filter((app) => {
+                          if (filterVerdict !== 'all') {
+                            const v = app.evaluation?.verdict || '';
+                            if (filterVerdict === 'HIRE' && (!v.includes('HIRE') || v.includes('NO'))) return false;
+                            if (filterVerdict === 'BORDERLINE' && v !== 'BORDERLINE') return false;
+                            if (filterVerdict === 'NO_HIRE' && !v.includes('NO')) return false;
+                          }
+                          if (filterDecision !== 'all') {
+                            const d = app.recruiter_decision || 'undecided';
+                            if (filterDecision !== d) return false;
+                          }
+                          return true;
+                        })
+                        .sort((a, b) => {
+                          if (sortBy === 'score_desc') {
+                            const sa = a.evaluation?.overall_score ?? -1;
+                            const sb = b.evaluation?.overall_score ?? -1;
+                            return sb - sa;
+                          } else if (sortBy === 'name_asc') {
+                            return (a.full_name || '').localeCompare(b.full_name || '');
+                          } else {
+                            return new Date(b.applied_at) - new Date(a.applied_at);
+                          }
+                        })
+                        .map((app) => {
+                          const hasUnresolvedFlags = app.discrepancy_flags?.some((f) => !f.reviewed_by_recruiter);
+                          const hasAnyFlags = (app.discrepancy_flags?.length || 0) > 0;
+                          const overallScore = app.evaluation?.overall_score;
+                          const verdict = app.evaluation?.verdict;
 
-                        return (
-                          <tr
-                            key={app.id}
-                            className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
-                          >
-                            <td className="py-3.5 px-4">
-                              <div className="font-bold text-slate-900 dark:text-white text-xs">{app.full_name}</div>
-                              <div className="text-[11px] text-slate-400">{app.email}</div>
-                              <div className="text-[10px] text-slate-400 mt-0.5">Applied {new Date(app.applied_at).toLocaleDateString()}</div>
-                            </td>
+                          return (
+                            <tr
+                              key={app.id}
+                              className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
+                            >
+                              <td className="py-3.5 px-4">
+                                <div className="font-bold text-slate-900 dark:text-white text-xs">{app.full_name}</div>
+                                <div className="text-[11px] text-slate-400">{app.email}</div>
+                                <div className="text-[10px] text-slate-400 mt-0.5">Applied {new Date(app.applied_at).toLocaleDateString()}</div>
+                              </td>
 
-                            <td className="py-3.5 px-4 font-mono text-[11px]">
-                              <div>
-                                <strong className="text-slate-800 dark:text-slate-200">{app.self_reported_experience_years} yrs</strong> stated
-                              </div>
-                              <div className="text-slate-400">
-                                ~{parsedExp.toFixed(1)} yrs resume
-                              </div>
-                            </td>
+                              <td className="py-3.5 px-4 font-mono text-xs">
+                                {overallScore !== undefined && overallScore !== null ? (
+                                  <div>
+                                    <div className="font-black text-indigo-600 dark:text-indigo-400 text-sm">
+                                      {Math.round(overallScore)}/100
+                                    </div>
+                                    <span
+                                      className={`inline-block mt-0.5 px-2 py-0.5 rounded text-[10px] font-bold ${
+                                        verdict?.includes('HIRE') && !verdict?.includes('NO')
+                                          ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
+                                          : verdict === 'BORDERLINE'
+                                          ? 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300'
+                                          : 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
+                                      }`}
+                                    >
+                                      {verdict?.replace(/_/g, ' ')}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400 text-[11px] font-sans">
+                                    {app.status === 'interviewed' || app.interview_session_status === 'completed'
+                                      ? 'Scoring in progress'
+                                      : 'Pending interview'}
+                                  </span>
+                                )}
+                              </td>
 
-                            <td className="py-3.5 px-4 font-mono text-[11px]">
-                              <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                                {formatMoney(app.expected_salary, app.expected_salary_currency)}
-                              </span>
-                            </td>
+                              <td className="py-3.5 px-4">
+                                {app.skill_scores && app.skill_scores.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1 max-w-xs">
+                                    {app.skill_scores.slice(0, 4).map((s, idx) => (
+                                      <span
+                                        key={idx}
+                                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                          s.score_level >= 'L3'
+                                            ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                                            : 'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
+                                        }`}
+                                      >
+                                        {s.skill_name?.slice(0, 10)}: {s.score_level}
+                                      </span>
+                                    ))}
+                                    {app.skill_scores.length > 4 && (
+                                      <span className="text-[10px] text-slate-400">+{app.skill_scores.length - 4}</span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400 text-[11px]">—</span>
+                                )}
+                              </td>
 
-                            <td className="py-3.5 px-4">
-                              <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border capitalize ${getStatusBadge(app.status)}`}>
-                                {app.status.replace(/_/g, ' ')}
-                              </span>
-                            </td>
+                              <td className="py-3.5 px-4">
+                                <div className="space-y-1 text-[10px]">
+                                  {hasAnyFlags ? (
+                                    <span
+                                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold border ${
+                                        hasUnresolvedFlags
+                                          ? 'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800'
+                                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                                      }`}
+                                    >
+                                      <AlertTriangle className="w-3 h-3 text-amber-500" />
+                                      <span>{app.discrepancy_flags.length} Discrepancies</span>
+                                    </span>
+                                  ) : (
+                                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
+                                      <Check className="w-3 h-3" /> No Discrepancies
+                                    </span>
+                                  )}
 
-                            <td className="py-3.5 px-4">
-                              {hasAnyFlags ? (
-                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border ${
-                                  hasUnresolvedFlags
-                                    ? 'bg-amber-50 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'
-                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700'
-                                }`}>
-                                  <AlertTriangle className="w-3 h-3 text-amber-500" />
-                                  <span>{app.discrepancy_flags.length} {hasUnresolvedFlags ? 'Pending Review' : 'Reviewed'}</span>
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
-                                  <Check className="w-3 h-3" />
-                                  <span>Verified Match</span>
-                                </span>
-                              )}
-                            </td>
+                                  {app.integrity_events_count > 0 && (
+                                    <div className="text-amber-600 dark:text-amber-400 font-semibold">
+                                      {app.integrity_events_count} Integrity Signals
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
 
-                            <td className="py-3.5 px-4 text-right">
-                              <button
-                                type="button"
-                                onClick={() => setSelectedApplicant(app)}
-                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-xs font-bold transition-colors"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                                <span>Inspect Dossier</span>
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                              <td className="py-3.5 px-4">
+                                {app.recruiter_decision ? (
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                      app.recruiter_decision === 'advance'
+                                        ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
+                                        : app.recruiter_decision === 'hold'
+                                        ? 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300'
+                                        : 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
+                                    }`}
+                                  >
+                                    {app.recruiter_decision}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 text-[11px]">Undecided</span>
+                                )}
+                              </td>
+
+                              <td className="py-3.5 px-4 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedApplicant(app)}
+                                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-xs font-bold transition-colors cursor-pointer"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  <span>Inspect Dossier</span>
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
                     </tbody>
                   </table>
                 </div>
@@ -378,43 +512,18 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
             </div>
           )}
 
-          {/* TAB 2: Question Plan */}
+          {/* TAB 2: Interview Blueprint */}
           {activeTab === 'plan' && (
             <div className="space-y-4">
-              <div className="p-4 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900 text-xs text-indigo-900 dark:text-indigo-200 flex items-center justify-between">
-                <div>
-                  <span className="font-bold">Total Budget: {job.interview_duration_mins} Minutes</span>
-                  <span className="mx-2">•</span>
-                  <span>Operational Overhead: 3.5m</span>
-                  <span className="mx-2">•</span>
-                  <span>Active Eval Time: {job.interview_duration_mins - 3.5}m</span>
-                </div>
-                <div className="font-extrabold text-sm text-indigo-600 dark:text-indigo-400">
-                  {job.question_plans?.reduce((acc, p) => acc + p.allocated_questions, 0) || 0} Core Questions Allocated
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {job.question_plans?.map((plan, idx) => (
-                  <div
-                    key={idx}
-                    className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-2"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate max-w-[200px]">
-                        {plan.skill_name}
-                      </span>
-                      <span className="text-xs font-extrabold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/70 px-2 py-0.5 rounded">
-                        {plan.allocated_questions} Questions
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 pt-1 border-t border-slate-100 dark:border-slate-800">
-                      <span>Time Allocated: ~{plan.time_allocation_minutes} mins</span>
-                      <span>Target: {plan.target_rubric_tier}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <BlueprintReviewEditor
+                job={job}
+                onApproved={(approvedBp) => {
+                  job.active_blueprint_id = approvedBp.id;
+                  job.blueprint_status = approvedBp.status;
+                  job.blueprint_is_stale = false;
+                  job.accepts_applications = true;
+                }}
+              />
             </div>
           )}
 

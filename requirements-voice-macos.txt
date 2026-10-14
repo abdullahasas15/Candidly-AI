@@ -1,0 +1,8 @@
+# Optional local-development voice stack. These packages download model
+# weights on first use; do not install on production API workers.
+pipecat-ai
+silero-vad
+parakeet-mlx
+mlx-audio
+# Smart Turn v3 is loaded through its supported local model adapter after the
+# package/model release is selected for the target Apple Silicon environment.

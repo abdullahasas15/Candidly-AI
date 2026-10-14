@@ -7,6 +7,19 @@ import {
 } from 'lucide-react';
 import { formatMoney, formatSalaryRange } from '../../utils/currency';
 
+const SENIORITY_MAP = {
+  entry: 'Entry-Level (L2-L3)',
+  mid: 'Mid-Level (L3-L4)',
+  senior: 'Senior (L4-L5)',
+  lead: 'Lead / Principal (L5+)',
+};
+
+const formatSeniority = (val) => {
+  if (!val) return 'Mid-Level';
+  const lower = val.toLowerCase().trim();
+  return SENIORITY_MAP[lower] || val;
+};
+
 export default function ApplicationWizard({ job, authUser, isOpen, onClose, onApplicationSubmitted }) {
   if (!isOpen || !job) return null;
 
@@ -76,6 +89,14 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
   const [discrepancyFlags, setDiscrepancyFlags] = useState([]);
   const [submittedSuccessfully, setSubmittedSuccessfully] = useState(false);
 
+  const getAuthHeaders = (includeJson = false) => {
+    const token = localStorage.getItem('candidly-auth-token');
+    return {
+      ...(includeJson ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    };
+  };
+
   // Clean up camera stream when modal closes or changes
   useEffect(() => {
     return () => {
@@ -121,7 +142,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
         const res = await fetch('/api/applications', {
           method: 'POST',
-          headers,
+          headers: getAuthHeaders(true),
           body: JSON.stringify(payload)
         });
 
@@ -181,6 +202,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
       const res = await fetch(`/api/applications/${applicationId}/resume`, {
         method: 'POST',
+        headers: getAuthHeaders(),
         body: formData
       });
 
@@ -257,7 +279,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
     try {
       const res = await fetch(`/api/applications/${applicationId}/parsed-resume`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify({
           parsed_structured_data: structuredData,
           self_reported_experience_years: fitData.self_reported_experience_years
@@ -550,7 +572,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
       const res = await fetch(`/api/applications/${applicationId}/verification`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify(payload)
       });
 
@@ -588,7 +610,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
       const res = await fetch(`/api/applications/${applicationId}/submit`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(true),
         body: JSON.stringify(payload)
       });
 
@@ -629,10 +651,18 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               <Briefcase className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <h2 className="text-base sm:text-lg font-black text-slate-900 dark:text-white">
                   Application: {job.job_title}
                 </h2>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800">
+                  {formatSeniority(job.seniority_level)}
+                </span>
+                {job.role_display_name && job.role_display_name !== 'Custom Role' && (
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border border-purple-200/60 dark:border-purple-800">
+                    {job.role_display_name}
+                  </span>
+                )}
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800">
                   {job.department}
                 </span>
