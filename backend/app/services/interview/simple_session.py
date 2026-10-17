@@ -4,8 +4,10 @@ Configured by INTERVIEW_MODE=simple (the default). Zero LLM calls in the live
 loop — the entire interview is a rule-driven state machine over the materialized
 question plan:
 
-    welcome (agenda) -> intro hook -> per-skill [anchor (+ anchor_alt on
-    "no experience") -> escalation] -> candidate Q&A -> closing
+    welcome (one utterance: greeting, AI disclosure, duration, monitoring notice,
+    agenda) -> ready gate ("Ready to begin?" waits for yes/ready/ok) -> intro hook
+    -> per-skill [anchor (+ anchor_alt on "no experience") -> escalation]
+    -> candidate Q&A -> closing
 
 Strict single-question turn state machine:
 
@@ -90,6 +92,15 @@ _SHORT_ANSWER_WORDS = 4
 _BRIDGES = ("Got it.", "Thanks.", "Okay.", "Alright.")
 _SHORT_PROMPT = "Could you say a bit more?"
 _TRANSITION_FILLERS = ("Alright", "Okay", "Great", "Got it")
+
+# Welcome ready-gate (R3.5b): after the welcome utterance, the bot waits for an
+# acknowledgment before speaking the intro question as a separate utterance.
+_READY_ACK_RE = re.compile(
+    r"\b(yes|yeah|yep|yup|sure|ok|okay|okay|ready|let'?s go|lets go|let'?s begin|lets begin|"
+    r"let'?s start|lets start|go ahead|sounds good|alright|affirmative|please do|begin|start)\b",
+    re.IGNORECASE,
+)
+_WELCOME_GATE_SILENCE_SECS = float(os.getenv("WELCOME_GATE_SILENCE_SECS", "8.0"))
 
 _EMPTY_ANSWER_SEQUENCE_SENTINEL = "__empty__"
 
@@ -189,6 +200,10 @@ class SimpleInterviewCoordinator(FrameProcessor):
         self._short_prompt_active = False      # the "Could you say a bit more?" prompt turn
         self._short_prompt_target_step: Optional[int] = None
         self._empty_prompt_count = 0
+
+        # --- welcome ready-gate (R3.5b) ---------------------------------------
+        self._awaiting_ready = False
+        self._welcome_gate_reprompted = False
 
         # --- answer accumulation ----------------------------------------------
         self._turn_text: str = ""
@@ -342,7 +357,10 @@ class SimpleInterviewCoordinator(FrameProcessor):
             "interview_mode": "simple",
         }
         try:
-            turn = InterviewTranscriptTurn(
+            # details_json is added only when the model maps that column (some DB
+            # snapshots omit it): passing an unmapped kwarg makes the ORM reject
+            # the constructor and the turn is silently lost (logger.debug only).
+            turn_kwargs = dict(
                 session_id=self.session_id,
                 question_id=question_id,
                 turn_type=turn_type,
@@ -352,10 +370,12 @@ class SimpleInterviewCoordinator(FrameProcessor):
                 stt_final_ms=stt_final_ms,
                 provider=provider,
                 model_name=f"stt:{provider}" if provider and speaker == "candidate" else None,
-                details_json=details if hasattr(InterviewTranscriptTurn, "details_json") else None,
                 sequence_number=self._next_sequence(),
                 created_at=datetime.now(timezone.utc).replace(tzinfo=None),
             )
+            if hasattr(InterviewTranscriptTurn, "details_json"):
+                turn_kwargs["details_json"] = details
+            turn = InterviewTranscriptTurn(**turn_kwargs)
             async with AsyncSessionLocal() as db:
                 db.add(turn)
                 await db.commit()
@@ -379,12 +399,15 @@ class SimpleInterviewCoordinator(FrameProcessor):
         else:
             agenda = "your background and experience"
         duration_mins = int(self.pacing.duration_planned_mins)
+        # R3.5b one-utterance welcome: AI disclosure, duration, monitoring notice,
+        # agenda — ending in the "Ready to begin?" gate question.
         return (
             f"Hi {first_name}, I'm your AI interviewer for the {self.role_title} role. "
+            f"You're speaking with an AI, not a human, and this session is recorded and monitored for interview integrity. "
             f"Our conversation will take about {duration_mins} minutes. "
             f"We'll cover {agenda}, and I'll leave time at the end for your questions. "
             f"One question at a time, and answer in your own style. "
-            f"If you'd like me to repeat anything, just ask."
+            f"If you'd like me to repeat anything, just ask. Ready to begin?"
         )
 
     # ---------------------------------------------------------------- TTS
@@ -456,6 +479,13 @@ class SimpleInterviewCoordinator(FrameProcessor):
             self._prewarm_task = asyncio.create_task(self._prewarm_next_speech())
 
     async def _ask_step(self, step_idx: int) -> None:
+        if step_idx != self._step and 0 <= self._step < len(self.steps):
+            # New scripted step: chatter between the previous answer and this
+            # question ("testing, testing", acknowledgments) is not this turn's
+            # answer — start the accumulation fresh at the question's mouth.
+            # (Re-ask of the SAME step, e.g. "repeat the question", keeps the turn.)
+            self._turn_text = ""
+            self._turn_chunks = []
         self._step = step_idx
         if self._step >= len(self.steps):
             await self._finish_flow()
@@ -488,7 +518,12 @@ class SimpleInterviewCoordinator(FrameProcessor):
         # when welcome+intro are merged in begin_interview, self._step points at intro.
         if step["kind"] == "welcome":
             phase = InterviewPhase.GREETING
-            text = f"{self._build_greeting_text()} {text}".strip()
+            # R3.5b: the greeting text itself carries disclosure + duration + monitoring
+            # notice + agenda + "Ready to begin?" — arm the ready gate behind it.
+            text = self._build_greeting_text()
+            self._awaiting_ready = True
+            self._welcome_gate_reprompted = False
+            self._welcome_gate_started = time.monotonic()
 
         if gi >= 0 and step["kind"] in ("anchor", "anchor_alt") and self._step >= 0:
             prev = self.steps[self._step - 1] if self._step > 0 else None
@@ -566,20 +601,25 @@ class SimpleInterviewCoordinator(FrameProcessor):
             return
 
         logger.info(f"[simple] scripted interview begin: {len(self.steps)} steps")
-        if self.welcome_q and self.intro_q:
-            # Welcome agenda + intro hook chained into ONE utterance (no dead air).
-            self._step = 1
+        if self.welcome_q:
+            # R3.5b welcome flow: the welcome (greeting, AI disclosure, duration,
+            # monitoring notice, agenda) is ONE utterance ending in "Ready to begin?".
+            # The gate then waits for yes/ready/ok; the intro question is a SEPARATE
+            # utterance spoken only after the acknowledgment.
+            intro_idx = next((i for i, s in enumerate(self.steps) if s["kind"] == "intro"), 1)
+            self._step = intro_idx  # route the NEXT advance to the intro step
             self.asked_ledger.append(
-                {"step_kind": "welcome+intro", "question_id": self.intro_q.get("id"), "at": time.time(), "seq": self._next_sequence()}
+                {"step_kind": "welcome", "question_id": self.welcome_q.get("id"), "at": time.time(), "seq": self._next_sequence()}
             )
-            combined = f"{self._build_greeting_text()} {(self.intro_q.get('question_text') or '').strip()}"
+            self._awaiting_ready = True
+            self._welcome_gate_reprompted = False
+            self._welcome_gate_started = time.monotonic()
             await self.speak(
-                combined,
+                self._build_greeting_text(),
                 TurnType.GREETING.value,
-                question_id=self.intro_q.get("id"),
+                question_id=self.welcome_q.get("id"),
                 phase=InterviewPhase.GREETING,
             )
-            self.current_lead_question_index = self.intro_q.get("question_index", 0)
         elif self.steps:
             await self._ask_step(0)
         self._start_silence_monitor()
@@ -591,6 +631,21 @@ class SimpleInterviewCoordinator(FrameProcessor):
         text = (interim_text or "").strip()
         if not text:
             return
+
+        # Welcome ready-gate: listen for the acknowledgment (yes / ready / ok ...).
+        # The ack is not an interview answer — it just opens the intro question.
+        if self._awaiting_ready:
+            if _READY_ACK_RE.search(text):
+                self._awaiting_ready = False
+                self.session_trace.log_stt(
+                    lane="ready_gate",
+                    text=text,
+                    is_final=True,
+                    latency_ms=round((time.monotonic() - getattr(self, "_welcome_gate_started", time.monotonic())) * 1000.0, 1),
+                )
+                asyncio.create_task(self._ready_gate_satisfied())
+            return
+
         try:
             self._turn_text = stitch_sliding_text(self._turn_text, text)
         except Exception:
@@ -630,9 +685,22 @@ class SimpleInterviewCoordinator(FrameProcessor):
         self.session_trace.log_stt(lane="window_final_cb", text=clean, is_final=True, latency_ms=stt_ms, seq=seq or 0)
 
     def record_tts_first_audio(self, tts_ms: float) -> None:
-        self.session_trace.log_tts(stage="first_audio", text="", is_final=False, latency_ms=tts_ms)
+        self.session_trace.log_tts(turn_id="", action="first_audio", text="", latency_ms=tts_ms)
 
     # ------------------------------------------------------------- commit
+
+    async def _ready_gate_satisfied(self) -> None:
+        """Ready acknowledged -> cancel the silence monitor nudge path and ask the intro."""
+        self._awaiting_ready = False
+        self.state = self.ST_COMMITTED
+        self._last_activity_monotonic = time.monotonic()
+        self._welcome_gate_reprompted = False
+        intro_idx = next((i for i, s in enumerate(self.steps) if s["kind"] == "intro"), None)
+        if intro_idx is None:
+            intro_idx = min(1, len(self.steps) - 1) if self.steps else 0
+        intro_q = self.steps[intro_idx]["q"] if 0 <= intro_idx < len(self.steps) else None
+        self.current_lead_question_index = (intro_q or {}).get("question_index", 0)
+        await self._ask_step(intro_idx)
 
     async def commit_turn(self, reason: str = "button") -> Dict[str, Any]:
         """Commit the candidate's current answer (button / phrase / silence)."""
@@ -645,6 +713,12 @@ class SimpleInterviewCoordinator(FrameProcessor):
         if time.monotonic() - self._last_commit_monotonic < 0.6:
             return {"status": "ignored", "detail": "debounce"}
 
+        # Welcome ready-gate: the button (or any commit trigger) counts as "yes".
+        if self._awaiting_ready:
+            self.session_trace.log_stt(lane="ready_gate", text=f"<{reason}>", is_final=True, latency_ms=0.0)
+            await self._ready_gate_satisfied()
+            return {"status": "committed", "detail": "ready-gate"}
+
         t0 = time.perf_counter()
         # A pending silence-commit timer is now obsolete: the commit already happened.
         if self._auto_commit_task and not self._auto_commit_task.done():
@@ -653,14 +727,24 @@ class SimpleInterviewCoordinator(FrameProcessor):
         # UI: "finishing..." ring immediately.
         await self._emit("interview-bot-state", {"state": "finishing", "commit_reason": reason})
 
-        # Give a late provider final a micro-window (<= 1s budget).
-        if self._stt_service is not None and not self._turn_chunks and not self._turn_text:
+        # R3.5b: the answer of record is the analyzer's FINALIZED text — volatile
+        # partials are display-only. Finalize through the last audio and give the
+        # final <= 1s to land; stitched partials remain only as the logged fallback.
+        partials_text = self._turn_text
+        finalize_ms = 0.0
+        finalize_source = "none"
+        finalized_text = None
+        if self._stt_service is not None:
             try:
-                flushed = await self._stt_service.flush_and_wait(timeout=0.5)
+                t_fin = time.perf_counter()
+                flushed = await self._stt_service.flush_and_wait(timeout=1.0)
+                finalize_ms = round((time.perf_counter() - t_fin) * 1000.0, 1)
+                finalize_source = getattr(self._stt_service, "last_finalize_source", "none")
                 if flushed:
+                    finalized_text = flushed
                     self._turn_text = stitch_sliding_text(self._turn_text, flushed)
             except Exception:
-                pass
+                finalize_source = "error"
 
         assembled = self._turn_text.strip()
         phrase_spoken = False
@@ -709,6 +793,12 @@ class SimpleInterviewCoordinator(FrameProcessor):
         self._commits_total += 1
         self.state = self.ST_COMMITTED
         commit_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        cadence: Dict[str, Any] = {}
+        if self._stt_service is not None and hasattr(self._stt_service, "cadence_stats"):
+            try:
+                cadence = self._stt_service.cadence_stats() or {}
+            except Exception:
+                cadence = {}
         await self._emit(
             "interview-committed",
             {
@@ -717,6 +807,9 @@ class SimpleInterviewCoordinator(FrameProcessor):
                 "reason": reason,
                 "provider": provider,
                 "question_id": question_id,
+                "finalize_source": finalize_source,
+                "finalize_ms": finalize_ms,
+                **cadence,
             },
         )
         self.session_trace.log_commit(
@@ -725,6 +818,14 @@ class SimpleInterviewCoordinator(FrameProcessor):
             full_answer=assembled,
             word_count=words,
             speech_duration_s=max(0.0, speech_ms / 1000.0),
+            partials_text=partials_text,
+            finalized_text=finalized_text,
+            finalize_source=finalize_source,
+            finalize_ms=finalize_ms,
+            partial_count=cadence.get("partial_count"),
+            first_caption_ms=cadence.get("first_caption_ms"),
+            avg_partial_interval_ms=cadence.get("avg_partial_interval_ms"),
+            max_partial_interval_ms=cadence.get("max_partial_interval_ms"),
         )
 
         # Empty/ultra-short handling and next-step routing (rule based, no LLM).
@@ -889,17 +990,26 @@ class SimpleInterviewCoordinator(FrameProcessor):
         self._auto_commit_task = asyncio.create_task(self._auto_commit_after_silence())
 
     async def _auto_commit_after_silence(self) -> None:
-        """AUTO_COMMIT_SILENCE: sleep out the window (ring 1s before), then commit if untouched."""
+        """AUTO_COMMIT_SILENCE: commit once the candidate has been idle for the window.
+
+        Re-arms past late STT finals (which legitimately count as activity) instead of
+        firing at a fixed 2.5s after the user stopped — the analyzer's window final
+        routinely lands ~0.5-1.5s after the VAD stop, so a single fixed deadline kept
+        failing its idle check and silence commits were skipped entirely.
+        The task is still bounded (window + 2s slack).
+        """
         wait = max(1.0, AUTO_COMMIT_SILENCE_SECS)
-        ring_after = max(0.0, wait - 1.0)
+        max_extension = 2.0  # bounded slack for late activity frames
+        t_start = time.monotonic()
         try:
-            if ring_after > 0:
-                await asyncio.sleep(ring_after)
+            while time.monotonic() - t_start < wait + max_extension:
+                if self.state != self.ST_LISTENING or self._speech_active:
+                    return
+                if time.monotonic() - self._last_activity_monotonic >= wait - 0.35:
+                    break
+                await asyncio.sleep(0.2)
             if self.state == self.ST_LISTENING and not self._speech_active:
                 await self._emit("interview-bot-state", {"state": "finishing", "commit_reason": "silence"})
-            remaining = wait - ring_after
-            if remaining > 0:
-                await asyncio.sleep(remaining)
             if (
                 time.monotonic() - self._last_activity_monotonic >= wait - 0.35
                 and self.state == self.ST_LISTENING
@@ -925,6 +1035,26 @@ class SimpleInterviewCoordinator(FrameProcessor):
                 if self.state != self.ST_LISTENING or self.is_speaking:
                     continue
                 idle = time.monotonic() - self._last_activity_monotonic
+
+                # Welcome ready-gate: re-prompt once, then proceed without the ack.
+                if self._awaiting_ready:
+                    if idle < _WELCOME_GATE_SILENCE_SECS:
+                        continue
+                    if not self._welcome_gate_reprompted:
+                        self._welcome_gate_reprompted = True
+                        await self.speak(
+                            "Just say yes whenever you're ready to begin.",
+                            TurnType.SILENCE_NUDGE.value,
+                            question_id=self.welcome_q.get("id") if self.welcome_q else None,
+                            phase=InterviewPhase.GREETING,
+                        )
+                        self._last_activity_monotonic = time.monotonic()
+                    else:
+                        logger.info("[simple] welcome gate unanswered twice; proceeding to intro")
+                        self._awaiting_ready = False
+                        await self._ready_gate_satisfied()
+                    continue
+
                 if idle < SILENCE_NUDGE_SECS:
                     continue
                 if self._silence_nudges == 0:
