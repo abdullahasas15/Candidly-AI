@@ -818,10 +818,15 @@ class ProviderSTTService(SegmentedSTTService):
                 pass
 
     def _handle_provider_final(self, text: str, seq: int, start: float, end: float) -> None:
-        self._window_final_chunks.append(text)
-        # A final supersedes any speculative stitching for its range.
-        if self._utterance_text:
-            self._utterance_text = ""
+        final_clean = (text or "").strip()
+        self._window_final_chunks.append(final_clean)
+        # A spontaneous final usually repeats text already emitted in partials for its
+        # range. Keep the stitching monotonic: append finals ONLY when they add content
+        # (never clear the cumulative partials — a final covers just its own range).
+        if final_clean and final_clean.lower() not in self._utterance_text.lower():
+            self._utterance_text = (
+                f"{self._utterance_text} {final_clean}".strip() if self._utterance_text else final_clean
+            )
         if self._on_stt_final_chunk:
             try:
                 self._on_stt_final_chunk(text, self._window_seq)

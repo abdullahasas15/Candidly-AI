@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Mic,
   MicOff,
@@ -16,6 +16,80 @@ import {
   VolumeX,
 } from 'lucide-react';
 
+// R3.5 Part 4: sentence read by the candidate during the STT speech check.
+const SPEECH_CHECK_SENTENCE =
+  'Testing, testing. Can you hear me clearly? I am reading this sentence out loud right now.';
+
+const RECORD_TARGET_SECONDS = 5; // auto-stop
+const RECORD_MIN_SECONDS = 3; // shorter takes are rejected client-side
+const RECORD_HARD_STOP_SECONDS = 6; // safety hard stop
+const SPEECH_MAX_ATTEMPTS = 4; // 1 initial take + up to 3 retakes
+const SPEECH_PASS_RATIO = 0.8;
+const STT_STATUS_CACHE_MS = 15000;
+
+// Module-level cache of /api/stt/status ("cache it" across the step mount)
+let sttStatusCache = { data: null, fetchedAt: 0 };
+
+const isAppleProvider = (provider) =>
+  provider === 'apple_speechanalyzer' || provider === 'apple_sfspeech';
+
+const describeSttProvider = (provider) =>
+  isAppleProvider(provider) ? 'Apple Speech (on-device)' : provider || 'Unknown';
+
+// Downmix to mono + resample to 16 kHz with linear interpolation.
+const toMono16kFloat32 = (audioBuffer) => {
+  const channels = audioBuffer.numberOfChannels;
+  const inLen = audioBuffer.length;
+  const outLen = Math.max(1, Math.floor((inLen * 16000) / audioBuffer.sampleRate));
+
+  // Downmix all channels into mono
+  const mono = new Float32Array(inLen);
+  for (let c = 0; c < channels; c++) {
+    const data = audioBuffer.getChannelData(c);
+    for (let i = 0; i < inLen; i++) {
+      mono[i] += data[i];
+    }
+  }
+  if (channels > 1) {
+    for (let i = 0; i < inLen; i++) {
+      mono[i] /= channels;
+    }
+  }
+
+  // Linear-interpolation resample to 16 kHz
+  const out = new Float32Array(outLen);
+  if (outLen === 1) {
+    out[0] = mono[0];
+    return out;
+  }
+  const step = (inLen - 1) / (outLen - 1);
+  for (let i = 0; i < outLen; i++) {
+    const pos = i * step;
+    const i0 = Math.floor(pos);
+    const i1 = Math.min(inLen - 1, i0 + 1);
+    const frac = pos - i0;
+    out[i] = mono[i0] + (mono[i1] - mono[i0]) * frac;
+  }
+  return out;
+};
+
+// Float32 -> Int16 PCM bytes -> base64 (chunked to avoid call-stack issues)
+const float32ToPcm16Base64 = (samples) => {
+  const pcm = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  const bytes = new Uint8Array(pcm.buffer);
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+    binary += String.fromCharCode.apply(null, slice);
+  }
+  return btoa(binary);
+};
+
 export default function PreFlightCheckModal({
   isOpen,
   onClose,
@@ -30,7 +104,7 @@ export default function PreFlightCheckModal({
   const [selectedMicId, setSelectedMicId] = useState('');
   const [selectedCamId, setSelectedCamId] = useState('');
 
-  // 4 Requirement States: 'idle' | 'checking' | 'passed' | 'failed'
+  // 5 Requirement States: 'idle' | 'checking' | 'passed' | 'failed'
   const [micStatus, setMicStatus] = useState('idle');
   const [camStatus, setCamStatus] = useState('idle');
   const [netStatus, setNetStatus] = useState('idle');
@@ -49,6 +123,16 @@ export default function PreFlightCheckModal({
   const [networkRtt, setNetworkRtt] = useState(null);
   const [consentAccepted, setConsentAccepted] = useState(true);
 
+  // R3.5 Part 4: speech transcription check states
+  const [sttStatus, setSttStatus] = useState(null); // {provider, ready, helper_built, detail, ...}
+  const [sttStatusLoading, setSttStatusLoading] = useState(false);
+  const [sttStatusError, setSttStatusError] = useState('');
+  const [speechState, setSpeechState] = useState('idle'); // idle | recording | processing | passed | failed
+  const [speechResult, setSpeechResult] = useState(null); // {transcript, match_ratio, latency_ms, provider}
+  const [speechError, setSpeechError] = useState('');
+  const [speechAttempts, setSpeechAttempts] = useState(0); // evaluated (failed) takes so far
+  const [countdownSeconds, setCountdownSeconds] = useState(RECORD_TARGET_SECONDS);
+
   // Streams & nodes
   const mediaStreamRef = useRef(null);
   const videoPreviewRef = useRef(null);
@@ -56,14 +140,28 @@ export default function PreFlightCheckModal({
   const analyserRef = useRef(null);
   const animationFrameRef = useRef(null);
 
+  // Speech-check recording refs
+  const speechStreamRef = useRef(null);
+  const speechRecorderRef = useRef(null);
+  const recordTimerRef = useRef(null);
+  const hardStopTimerRef = useRef(null);
+  const recordStartRef = useRef(0);
+
   useEffect(() => {
     if (isOpen) {
       runAllChecks();
+      setSpeechState('idle');
+      setSpeechResult(null);
+      setSpeechError('');
+      setSpeechAttempts(0);
+      loadSttStatus(false);
     } else {
       cleanupMedia();
+      cleanupSpeechRecording();
     }
     return () => {
       cleanupMedia();
+      cleanupSpeechRecording();
     };
   }, [isOpen]);
 
@@ -79,6 +177,28 @@ export default function PreFlightCheckModal({
       mediaStreamRef.current = null;
     }
   };
+
+  const loadSttStatus = useCallback(async (force = false) => {
+    const now = Date.now();
+    if (!force && sttStatusCache.data && now - sttStatusCache.fetchedAt < STT_STATUS_CACHE_MS) {
+      setSttStatus(sttStatusCache.data);
+      setSttStatusError('');
+      return;
+    }
+    setSttStatusLoading(true);
+    setSttStatusError('');
+    try {
+      const res = await fetch('/api/stt/status');
+      if (!res.ok) throw new Error(`Service responded with ${res.status}`);
+      const data = await res.json();
+      sttStatusCache = { data, fetchedAt: now };
+      setSttStatus(data);
+    } catch (e) {
+      setSttStatusError(e.message || 'Could not reach the transcription service.');
+    } finally {
+      setSttStatusLoading(false);
+    }
+  }, []);
 
   const runAllChecks = async () => {
     cleanupMedia();
@@ -305,11 +425,205 @@ export default function PreFlightCheckModal({
     runAllChecks();
   };
 
+  // ------------------------------------------------------------------ R3.5 Part 4
+  // STT readiness gate: the transcript engine must report ready before entering.
+  const appleProvider = isAppleProvider(sttStatus?.provider);
+  const sttGateReady = Boolean(
+    sttStatus &&
+      sttStatus.ready === true &&
+      (!appleProvider || sttStatus.helper_built === true)
+  );
+  const speechPassed = sttGateReady && speechState === 'passed';
+  const speechRetakesExhausted = speechAttempts >= SPEECH_MAX_ATTEMPTS;
+
+  const cleanupSpeechRecording = () => {
+    if (recordTimerRef.current) {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    if (hardStopTimerRef.current) {
+      clearTimeout(hardStopTimerRef.current);
+      hardStopTimerRef.current = null;
+    }
+    if (speechStreamRef.current) {
+      speechStreamRef.current.getTracks().forEach((t) => t.stop());
+      speechStreamRef.current = null;
+    }
+  };
+
+  const evaluateSpeechRecording = async (blob) => {
+    setSpeechState('processing');
+    setSpeechError('');
+
+    let pcmBase64 = '';
+    let recordedMs = 0;
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+      recordedMs = Math.round(audioBuffer.duration * 1000);
+      const floats = toMono16kFloat32(audioBuffer);
+      pcmBase64 = float32ToPcm16Base64(floats);
+      ctx.close().catch(() => {});
+    } catch (e) {
+      console.warn('Speech recording decode error:', e);
+      setSpeechState('failed');
+      setSpeechError('Could not process the recording in this browser. Try recording again.');
+      return;
+    }
+
+    if (!pcmBase64) {
+      setSpeechState('failed');
+      setSpeechError('The recording came through empty. Try recording again.');
+      return;
+    }
+
+    if (recordedMs < RECORD_MIN_SECONDS * 1000) {
+      setSpeechState('failed');
+      setSpeechError(
+        `The recording was only ${(recordedMs / 1000).toFixed(1)}s — read the whole sentence through the full countdown (at least ${RECORD_MIN_SECONDS}s).`
+      );
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/stt/preflight-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected: SPEECH_CHECK_SENTENCE, audio_base64: pcmBase64 }),
+      });
+
+      if (!res.ok) {
+        // Service-side failure: show the error + retry, never auto-enter, never burn a retake.
+        let detail = `Speech check service error (${res.status}).`;
+        try {
+          const errData = await res.json();
+          if (errData?.detail) detail = `Speech check service error (${res.status}): ${errData.detail}`;
+        } catch (e) {}
+        setSpeechState('failed');
+        setSpeechError(detail);
+        return;
+      }
+
+      const data = await res.json();
+      const ratio = typeof data.match_ratio === 'number' ? data.match_ratio : 0;
+      const passed = data.pass === true || ratio >= SPEECH_PASS_RATIO;
+      setSpeechResult({
+        transcript: data.transcript || '',
+        match_ratio: ratio,
+        latency_ms: data.latency_ms,
+        provider: data.provider || sttStatus?.provider,
+        expected: data.expected || SPEECH_CHECK_SENTENCE,
+      });
+
+      if (data.error || data.provider === 'unavailable') {
+        // Engine failure inside a 200: surface the error and allow a retry.
+        setSpeechState('failed');
+        setSpeechError(data.error || 'The transcription engine returned an error. Please try again.');
+        return;
+      }
+
+      if (passed) {
+        setSpeechState('passed');
+        return;
+      }
+
+      // Genuine evaluated failure against the sentence → consumes a retake.
+      setSpeechAttempts((prev) => prev + 1);
+      setSpeechState('failed');
+      setSpeechError(
+        'Match too low — your words did not line up with the sentence. Speak clearly and at a steady pace.'
+      );
+    } catch (e) {
+      console.warn('Preflight speech check network error:', e);
+      setSpeechState('failed');
+      setSpeechError(`Network error during the speech check: ${e.message || 'unknown'}`);
+    }
+  };
+
+  const stopSpeechRecording = () => {
+    if (speechRecorderRef.current && speechRecorderRef.current.state !== 'inactive') {
+      speechRecorderRef.current.stop();
+    }
+    if (recordTimerRef.current) {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    if (hardStopTimerRef.current) {
+      clearTimeout(hardStopTimerRef.current);
+      hardStopTimerRef.current = null;
+    }
+  };
+
+  const startSpeechRecording = async () => {
+    setSpeechError('');
+    setSpeechResult(null);
+    setSpeechState('recording');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: selectedMicId
+          ? { deviceId: { exact: selectedMicId }, echoCancellation: true, noiseSuppression: true }
+          : { echoCancellation: true, noiseSuppression: true },
+      });
+      speechStreamRef.current = stream;
+
+      const mimeType =
+        typeof MediaRecorder !== 'undefined' &&
+        MediaRecorder.isTypeSupported &&
+        MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : undefined;
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      speechRecorderRef.current = recorder;
+
+      const chunks = [];
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+      };
+      recorder.onstop = () => {
+        cleanupSpeechRecording();
+        const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+        evaluateSpeechRecording(blob);
+      };
+
+      recorder.start();
+      recordStartRef.current = Date.now();
+      setCountdownSeconds(RECORD_TARGET_SECONDS);
+
+      let elapsed = 0;
+      recordTimerRef.current = setInterval(() => {
+        elapsed += 1;
+        if (elapsed <= RECORD_TARGET_SECONDS) {
+          setCountdownSeconds(Math.max(0, RECORD_TARGET_SECONDS - elapsed));
+        }
+        if (elapsed >= RECORD_TARGET_SECONDS) {
+          stopSpeechRecording();
+        }
+      }, 1000);
+      // Hard stop safety net in case the interval drifts or is throttled
+      hardStopTimerRef.current = setTimeout(
+        () => stopSpeechRecording(),
+        (RECORD_HARD_STOP_SECONDS + 0.5) * 1000
+      );
+    } catch (err) {
+      console.error('Speech recording error:', err);
+      cleanupSpeechRecording();
+      setSpeechState('failed');
+      setSpeechError(
+        err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')
+          ? 'Microphone permission denied — allow microphone access and retry.'
+          : `Could not start recording: ${err?.message || err}`
+      );
+    }
+  };
+
   const allPassed =
     micStatus === 'passed' &&
     camStatus === 'passed' &&
     netStatus === 'passed' &&
     audioTestStatus === 'passed' &&
+    speechPassed &&
     consentAccepted;
 
   if (!isOpen) return null;
@@ -329,7 +643,7 @@ export default function PreFlightCheckModal({
               System Readiness Check
             </h2>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Verifying hardware permissions, audio loop, and WebRTC streaming connectivity before entering the live interview room.
+              Verifying hardware permissions, audio loop, WebRTC streaming connectivity, and live transcription before entering the interview room.
             </p>
           </div>
           <button
@@ -340,7 +654,7 @@ export default function PreFlightCheckModal({
           </button>
         </div>
 
-        {/* 4 In-Order Requirement Verification Cards */}
+        {/* 5 In-Order Requirement Verification Cards */}
         <div className="mt-6 space-y-4">
           {/* Item 1: Microphone Permission & Device Picker */}
           <div className="rounded-2xl border border-slate-200 p-4 dark:border-slate-800 dark:bg-slate-800/40">
@@ -647,6 +961,207 @@ export default function PreFlightCheckModal({
             )}
           </div>
 
+          {/* Item 5: R3.5 Speech Transcription Check (STT readiness gate) */}
+          <div className="rounded-2xl border border-slate-200 p-4 dark:border-slate-800 dark:bg-slate-800/40">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div
+                  className={`rounded-xl p-2.5 ${
+                    speechPassed
+                      ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400'
+                      : speechState === 'failed'
+                      ? 'bg-rose-50 text-rose-600 dark:bg-rose-950/40 dark:text-rose-400'
+                      : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-950/40 dark:text-indigo-400'
+                  }`}
+                >
+                  <Mic className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Step 5</span>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                      Speech Transcription Check
+                    </h3>
+                  </div>
+                  <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    Verify the transcription engine can hear your words accurately — room entry stays locked until it passes.
+                  </p>
+                </div>
+              </div>
+
+              {sttStatusLoading && (
+                <span className="flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking engine...
+                </span>
+              )}
+              {!sttStatusLoading && speechPassed && (
+                <span className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">
+                  <CheckCircle2 className="h-3.5 w-3.5" /> Passed ({Math.round((speechResult?.match_ratio ?? 0) * 100)}%)
+                </span>
+              )}
+              {!sttStatusLoading && !speechPassed && speechState === 'failed' && (
+                <span className="flex items-center gap-1.5 rounded-full bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 dark:bg-rose-950/50 dark:text-rose-400">
+                  <AlertCircle className="h-3.5 w-3.5" /> Failed
+                </span>
+              )}
+              {!sttStatusLoading && !speechPassed && speechState !== 'failed' && !sttGateReady && (
+                <span className="flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Engine Not Ready
+                </span>
+              )}
+            </div>
+
+            <div className="mt-3 flex items-center gap-2 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 px-3 py-2.5 text-xs text-slate-600 dark:text-slate-300">
+              <span className={`h-2 w-2 rounded-full shrink-0 ${sttGateReady ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+              <span>
+                Transcription engine: <strong className="font-bold text-slate-800 dark:text-slate-100">{describeSttProvider(sttStatus?.provider)}</strong>
+              </span>
+              {sttStatus?.locale && <span className="text-slate-400">({sttStatus.locale})</span>}
+            </div>
+
+            {/* Blocking notice while the engine is not ready */}
+            {!sttStatusLoading && !sttGateReady && (
+              <div className="mt-3 rounded-xl bg-amber-50 p-3 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-bold">Transcription engine is starting up… first run can take a minute.</p>
+                    {(sttStatusError || sttStatus?.detail) && (
+                      <p className="mt-1 opacity-80 break-words">
+                        {sttStatusError || (appleProvider && sttStatus?.helper_built === false
+                          ? 'Apple speech helper is being prepared on the interview host.'
+                          : sttStatus?.detail)}
+                      </p>
+                    )}
+                    {sttStatusError && (
+                      <p className="mt-1 opacity-80">Room entry stays disabled until the engine is verified.</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => loadSttStatus(true)}
+                    className="flex shrink-0 items-center gap-1.5 rounded-xl border border-amber-300 bg-white px-3 py-1.5 text-[11px] font-bold text-amber-700 hover:bg-amber-100 dark:border-amber-800 dark:bg-slate-900 dark:text-amber-300 dark:hover:bg-slate-800"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" /> Retry
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Speech read-along + recording (only when the engine is ready) */}
+            {sttGateReady && speechState !== 'passed' && (
+              <div className="mt-3.5">
+                <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto] gap-3 items-center rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 p-3.5">
+                  <div>
+                    <p className="text-sm font-semibold leading-relaxed text-slate-800 dark:text-slate-100">
+                      “{SPEECH_CHECK_SENTENCE}”
+                    </p>
+                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      Press record and read this sentence out loud — the countdown stops automatically after {RECORD_TARGET_SECONDS}s.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 justify-self-start sm:justify-self-end">
+                    {speechState === 'recording' ? (
+                      <>
+                        <span className="flex items-center gap-1.5 rounded-full bg-rose-50 dark:bg-rose-950/40 px-3 py-1.5 text-xs font-bold text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800/60">
+                          <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
+                          {countdownSeconds}s
+                        </span>
+                        <button
+                          type="button"
+                          onClick={stopSpeechRecording}
+                          disabled={RECORD_TARGET_SECONDS - countdownSeconds < RECORD_MIN_SECONDS}
+                          className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 transition-colors shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Stop
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={startSpeechRecording}
+                        disabled={speechState === 'processing'}
+                        className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition-colors shadow-sm disabled:opacity-50"
+                      >
+                        <Mic className="h-4 w-4" /> Record
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {speechState === 'processing' && (
+                  <div className="mt-3 flex items-center gap-2 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 px-3 py-2.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
+                    Transcribing your sample and matching words…
+                  </div>
+                )}
+
+                {speechState === 'failed' && (
+                  <div className="mt-3 rounded-xl bg-rose-50 p-3 text-xs text-rose-800 dark:bg-rose-950/30 dark:text-rose-300">
+                    {!speechRetakesExhausted ? (
+                      <>
+                        <p className="font-bold">{speechError}</p>
+                        {speechResult?.transcript && (
+                          <p className="mt-1.5">
+                            Transcript heard: <span className="italic">"{speechResult.transcript}"</span>
+                            {typeof speechResult.match_ratio === 'number' && (
+                              <> Match: {Math.round(speechResult.match_ratio * 100)}% (needs 80%).</>
+                            )}
+                          </p>
+                        )}
+                        <button
+                          type="button"
+                          onClick={startSpeechRecording}
+                          className="mt-2.5 flex items-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-[11px] font-bold text-white hover:bg-rose-700 transition-colors"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" /> Retake
+                          {speechAttempts > 0 && ` (${Math.max(0, SPEECH_MAX_ATTEMPTS - speechAttempts)} left)`}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p className="font-bold text-rose-700 dark:text-rose-200">
+                          Speech verification failed after multiple attempts — phone-support fallback.
+                        </p>
+                        {speechResult?.transcript && (
+                          <p className="mt-1.5">
+                            Last transcript heard: <span className="italic">"{speechResult.transcript}"</span>
+                            {typeof speechResult.match_ratio === 'number' && (
+                              <> ({Math.round(speechResult.match_ratio * 100)}% match)</>
+                            )}
+                          </p>
+                        )}
+                        <p className="mt-1.5 opacity-90">
+                          Contact support at <strong>support@candidly.ai</strong> with your name, the role, and a note that
+                          your speech check failed — support will schedule your interview by phone. Room entry stays
+                          locked because your speech cannot be transcribed reliably on this device or network.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Passed */}
+            {sttGateReady && speechState === 'passed' && (
+              <div className="mt-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/50 p-3 text-xs text-emerald-800 dark:text-emerald-300">
+                <div className="flex items-center gap-2 font-bold text-emerald-700 dark:text-emerald-400">
+                  <CheckCircle2 className="h-4 w-4" /> Speech check passed — {Math.round((speechResult?.match_ratio ?? 0) * 100)}% match
+                  {typeof speechResult?.latency_ms === 'number' && (
+                    <span className="font-normal opacity-80">· {Math.round(speechResult.latency_ms)}ms</span>
+                  )}
+                </div>
+                {speechResult?.transcript && (
+                  <p className="mt-1.5 opacity-90">
+                    Transcript: <span className="italic">"{speechResult.transcript}"</span>
+                  </p>
+                )}
+                <p className="mt-1 opacity-80">Engine: {describeSttProvider(speechResult?.provider || sttStatus?.provider)}</p>
+              </div>
+            )}
+          </div>
+
           {/* Integrity & Recording Policy Consent Notice (Part F2 & F3) */}
           <div className="rounded-2xl border border-indigo-200/80 bg-indigo-50/50 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/20">
             <label className="flex items-start gap-3 cursor-pointer">
@@ -669,10 +1184,14 @@ export default function PreFlightCheckModal({
           <div className="text-xs text-slate-500 dark:text-slate-400">
             {allPassed ? (
               <span className="text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
-                <CheckCircle2 className="h-4 w-4 inline" /> All 4 requirements & consent verified. Ready to enter room.
+                <CheckCircle2 className="h-4 w-4 inline" /> All 5 requirements & consent verified. Ready to enter room.
               </span>
+            ) : !sttGateReady ? (
+              <span>The transcription engine must be ready before entering.</span>
+            ) : !speechPassed ? (
+              <span>Pass the speech check to unlock room entry.</span>
             ) : (
-              <span>Complete all 4 verification steps and consent to unlock room entry.</span>
+              <span>Complete all 5 verification steps and consent to unlock room entry.</span>
             )}
           </div>
 

@@ -281,12 +281,11 @@ class SimpleInterviewCoordinator(FrameProcessor):
         return "the next topic"
 
     def _persist_progress_payload(self) -> Dict[str, Any]:
-        topic_idx = sum(1 for s in self.steps[: max(self._step + 1, 0)] if s["skill_idx"] >= 0 and s["kind"] in ("anchor", "anchor_alt"))
-        if self._step >= 0 and self.steps[self._step]["skill_idx"] >= 0 and self.steps[self._step]["kind"] in ("anchor", "anchor_alt"):
-            topic_idx = max(1, topic_idx)
-        else:
-            topic_idx = max(0, topic_idx)
+        # topic_index is 1-BASED for skill sections (Topic 1 = first skill); 0 while
+        # the flow is still in welcome/intro (no topic yet).
         cur = self.steps[self._step] if 0 <= self._step < len(self.steps) else None
+        gi = (cur or {}).get("skill_idx", -1)
+        topic_idx = (gi + 1) if gi >= 0 else 0
         return {
             "step": self._step,
             "question_index": (cur or {}).get("q", {}).get("question_index", self.current_lead_question_index),
