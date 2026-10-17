@@ -1,5 +1,5 @@
 {
-  "passed": 49,
+  "passed": 46,
   "failed": 0,
   "results": [
     {
@@ -231,22 +231,7 @@
       "test": "budgets: transitions observed",
       "passed": true,
       "detail": "2 transitions"
-    },
-    {
-      "test": "provider: resolution",
-      "passed": true,
-      "detail": "apple_speechanalyzer (status=installed)"
-    },
-    {
-      "test": "provider: dictation-quality transcript",
-      "passed": true,
-      "detail": "7/7 keywords; 10.4s; 'Testing the Apple Speech transcriber, this is a live streaming check with real speech'"
-    },
-    {
-      "test": "provider: transcript latency sane",
-      "passed": true,
-      "detail": "10.4s"
     }
   ],
-  "wall_seconds": 12.49
+  "wall_seconds": 2.38
 }
