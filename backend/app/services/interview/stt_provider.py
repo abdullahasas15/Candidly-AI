@@ -325,6 +325,18 @@ class AppleSpeechProcess:
         except asyncio.TimeoutError:
             return None
 
+    async def send_flush(self) -> None:
+        """Fire the FLUSH control command without waiting (fire-and-forget finalize)."""
+        await self._send_command(b"FLUSH\n")
+
+    def clear_pending_finals(self) -> None:
+        """Drop stale queued finals — their text is already stitched into the utterance."""
+        while True:
+            try:
+                self._pending_final.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
     async def finalize_at_eof(self, final_wait: float = 5.0) -> None:
         """Offline tooling: close stdin EOF; helper finalizes and emits remaining finals."""
         try:

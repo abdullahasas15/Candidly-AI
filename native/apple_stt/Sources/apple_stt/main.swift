@@ -328,10 +328,20 @@ final class AnalyzerEngine {
         }
     }
 
-    // Mid-interview flush is intentionally a no-op: the warm session is never killed,
-    // stitched partials are the commit-time text of record.
+    // Mid-stream flush (R3.5b): the analyzer's finalize IS the commit-time answer of
+    // record. finalize(through: currentFeedTime) sets a finalization boundary at the
+    // last fed audio — the pending volatile range is flushed out of the results pump
+    // as final(s) and the session stays warm for audio fed afterwards.
     func flush() async {
-        dlog("FLUSH (mid-stream no-op, session kept warm)")
+        guard fedFrames > 0 else {
+            dlog("FLUSH: no audio fed yet, nothing to finalize")
+            return
+        }
+        let throughSecs = Double(fedFrames) / max(1.0, targetFormat.sampleRate)
+        let t = CMTime(seconds: throughSecs, preferredTimescale: 16000)
+        dlog("FLUSH: finalize(through: \(throughSecs)s)")
+        try? await analyzer.finalize(through: t)
+        dlog("FLUSH: finalize returned")
     }
 
     func shutdown() async {
