@@ -176,6 +176,50 @@ def generate_kokoro_passage() -> Path:
     return out_wav
 
 
+def generate_60s_answer() -> Path:
+    """Generate a realistic 60-second technical answer for latency benchmarking."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    parts = [
+        "In our distributed e-commerce architecture, we faced severe latency spikes during peak checkout traffic.",
+        "We started by profiling database queries on PostgreSQL and observed heavy lock contention on inventory updates.",
+        "To alleviate database load, we introduced Redis as a read-through cache for catalog metadata with a TTL of five minutes.",
+        "For checkout operations, we replaced synchronous REST calls with an event-driven Kafka pipeline using idempotent consumers.",
+        "Each order event triggers a distributed saga with compensating actions to handle payment failures without leaving stock reserved.",
+        "In addition, we isolated the payment gateway webhook handlers into an asynchronous worker pool with exponential backoff retries.",
+        "Finally, we deployed Prometheus and Grafana dashboards to track p99 latency, keeping response times under two hundred milliseconds."
+    ]
+    passage = {
+        "id": "answer_60s",
+        "voice": "Samantha",
+        "lang": "en_US",
+        "text_parts": parts,
+        "pause_s": 1.5,
+    }
+    return generate_say_passage(passage)
+
+
+def generate_quiet_speech_minus_30db(src_wav: Path) -> Path:
+    """Generate quiet speech normalized to -30 dBFS to verify soft speech is not dropped."""
+    import scipy.io.wavfile as wav
+    sr, raw = wav.read(src_wav)
+    samples = raw.astype(np.float32) / 32768.0
+    current_rms = float(np.sqrt(np.mean(np.square(samples))))
+    target_rms = 10.0 ** (-30.0 / 20.0)  # ~0.03162 (-30 dBFS)
+    gain = target_rms / max(current_rms, 1e-6)
+    quiet_samples = np.clip(samples * gain, -1.0, 1.0)
+    int16_samples = (quiet_samples * 32767).astype(np.int16)
+
+    out_wav = OUTPUT_DIR / f"{src_wav.stem}_minus30db.wav"
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(int16_samples.tobytes())
+    print(f"Generated quiet speech (-30 dBFS): {out_wav} (RMS={np.sqrt(np.mean(np.square(quiet_samples))):.4f})")
+    return out_wav
+
+
 def generate_all() -> list[Path]:
     print("=" * 60)
     print("Generating Synthetic Test Audio Fixtures (macOS say + Kokoro)")
@@ -186,6 +230,10 @@ def generate_all() -> list[Path]:
         generated.append(wav)
     kwav = generate_kokoro_passage()
     generated.append(kwav)
+    ans_60 = generate_60s_answer()
+    generated.append(ans_60)
+    quiet_wav = generate_quiet_speech_minus_30db(generated[0])
+    generated.append(quiet_wav)
     print("=" * 60)
     print(f"All {len(generated)} test audio fixtures ready in {OUTPUT_DIR}/")
     return generated

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -217,12 +218,13 @@ _CLARIFY_PATTERNS = [
 ]
 
 _DONT_KNOW_PATTERNS = [
-    r"^\s*i\s+(?:really\s+)?don'?t\s+know(?:\s+the\s+answer)?(?:\s+(?:about|to)\s+(?:that|this(?:\s+one)?))?(?:[,\s]+(?:can\s+we\s+)?(?:skip|pass)(?:\s+this)?)?\s*\.?\s*\??\s*$",
-    r"^\s*i\s+do\s+not\s+know(?:\s+(?:about|to)\s+(?:that|this(?:\s+one)?))?(?:[,\s]+(?:can\s+we\s+)?(?:skip|pass)(?:\s+this)?)?\s*\.?\s*\??\s*$",
-    r"^\s*i'?m\s+not\s+(?:really\s+)?sure(?:\s+about\s+that|\s+about\s+this)?\s*\.?\s*$",
-    r"^\s*i\s+have\s+no\s+idea\s*\.?\s*$",
-    r"^\s*(?:can\s+we\s+)?(?:skip|pass)(?:\s+this(?:\s+question)?|\s+on\s+this)?\s*\.?\s*\??\s*$",
-    r"^\s*i\s+haven'?t\s+(?:really\s+)?worked\s+with\s+that\s*\.?\s*$",
+    r"^\s*(?:i\s+)?(?:really\s+)?don'?t\s+know(?:\s+the\s+answer)?(?:\s+(?:about|to)\s+(?:that|this(?:\s+one)?))?(?:[,\s]+(?:can\s+we\s+)?(?:skip|pass)(?:\s+this)?)?\s*[.!?]?\s*$",
+    r"^\s*(?:i\s+)?do\s+not\s+know(?:\s+(?:about|to)\s+(?:that|this(?:\s+one)?))?(?:[,\s]+(?:can\s+we\s+)?(?:skip|pass)(?:\s+this)?)?\s*[.!?]?\s*$",
+    r"^\s*(?:i'?m\s+)?not\s+(?:really\s+)?sure(?:\s+about\s+(?:that|this))?\s*[.!?]?\s*$",
+    r"^\s*i\s+have\s+no\s+idea\s*[.!?]?\s*$",
+    r"^\s*(?:can\s+we\s+)?(?:skip|pass)(?:\s+(?:this|on\s+this)(?:\s+question)?)?\s*[.!?]?\s*$",
+    r"^\s*(?:i\s+)?(?:haven'?t|have\s+not|never)\s+(?:really\s+)?(?:worked\s+with|done)\s+(?:that|this|it)\s*[.!?]?\s*$",
+    r"^\s*no\s*[.!?]?\s*$",
 ]
 
 _NO_EXPERIENCE_PATTERNS = [
@@ -298,7 +300,7 @@ def detect_fast_intent(
 
         for pat in _DONT_KNOW_PATTERNS:
             if re.match(pat, lower):
-                explicit_skip = any(tok in lower for tok in ("skip", "pass"))
+                explicit_skip = any(tok in lower for tok in ("skip", "pass", "no", "haven't done", "havent done"))
                 if not explicit_skip and follow_up_count == 0:
                     topic = skill_name or "this problem"
                     return FastIntentResult(
@@ -782,6 +784,8 @@ async def stream_section_turn_decision(
     candidate_resume_notes: str = "",
     recent_dialogue: Optional[list[dict[str, str]]] = None,
     turn_index: int = 0,
+    consecutive_fragment_count: int = 0,
+    thinking_budget: Optional[int] = None,
     on_sentence: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> SectionTurnDecision:
     """Stream low-latency turn-by-turn decision for a blueprint interview section (Checkpoint R3.5).
@@ -830,12 +834,12 @@ async def stream_section_turn_decision(
             )
         if fast_result.control == "NO_EXPERIENCE" or (
             fast_result.control == "ADVANCE"
-            and any(tok in lower for tok in ("don't know", "no experience", "never used", "haven't worked"))
+            and any(tok in lower for tok in ("don't know", "dont know", "no experience", "never used", "haven't worked", "not sure", "no", "pass", "haven't done", "havent done"))
         ):
             return SectionTurnDecision(
                 action="no_experience",
                 control_token="NO_EXPERIENCE",
-                reasoning="Rule-based no-experience detected",
+                reasoning="Rule-based no-experience / don't know detected",
                 llm_ttft_ms=0.0,
                 is_fast_path=True,
             )
@@ -858,6 +862,15 @@ async def stream_section_turn_decision(
     short_affirmatives = {"yes", "yeah", "ready", "sure", "i am ready", "let's start", "ok", "okay", "start"}
     clean_lower = lower.strip(".!? ")
     if len(words) < 6 and clean_lower not in short_affirmatives:
+        if consecutive_fragment_count >= 2:
+            return SectionTurnDecision(
+                action="no_experience",
+                control_token="NO_EXPERIENCE",
+                spoken_reply="Understood, let's move forward.",
+                reasoning="Consecutive fragment limit reached (>= 2); treating as DONT_KNOW and moving on",
+                llm_ttft_ms=0.0,
+                is_fast_path=True,
+            )
         reply = "Please go on, I'm listening."
         if on_sentence:
             await on_sentence(reply)
@@ -988,15 +1001,17 @@ async def stream_section_turn_decision(
 
     try:
         client = get_gemini_client()
+        budget = thinking_budget if thinking_budget is not None else int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
+        output_limit = 300 + (budget if budget > 0 else 0)
         cfg_kwargs: dict[str, Any] = {
             "temperature": 0.1,
-            "max_output_tokens": 300,
+            "max_output_tokens": output_limit,
             "response_mime_type": "application/json",
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
         }
-        if "lite" not in LIVE_MODEL_NAME.lower():
+        if budget >= 0:
             try:
-                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0, include_thoughts=False)
+                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget, include_thoughts=False)
             except Exception:
                 pass
 

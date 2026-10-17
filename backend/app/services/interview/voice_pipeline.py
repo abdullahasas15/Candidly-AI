@@ -29,6 +29,8 @@ from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnal
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     InputAudioRawFrame,
     TranscriptionFrame,
@@ -37,8 +39,6 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
-)
-from pipecat.frames.vad_frames import (
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -140,6 +140,32 @@ def _load_parakeet_singleton(model_name: str = "mlx-community/parakeet-tdt-0.6b-
             logger.warning(f"Parakeet model load deferred / fallback: {e}")
             _SHARED_PARAKEET_MODEL = None
         return _SHARED_PARAKEET_MODEL
+
+
+_SHARED_NEMOTRON_MODEL = None
+_NEMOTRON_LOAD_ATTEMPTED = False
+
+
+def _load_nemotron_singleton(
+    model_name: str = "mlx-community/nemotron-3.5-asr-streaming-0.6b",
+) -> Any:
+    global _SHARED_NEMOTRON_MODEL, _NEMOTRON_LOAD_ATTEMPTED
+    if os.getenv("VOICE_MOCK", "").lower() in {"1", "true", "yes"}:
+        return None
+    with _MLX_LOCK:
+        if _SHARED_NEMOTRON_MODEL is not None or _NEMOTRON_LOAD_ATTEMPTED:
+            return _SHARED_NEMOTRON_MODEL
+        _NEMOTRON_LOAD_ATTEMPTED = True
+        try:
+            import mlx_audio.stt as stt
+            t0 = time.perf_counter()
+            logger.info(f"Loading Nemotron 3.5 Streaming ASR model: {model_name}...")
+            _SHARED_NEMOTRON_MODEL = stt.load_model(model_name)
+            logger.info(f"Nemotron 3.5 Streaming loaded in {(time.perf_counter() - t0)*1000:.0f}ms")
+        except Exception as e:
+            logger.warning(f"Nemotron streaming load deferred / fallback: {e}")
+            _SHARED_NEMOTRON_MODEL = None
+        return _SHARED_NEMOTRON_MODEL
 
 
 def _load_kokoro_singleton(
@@ -404,8 +430,14 @@ class TwoLaneSTTService(SegmentedSTTService):
         self._session_trace = session_trace
 
         # Models
+        self._nemotron = _SHARED_NEMOTRON_MODEL
         self._parakeet = _SHARED_PARAKEET_MODEL
         self._whisper = _SHARED_WHISPER_MODEL
+
+        # Echo gate & bot speaking tracking (R3.4b)
+        self.is_bot_speaking: bool = False
+        self._segment_started_while_bot_speaking: bool = False
+        self._pre_flight_noise_floor: float = float(os.getenv("STT_NOISE_FLOOR", "0.005"))
 
         # Pre-roll circular frame buffer (500 ms @ 16kHz 16-bit mono = 16000 bytes)
         self._pre_roll_bytes = int(sample_rate * 2 * 0.50)
@@ -426,13 +458,27 @@ class TwoLaneSTTService(SegmentedSTTService):
     def wants_wav_segments(self) -> bool:
         return False
 
+    def set_bot_speaking(self, is_speaking: bool) -> None:
+        """Explicitly set bot speaking status for echo suppression gating."""
+        self.is_bot_speaking = is_speaking
+
     def _ensure_models(self):
         if self._mock_mode:
             return
+        if self._nemotron is None:
+            self._nemotron = _load_nemotron_singleton()
         if self._parakeet is None:
             self._parakeet = _load_parakeet_singleton()
         if self._whisper is None:
             self._whisper = _load_whisper_singleton()
+
+    async def process_frame(self, frame: Frame, direction: Any):
+        # Track bot speaking status from pipeline frames
+        if isinstance(frame, (TTSStartedFrame, BotStartedSpeakingFrame)):
+            self.is_bot_speaking = True
+        elif isinstance(frame, (TTSStoppedFrame, BotStoppedSpeakingFrame)):
+            self.is_bot_speaking = False
+        await super().process_frame(frame, direction)
 
     async def process_audio_frame(self, frame: InputAudioRawFrame, direction: Any):
         # Continuous circular pre-roll buffer when user is not speaking (500ms pre-roll)
@@ -446,6 +492,8 @@ class TwoLaneSTTService(SegmentedSTTService):
 
     async def _handle_user_started_speaking(self, frame: VADUserStartedSpeakingFrame):
         self._user_speaking = True
+        # Gating rule (R3.4b): Record whether this speech segment began while bot was speaking
+        self._segment_started_while_bot_speaking = self.is_bot_speaking
         # Prepend 500ms pre-roll audio so first syllable is never clipped
         if self._pre_roll_buffer:
             self._audio_buffer = bytearray(self._pre_roll_buffer) + self._audio_buffer
@@ -497,6 +545,21 @@ class TwoLaneSTTService(SegmentedSTTService):
         self._ensure_models()
         if self._mock_mode:
             return "Speaking..."
+        # 1. Prefer Nemotron 3.5 streaming for fast interim tokens
+        if self._nemotron is not None:
+            try:
+                with _MLX_LOCK:
+                    res = self._nemotron.generate(audio_np)
+                    if hasattr(res, "text") and res.text:
+                        return res.text.strip()
+                    elif isinstance(res, list) and len(res) > 0:
+                        t = getattr(res[0], "text", str(res[0])).strip()
+                        if t:
+                            return t
+            except Exception as ne:
+                logger.debug(f"Nemotron fast transcribe fallback: {ne}")
+
+        # 2. Fallback to Parakeet
         if self._parakeet is not None:
             try:
                 import mlx.core as mx
@@ -563,10 +626,12 @@ class TwoLaneSTTService(SegmentedSTTService):
         # Guard 1: Hallucination guard
         text = filter_hallucinations(text, audio_np)
 
-        # Guard 2: Acoustic echo guard
-        if is_acoustic_echo(text, self.last_ai_speech):
-            logger.info(f"Acoustic echo detected and suppressed: '{text}'")
-            text = ""
+        # Guard 2: Acoustic echo guard (R3.4b)
+        # Apply ONLY if segment started while bot was speaking. Never drop soft speech if bot was silent.
+        if self._segment_started_while_bot_speaking:
+            if is_acoustic_echo(text, self.last_ai_speech):
+                logger.info(f"Acoustic echo detected during bot speech and suppressed: '{text}'")
+                text = ""
 
         stt_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         self.last_stt_final_ms = stt_ms

@@ -66,6 +66,7 @@ uploads/
 tmp/
 temp/
 debug/
+data/
 *.log
 logs/
 

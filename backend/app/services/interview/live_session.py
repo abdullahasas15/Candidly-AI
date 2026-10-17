@@ -52,6 +52,7 @@ from backend.app.models import (
 )
 from backend.app.services.interview.followup_policy import (
     answer_candidate_closing_question,
+    detect_fast_intent,
     pick_varied_ack,
     stream_turn_decision,
     stream_section_turn_decision,
@@ -196,6 +197,7 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         self._silence_task: Optional[asyncio.Task] = None
         self._last_activity_monotonic: float = time.monotonic()
         self._silence_nudge_count: int = 0
+        self._consecutive_fragment_count: int = 0
         self._hold_extension_secs: float = 0.0
         self._audio_segments_received_fn = lambda: 1
 
@@ -270,26 +272,47 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             re.match(r"^(yes|yep|yeah|sure|ready|sounds good|i am|ok|okay|let's go|let's do it)[.!]?$", candidate_text.lower().strip())
         ) or (self.current_phase in (InterviewPhase.GREETING, InterviewPhase.READY_CHECK))
 
-        if len(words) < 6 and not is_affirmative and self.current_phase == InterviewPhase.DEEP_DIVE:
-            logger.info(f"Fragment Guard triggered on short answer ({len(words)} words): '{candidate_text}'")
-            hold_reply = "Please go on, I'm listening."
-            self.last_ai_speech = hold_reply
-            self.session_trace.log_commit(
-                turn_id=str(curr_turn_id),
-                reason="fragment_guard_hold",
-                full_answer=candidate_text,
-                word_count=len(words),
-                speech_duration_s=self._candidate_speech_duration,
-            )
-            await self.persist_turn(
-                turn_type=TurnType.CLARIFICATION.value,
-                speaker="ai",
-                text=hold_reply,
-            )
-            await self.emit_ui_state("ai-speech-transcript", {"text": hold_reply, "phase": self.current_phase.value})
-            await self.emit_ui_state("interview-bot-state", {"state": "listening"})
-            await self.push_frame(TTSSpeakFrame(hold_reply))
-            return
+        # R3.4b: Fast intents ("I don't know", "no", "not sure", "pass", "haven't done that", hold, clarify, repeat)
+        # are conversational intents, NOT fragments!
+        fast_intent = detect_fast_intent(
+            candidate_text,
+            follow_up_count=len(self.section_state.get("asked_probe_ids", set())) if isinstance(self.section_state, dict) else 0,
+            question_text=getattr(self, "current_question_text", ""),
+        )
+
+        if fast_intent is not None:
+            self._consecutive_fragment_count = 0
+        elif len(words) < 6 and not is_affirmative and self.current_phase == InterviewPhase.DEEP_DIVE:
+            self._consecutive_fragment_count += 1
+            if self._consecutive_fragment_count >= 2:
+                logger.info(
+                    f"Fragment Guard: 2 consecutive 'please go on' triggers reached for '{candidate_text}'. Treating as DONT_KNOW and moving on."
+                )
+                self._consecutive_fragment_count = 0
+                candidate_text = "I don't know, let's move on."
+                words = candidate_text.split()
+            else:
+                logger.info(f"Fragment Guard triggered on short answer ({len(words)} words): '{candidate_text}' (consecutive={self._consecutive_fragment_count})")
+                hold_reply = "Please go on, I'm listening."
+                self.last_ai_speech = hold_reply
+                self.session_trace.log_commit(
+                    turn_id=str(curr_turn_id),
+                    reason="fragment_guard_hold",
+                    full_answer=candidate_text,
+                    word_count=len(words),
+                    speech_duration_s=self._candidate_speech_duration,
+                )
+                await self.persist_turn(
+                    turn_type=TurnType.CLARIFICATION.value,
+                    speaker="ai",
+                    text=hold_reply,
+                )
+                await self.emit_ui_state("ai-speech-transcript", {"text": hold_reply, "phase": self.current_phase.value})
+                await self.emit_ui_state("interview-bot-state", {"state": "listening"})
+                await self.push_frame(TTSSpeakFrame(hold_reply))
+                return
+        else:
+            self._consecutive_fragment_count = 0
 
         self.session_trace.log_commit(
             turn_id=str(curr_turn_id),
