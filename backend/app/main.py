@@ -2183,7 +2183,7 @@ async def create_practice_interview(
         job_id=job.id,
         status="scheduled",
         total_questions_planned=2,
-        duration_planned_mins=5,
+        duration_planned_mins=8,  # R3.5b: scripted flow (welcome + ready gate + intro) adds ~2min before answers; 5min aborted sessions mid-flow
         gemini_model_used=os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite"),
         system_prompt_snapshot=brief,
         interviewer_brief=brief,
@@ -2193,24 +2193,45 @@ async def create_practice_interview(
     await db.flush()
 
     practice_questions = [
+        # R3.5b: kinded questions so the practice warm-up runs the SAME scripted
+        # flow as real interviews — welcome ("Ready to begin?" gate) -> intro ->
+        # anchors -> candidate_qa -> closing. Admin kinds need no skill grouping.
         (
-            "System Design",
+            "welcome", "",
+            "(Welcome agenda is spoken by the coordinator greeting.)", [],
+        ),
+        (
+            "intro_hook", "",
+            "Could you walk me through your background, your strongest recent work, and one thing you'd love to use this role for?",
+            ["Background covered", "Recent work mentioned"],
+        ),
+        (
+            "anchor", "System Design",
             "Tell me about a system or feature you built recently that you're proud of, and one technical trade-off you made.",
             ["Concrete architecture or feature description", "Trade-off explained"],
         ),
         (
-            "Problem Solving",
+            "anchor", "Problem Solving",
             "Describe a tricky production bug or performance bottleneck you diagnosed and how you verified the fix.",
             ["Root-cause debugging approach", "Verification or monitoring"],
         ),
+        (
+            "candidate_qa", "",
+            "What questions do you have about the team or this role?", [],
+        ),
+        (
+            "closing", "",
+            "Thanks so much for your time today. We'll be in touch shortly with next steps!", [],
+        ),
     ]
-    for idx, (sname, qtext, kps) in enumerate(practice_questions):
+    for idx, (kind, sname, qtext, kps) in enumerate(practice_questions):
         db.add(
             InterviewQuestion(
                 session_id=session.id,
                 question_index=idx,
-                skill_name=sname,
+                skill_name=sname or None,
                 skill_category="Practice",
+                kind=kind,
                 priority_tier="P0",
                 question_text=qtext,
                 expected_key_points=kps,
