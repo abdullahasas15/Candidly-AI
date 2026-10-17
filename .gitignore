@@ -92,3 +92,6 @@ DATABASE_TABLES_AND_LLM_PIPELINE.md
 /*.png
 /*.jpg
 /*.jpeg
+
+# SwiftPM build artifacts (Apple STT helper) — regenerable via scripts/build_apple_stt.sh
+native/apple_stt/.build/
