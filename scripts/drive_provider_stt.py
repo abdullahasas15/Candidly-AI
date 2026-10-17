@@ -34,7 +34,7 @@ def verdict(ok: bool, label: str, detail: str = "") -> None:
     print(f"  [{'PASS' if ok else 'FAIL'}] {label}{' — ' + detail if detail else ''}")
 
 
-async def feed_frames(svc: ProviderSTTService, pcm: bytes, chunk_ms: int = 200) -> float:
+async def feed_frames(svc: ProviderSTTService, pcm: bytes, chunk_ms: int = 100) -> float:
     sample_rate = 16000
     chunk = sample_rate * 2 * chunk_ms // 1000
     t0 = time.perf_counter()
@@ -139,6 +139,14 @@ async def main() -> int:
         first_interim_ms["v"] is not None and first_interim_ms["v"] < 3500.0,
         "first caption latency (feed start -> first live words)",
         f"{first_interim_ms['v']:.0f}ms" if first_interim_ms["v"] else "-",
+    )
+    # R3.5b caption cadence: interval between partial updates (target <= 300ms).
+    cadence = svc.cadence_stats()
+    print(
+        f"  [cadence] partials={cadence.get('partial_count')} "
+        f"first_caption={cadence.get('first_caption_ms')}ms "
+        f"avg_interval={cadence.get('avg_partial_interval_ms')}ms "
+        f"max_interval={cadence.get('max_partial_interval_ms')}ms"
     )
 
     # 4. flush_and_wait: instant stitched text, no session rebuild

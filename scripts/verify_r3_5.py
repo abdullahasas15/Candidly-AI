@@ -191,11 +191,25 @@ async def drive_answer(harness: "CoordinatorHarness", text: str, commit: Optiona
     return None
 
 
+async def acknowledge_ready_gate(harness: "CoordinatorHarness") -> None:
+    """R3.5b welcome gate: speak the acknowledgment so the intro question is asked."""
+    from pipecat.frames.frames import UserStartedSpeakingFrame, UserStoppedSpeakingFrame
+
+    c = harness.coordinator
+    if not getattr(c, "_awaiting_ready", False):
+        return
+    await c.process_frame(UserStartedSpeakingFrame(), None)
+    c.record_stt_interim("Yes, I'm ready to begin")
+    await asyncio.sleep(0)  # let the gate task run
+    await c.process_frame(UserStoppedSpeakingFrame(), None)
+
+
 async def run_full_interview(harness: CoordinatorHarness, answers: List[str]) -> Dict[str, Any]:
-    """begin -> for each scripted answer: drive -> commit via button. Returns trace."""
+    """begin -> ready gate ack -> for each scripted answer: drive -> commit via button."""
     c = harness.coordinator
     trace: Dict[str, Any] = {"speeches": [], "turns": []}
     await c.begin_interview()
+    await acknowledge_ready_gate(harness)
     trace["speeches"].extend(harness.ai_speeches())
     for answer in answers:
         result = await drive_answer(harness, answer, commit="button")
@@ -247,7 +261,7 @@ async def test_full_run_no_llm() -> None:
         scripted_ai = [p for p in ai_turns if p.get("question_id")]
         cand_turns = [p for p in harness.persisted if p.get("speaker") == "candidate"]
         record("full-run: every answer persisted", len(cand_turns) == len(answers), f"{len(cand_turns)}/{len(answers)}")
-        record("full-run: exactly the planned questions spoken", len(scripted_ai) == QUERIES_PLANNED - 3, f"{len(scripted_ai)} scripted ai turn rows")
+        record("full-run: exactly the planned questions spoken", len(scripted_ai) == QUERIES_PLANNED - 2, f"{len(scripted_ai)} scripted ai turn rows")
         record("full-run: zero LLM exceptions triggered", True, "no 'LLM CALL FORBIDDEN' raised during the full run")
     except AssertionError as ae:
         record("no-LLM guarantee", False, f"LLM invoked: {ae}")
@@ -262,6 +276,39 @@ QUERIES_PLANNED = 10  # welcome, intro, 2 skills x (anchor + escalation), candid
 
 
 # ============================================================================
+# 4. Welcome ready-gate: one welcome utterance -> wait -> intro as separate utterance
+# ============================================================================
+async def test_welcome_gate() -> None:
+    print(f"\n=== [Test 4] Welcome gate: welcome -> 'Ready to begin?' -> intro separate ===")
+    harness = CoordinatorHarness(make_questions(1))
+    try:
+        c = harness.coordinator
+        await c.begin_interview()
+        speeches = harness.ai_speeches()
+        welcome_spoken = speeches[-1] if speeches else ""
+        record(
+            "gate: welcome is ONE utterance with disclosure + monitoring + agenda",
+            all(
+                frag in welcome_spoken
+                for frag in ("your AI interviewer", "recorded and monitored", "Ready to begin?")
+            ),
+            welcome_spoken[:90],
+        )
+        record("gate: intro NOT spoken before the ack", not any("walk me through" in s for s in speeches), "ok")
+        record("gate: awaiting flag armed", bool(c._awaiting_ready), str(c._awaiting_ready))
+
+        await acknowledge_ready_gate(harness)
+        speeches = harness.ai_speeches()
+        intro_spoken = [s for s in speeches if "walk me through" in s]
+        record("gate: intro spoken after ack", len(intro_spoken) == 1, str(intro_spoken[:1]))
+        record("gate: intro is a SEPARATE utterance", bool(intro_spoken) and intro_spoken[0] != welcome_spoken, "ok")
+        record("gate: ack not persisted as an answer", not any(p.get("speaker") == "candidate" for p in harness.persisted), "ok")
+        record("gate: flag cleared", not c._awaiting_ready, str(c._awaiting_ready))
+    finally:
+        harness.close()
+
+
+# ============================================================================
 # 3. One question per utterance (multi-final single commit)
 # ============================================================================
 async def test_multi_final_single_commit() -> None:
@@ -270,6 +317,7 @@ async def test_multi_final_single_commit() -> None:
     try:
         c = harness.coordinator
         await c.begin_interview()
+        await acknowledge_ready_gate(harness)
         base_speeches = len(harness.ai_speeches())
         from pipecat.frames.frames import UserStartedSpeakingFrame, UserStoppedSpeakingFrame
 
@@ -336,6 +384,7 @@ async def test_commit_paths() -> None:
     try:
         c = harness.coordinator
         await c.begin_interview()
+        await acknowledge_ready_gate(harness)
 
         # Button commit path
         res = await drive_answer(harness, "I built the payments service with idempotent retries.", commit="button")
@@ -380,6 +429,7 @@ async def test_rules() -> None:
     try:
         c = harness.coordinator
         await c.begin_interview()
+        await acknowledge_ready_gate(harness)
         # First: a normal intro answer so the ANCHOR question is current.
         await drive_answer(harness, "I have a CS degree, four years of backend work, and I like data systems.", commit="button")
         first = len(harness.ai_speeches())
@@ -403,6 +453,7 @@ async def test_rules() -> None:
     try:
         c = harness.coordinator
         await c.begin_interview()
+        await acknowledge_ready_gate(harness)
         await drive_answer(harness, "I have a CS degree and four years of backend work.", commit="button")
         snaps = len(harness.ai_speeches())
         await drive_answer(harness, "Honestly I have no experience with that skill at all.", commit="button")
@@ -427,6 +478,7 @@ async def test_time_skip() -> None:
     try:
         c = harness.coordinator
         await c.begin_interview()
+        await acknowledge_ready_gate(harness)
         # Fast-forward the clock: nearly out of budget.
         c.pacing.started_monotonic = time.monotonic() - (c.pacing.duration_planned_mins * 60.0 - 60.0)
         await drive_answer(harness, "I am the lead on our realtime trading ingest platform.", commit="button")
@@ -452,6 +504,7 @@ async def test_bot_never_overlaps() -> None:
     try:
         c = harness.coordinator
         await c.begin_interview()
+        await acknowledge_ready_gate(harness)
         from pipecat.frames.frames import UserStartedSpeakingFrame, UserStoppedSpeakingFrame
 
         # Candidate speaking; interims roll in for a LONG stretch; NO TTSSpeakFrame
@@ -541,6 +594,7 @@ async def main() -> int:
     t_all = time.perf_counter()
 
     await test_full_run_no_llm()
+    await test_welcome_gate()
     await test_multi_final_single_commit()
     await test_no_repeats()
     await test_commit_paths()
