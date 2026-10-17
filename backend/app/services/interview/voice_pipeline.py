@@ -20,7 +20,7 @@ import threading
 import time
 import wave
 from collections.abc import AsyncGenerator
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from loguru import logger
@@ -768,6 +768,21 @@ class ProviderSTTService(SegmentedSTTService):
         self.provider_ready: bool = False
         self.provider_start_failed: bool = False
 
+        # R3.5b: finalize-of-record state + caption cadence metrics.
+        # _finals_seen is cumulative; _finals_at_last_partial snapshots it on every
+        # partial, so final > snapshot means the newest partial is already finalized.
+        self._finals_seen: int = 0
+        self._finals_at_last_partial: int = 0
+        self.last_finalize_source: str = "none"  # none|no-provider|already-final|finalized|fallback
+        self._feed_chunk_bytes = int(sample_rate * 2 * 0.10)  # ~100ms @ 16k PCM16 mono
+        self._feed_buffer = bytearray()
+        self._speech_window_started: Optional[float] = None
+        self._first_partial_monotonic: Optional[float] = None
+        self._last_partial_monotonic: Optional[float] = None
+        self._partial_intervals: List[float] = []
+        self.last_first_caption_ms: Optional[float] = None
+        self.last_partial_interval_ms: Optional[float] = None
+
     # -- sliding partials -----------------------------------------------------
     @staticmethod
     def _stitch(committed: str, incoming: str) -> str:
@@ -781,7 +796,23 @@ class ProviderSTTService(SegmentedSTTService):
         return False
 
     def set_bot_speaking(self, is_speaking: bool) -> None:
+        if is_speaking:
+            # Flush the partial feed chunk so user audio is never withheld across the gate.
+            try:
+                asyncio.get_running_loop().create_task(self._drain_feed_buffer())
+            except RuntimeError:
+                self._feed_buffer.clear()
         self.is_bot_speaking = is_speaking
+
+    async def _drain_feed_buffer(self) -> None:
+        """Feed the coalesced ~100ms chunk buffer now (end of speech / echo gate)."""
+        if self._feed_buffer and self.provider_ready:
+            chunk = bytes(self._feed_buffer)
+            self._feed_buffer.clear()
+            try:
+                await self.helper.feed(chunk)
+            except Exception:
+                pass
 
     async def ensure_started(self) -> bool:
         if self.provider_ready or self.provider_start_failed:
@@ -809,6 +840,25 @@ class ProviderSTTService(SegmentedSTTService):
     # -- provider events (dictation stream) ----------------------------------
 
     def _handle_provider_partial(self, text: str) -> None:
+        # R3.5b caption-cadence metrics: interval between partials + first-caption delay.
+        now = time.perf_counter()
+        self._finals_at_last_partial = self._finals_seen
+        if self._last_partial_monotonic is not None:
+            self._partial_intervals.append((now - self._last_partial_monotonic) * 1000.0)
+            self.last_partial_interval_ms = round(self._partial_intervals[-1], 1)
+        self._last_partial_monotonic = now
+        if self._first_partial_monotonic is None:
+            self._first_partial_monotonic = now
+            if self._speech_window_started is not None:
+                self.last_first_caption_ms = round((now - self._speech_window_started) * 1000.0, 1)
+        if self._session_trace:
+            self._session_trace.log_stt(
+                lane=f"{self._provider_name}_partial",
+                text=text,
+                is_final=False,
+                latency_ms=self.last_partial_interval_ms or 0.0,
+                meta={"first_delay_ms": self.last_first_caption_ms, "interval_ms": self.last_partial_interval_ms},
+            )
         self._latest_partial = text
         self._utterance_text = self._stitch(self._utterance_text, text)
         if self._on_stt_interim:
@@ -819,6 +869,7 @@ class ProviderSTTService(SegmentedSTTService):
 
     def _handle_provider_final(self, text: str, seq: int, start: float, end: float) -> None:
         final_clean = (text or "").strip()
+        self._finals_seen += 1
         self._window_final_chunks.append(final_clean)
         # A spontaneous final usually repeats text already emitted in partials for its
         # range. Keep the stitching monotonic: append finals ONLY when they add content
@@ -850,10 +901,15 @@ class ProviderSTTService(SegmentedSTTService):
                 discarded = len(self._pre_roll_buffer) - self._pre_roll_bytes
                 self._pre_roll_buffer = self._pre_roll_buffer[discarded:]
 
-        # Feed helper continuously while the bot is NOT speaking (echo gate).
-        # Also skip feeding when the provider died so the frame path stays cheap.
+        # Feed the analyzer in coalesced ~100ms chunks (R3.5b caption cadence) while
+        # the bot is NOT speaking (echo gate). Also skip feeding when the provider
+        # died so the frame path stays cheap.
         if self.provider_ready and not self.is_bot_speaking:
-            await self.helper.feed(frame.audio)
+            self._feed_buffer += frame.audio
+            if len(self._feed_buffer) >= self._feed_chunk_bytes:
+                chunk = bytes(self._feed_buffer)
+                self._feed_buffer.clear()
+                await self.helper.feed(chunk)
 
         await super().process_audio_frame(frame, direction)
 
@@ -864,27 +920,80 @@ class ProviderSTTService(SegmentedSTTService):
         self._latest_partial = ""
         self._utterance_text = ""
         self._window_seq += 1
+        # R3.5b: fresh cadence metrics for this speech window.
+        self._speech_window_started = time.perf_counter()
+        self._first_partial_monotonic = None
+        self._last_partial_monotonic = None
+        self._partial_intervals = []
+        self.last_first_caption_ms = None
+        self.last_partial_interval_ms = None
+        self._finals_at_last_partial = self._finals_seen
         if self._pre_roll_buffer:
             self._audio_buffer = bytearray(self._pre_roll_buffer) + self._audio_buffer
             self._pre_roll_buffer.clear()
         await self.ensure_started()
 
     async def flush_and_wait(self, timeout: float = 1.0) -> Optional[str]:
-        """R3.5 turn-commit: return the ready stitched text immediately.
+        """R3.5b turn-commit finalize: the analyzer's FLUSHed final is the answer of record.
 
-        The Apple session is never killed mid-stream (rebuilds were shown to lose
-        utterance heads), so the stitched cumulative partials ARE the dictation-quality
-        text of record; spontaneous segment finals keep arriving and are appended by
-        the coordinator's chunk callback.
+        Sends FLUSH (the analyzer's finalize through the last fed audio — the session
+        stays warm) and waits up to `timeout` for its final. Volatile partials are
+        display-only; they are the FALLBACK text of record when the final doesn't land
+        in time (logged + traced). The session is never rebuilt mid-interview.
         """
-        _ = timeout
-        return self._utterance_text or self._latest_partial or None
+        text_of_record = self._utterance_text or self._latest_partial or None
+        if not self.provider_ready:
+            self.last_finalize_source = "no-provider"
+            return text_of_record
+        # A final already landed after the newest partial: the volatile tail is already
+        # finalized — no FLUSH roundtrip needed.
+        if self._finals_seen > self._finals_at_last_partial:
+            self.last_finalize_source = "already-final"
+            return text_of_record
+        await self._drain_feed_buffer()
+        self.helper.clear_pending_finals()  # stale finals are already stitched in
+        flushed = await self.helper.flush_and_wait(timeout=timeout)
+        if flushed is not None:
+            # The flushed final was already stitched into _utterance_text by
+            # _handle_provider_final (which also fired the coordinator chunk callback).
+            self.last_finalize_source = "finalized"
+            return self._utterance_text or self._latest_partial or None
+        if self._utterance_text or self._latest_partial:
+            logger.warning(
+                f"[provider-stt] analyzer finalize missed the {timeout:.2f}s window — "
+                "committing stitched partials as the answer of record (fallback)"
+            )
+            if self._session_trace:
+                self._session_trace.log_stt(
+                    lane="finalize_fallback",
+                    text=self._utterance_text or "",
+                    is_final=True,
+                    latency_ms=timeout * 1000.0,
+                )
+        self.last_finalize_source = "fallback"
+        return text_of_record
+
+    def cadence_stats(self) -> Dict[str, Any]:
+        """R3.5b caption cadence metrics for the current speech window."""
+        intervals = self._partial_intervals
+        partial_count = len(intervals) + (1 if self._first_partial_monotonic is not None else 0)
+        return {
+            "partial_count": partial_count,
+            "first_caption_ms": self.last_first_caption_ms,
+            "avg_partial_interval_ms": round(sum(intervals) / len(intervals), 1) if intervals else None,
+            "max_partial_interval_ms": round(max(intervals), 1) if intervals else None,
+        }
 
     async def _handle_user_stopped_speaking(self, frame: VADUserStoppedSpeakingFrame):
-        # Flush the provider so the last final is already computed (<= 1s),
-        # then run the standard segment machinery (which calls run_stt below).
+        # Kick the analyzer finalize early — fire, never block the pipeline loop. The
+        # tail final streams out during the silence window, so commit_turn's bounded
+        # flush_and_wait usually finds it already computed.
         if self.provider_ready:
-            await self.flush_and_wait(timeout=1.0)
+            await self._drain_feed_buffer()
+            try:
+                await self.helper.send_flush()
+            except Exception:
+                pass
         await super()._handle_user_stopped_speaking(frame)
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
