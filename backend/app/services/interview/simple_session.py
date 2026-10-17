@@ -417,6 +417,43 @@ class SimpleInterviewCoordinator(FrameProcessor):
             await self._emit("interview-bot-state", {"state": "speaking"})
             await self.push_frame(TTSSpeakFrame(text), FrameDirection.DOWNSTREAM)
             self._last_activity_monotonic = time.monotonic()
+            # Pre-warm the likely NEXT utterances (bridge/next question) while the
+            # candidate is answering, so a commit plays instantly (cache hit).
+            self._kick_prewarm()
+
+    async def _prewarm_next_speech(self) -> None:
+        """Pre-warm the TTS cache for bridge + likely next steps while the user talks.
+
+        Runs in a worker thread (idle listening time), so the commit -> audible
+        bridge/next question is instant (warm cache path ~150-500ms -> ~0ms first audio).
+        """
+        next_texts: List[str] = []
+        for b in _BRIDGES:
+            next_texts.append(b)
+        nxt = self._step + 1
+        if 0 <= nxt < len(self.steps):
+            nq = self.steps[nxt]["q"]
+            ntext = (nq.get("question_text") or "").strip()
+            if ntext:
+                gi = self.steps[nxt].get("skill_idx", -1)
+                if self.steps[nxt]["kind"] in ("anchor", "anchor_alt") and gi >= 0:
+                    prev = self.steps[self._step] if 0 <= self._step < len(self.steps) else None
+                    if prev and prev["skill_idx"] != gi:
+                        ntext = f"Alright. Now let's talk about {self._spoken_skill_label(gi)}. {ntext}"
+                next_texts.append(ntext)
+        next_texts.append(_SHORT_PROMPT)
+        try:
+            for t in next_texts:
+                from backend.app.services.interview.voice_pipeline import pre_synthesize_phrase
+
+                await pre_synthesize_phrase(t, speed=self.speech_speed)
+        except Exception as exc:
+            logger.debug(f"[simple] TTS pre-warm notice: {exc}")
+
+    def _kick_prewarm(self) -> None:
+        task = getattr(self, "_prewarm_task", None)
+        if task is None or task.done():
+            self._prewarm_task = asyncio.create_task(self._prewarm_next_speech())
 
     async def _ask_step(self, step_idx: int) -> None:
         self._step = step_idx

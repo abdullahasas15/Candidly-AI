@@ -96,6 +96,15 @@ async def main() -> int:
 
     # 3. first pass: candidate speech streams live partials (dictation path)
     t0 = time.perf_counter()
+    first_interim_ms = {"v": None}
+
+    def on_interim(text):
+        if first_interim_ms["v"] is None and text.strip():
+            first_interim_ms["v"] = (time.perf_counter() - t0) * 1000.0
+        interims.append(text)
+
+    svc._on_stt_interim = on_interim
+
     async def run_pass():
         await svc.process_frame(VADUserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
         dt = await feed_frames(svc, pcm)
@@ -126,6 +135,11 @@ async def main() -> int:
     hit = sum(1 for w in ("testing", "transcriber", "streaming", "speech") if w in cumulative.lower())
     verdict(hit >= 3, "live partials stream during feed", f"{len(interims)} interims; keys={hit}/4; {cumulative[:60]!r}")
     verdict(dt < len(pcm) / 32000.0 * 1.6 + 4.0, "feed paced near realtime", f"{dt:.1f}s")
+    verdict(
+        first_interim_ms["v"] is not None and first_interim_ms["v"] < 3500.0,
+        "first caption latency (feed start -> first live words)",
+        f"{first_interim_ms['v']:.0f}ms" if first_interim_ms["v"] else "-",
+    )
 
     # 4. flush_and_wait: instant stitched text, no session rebuild
     t0 = time.perf_counter()
