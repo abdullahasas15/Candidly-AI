@@ -105,15 +105,17 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
       if (!res.ok) {
         throw new Error(payload.detail || 'Could not start practice interview');
       }
-      const startRes = await fetch(`/api/interview-sessions/${payload.session_id}/start`, {
+      // The practice-interview endpoint returns the session under `id` (no `session_id`).
+      const sessionId = payload.session_id || payload.id;
+      const startRes = await fetch(`/api/interview-sessions/${sessionId}/start`, {
         method: 'POST',
         headers,
       });
-      const startedPayload = startRes.ok ? await startRes.json() : { id: payload.session_id };
+      const startedPayload = startRes.ok ? await startRes.json() : { id: sessionId };
       setIsPracticeMode(true);
       setInterviewSession({
         ...startedPayload,
-        id: payload.session_id,
+        id: sessionId,
         job_title: payload.job_title || 'Practice Interview (General Warm-Up)',
         duration_mins: payload.duration_mins || 5,
       });

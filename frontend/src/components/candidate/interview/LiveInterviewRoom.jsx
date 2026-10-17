@@ -752,10 +752,25 @@ export default function LiveInterviewRoom({
       setInterviewBegun(true);
       setAiState('speaking');
 
-      await fetch(`/api/interview-sessions/${sessionId}/begin`, {
-        method: 'POST',
-        headers: getAuthHeaders(),
-      });
+      // The POST can race this room's own WebRTC assembly: /begin answers 409
+      // ("still establishing") while the server registers the runner a second
+      // later. Retry briefly so a deliberate Begin click is never silently lost.
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        let res = null;
+        try {
+          res = await fetch(`/api/interview-sessions/${sessionId}/begin`, {
+            method: 'POST',
+            headers: getAuthHeaders(),
+          });
+        } catch (err) {
+          res = null;
+        }
+        if (res && res.ok) return;
+        if (res && res.status === 404) break; // session gone — don't spin
+        await new Promise((resolve) => setTimeout(resolve, attempt < 4 ? 700 : 1500));
+      }
+      showInlineNotice('warn', 'The interviewer is still connecting — the greeting may arrive late. Use Reconnect or Begin again if it never starts.');
+      setAiState('listening');
     } catch (err) {
       console.error('Error starting interview:', err);
     }
