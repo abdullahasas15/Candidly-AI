@@ -12,8 +12,10 @@ Stack components:
 """
 
 import asyncio
+import collections
 import io
 import os
+import re
 import threading
 import time
 import wave
@@ -28,10 +30,17 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
     Frame,
+    InputAudioRawFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+)
+from pipecat.frames.vad_frames import (
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.aggregators.sentence import SentenceAggregator
 from pipecat.processors.audio.vad_processor import VADProcessor
@@ -64,9 +73,31 @@ GEMINI_MODEL_NAME = LIVE_MODEL_NAME
 _MLX_LOCK = threading.Lock()
 _SHARED_PARAKEET_MODEL: Any = None
 _PARAKEET_LOAD_ATTEMPTED: bool = False
+_SHARED_WHISPER_MODEL: Any = None
+_WHISPER_LOAD_ATTEMPTED: bool = False
 _SHARED_KOKORO_MODEL: Any = None
 _KOKORO_LOAD_ATTEMPTED: bool = False
 _SHARED_SMART_TURN: Optional[LocalSmartTurnAnalyzerV3] = None
+
+
+def _load_whisper_singleton(model_name: str = "mlx-community/whisper-large-v3-turbo") -> Any:
+    global _SHARED_WHISPER_MODEL, _WHISPER_LOAD_ATTEMPTED
+    if os.getenv("VOICE_MOCK", "").lower() in {"1", "true", "yes"}:
+        return None
+    with _MLX_LOCK:
+        if _SHARED_WHISPER_MODEL is not None or _WHISPER_LOAD_ATTEMPTED:
+            return _SHARED_WHISPER_MODEL
+        _WHISPER_LOAD_ATTEMPTED = True
+        try:
+            from mlx_audio.stt.utils import load_model
+            t0 = time.perf_counter()
+            logger.info(f"Loading Whisper Large v3 Turbo model: {model_name}...")
+            _SHARED_WHISPER_MODEL = load_model(model_name)
+            logger.info(f"Whisper loaded in {(time.perf_counter() - t0)*1000:.0f}ms")
+        except Exception as e:
+            logger.warning(f"Whisper model load deferred / fallback: {e}")
+            _SHARED_WHISPER_MODEL = None
+        return _SHARED_WHISPER_MODEL
 
 # Pre-synthesized PCM audio cache: key = (normalized_text, round(speed, 2)) -> (pcm_bytes, sample_rate)
 _STATIC_TTS_CACHE: dict[tuple[str, float], tuple[bytes, int]] = {}
@@ -237,16 +268,128 @@ async def warmup_voice_models(prewarm_static_phrases: bool = True) -> dict[str, 
     return status
 
 
-class ParakeetSTTService(SegmentedSTTService):
-    """STT service utilizing Parakeet TDT 0.6B via parakeet-mlx on Apple Silicon."""
+def clean_resample_16k_mono(raw_pcm: bytes, from_sample_rate: int) -> bytes:
+    """Cleanly resample 16-bit PCM audio to 16kHz mono without chunk-boundary artifacts."""
+    if not raw_pcm or from_sample_rate == 16000:
+        return raw_pcm
+    samples = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32)
+    num_16k = int(len(samples) * 16000 / from_sample_rate)
+    resampled = np.interp(
+        np.linspace(0, len(samples), num_16k, endpoint=False),
+        np.arange(len(samples)),
+        samples,
+    )
+    return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
+
+
+def filter_hallucinations(text: str, audio_np: np.ndarray) -> str:
+    """Filter ASR hallucinations on silence or repeated phrase loops."""
+    clean = (text or "").strip()
+    if not clean:
+        return ""
+    rms = float(np.sqrt(np.mean(np.square(audio_np)))) if len(audio_np) > 0 else 0.0
+    if rms < 0.005:
+        # RMS silence: suppress transcript
+        return ""
+    # Filter repeated n-grams (common hallucination on trailing silence)
+    words = clean.split()
+    if len(words) >= 4:
+        for n in (1, 2, 3):
+            chunks = [" ".join(words[i : i + n]).lower() for i in range(0, len(words) - n + 1, n)]
+            if len(chunks) >= 3 and all(c == chunks[0] for c in chunks):
+                return ""
+    return clean
+
+
+def is_acoustic_echo(candidate_text: str, last_ai_speech: str) -> bool:
+    """Detect if candidate transcript is acoustic echo of bot's own speaker output."""
+    c_clean = re.sub(r"[^\w\s]", "", (candidate_text or "").lower()).strip()
+    a_clean = re.sub(r"[^\w\s]", "", (last_ai_speech or "").lower()).strip()
+    if not c_clean or not a_clean:
+        return False
+    if c_clean in a_clean:
+        return True
+    c_words = set(c_clean.split())
+    a_words = set(a_clean.split())
+    if len(c_words) >= 3 and len(c_words.intersection(a_words)) / len(c_words) > 0.85:
+        return True
+    return False
+
+
+class EventLoopLagMonitor:
+    """Monitors asyncio event-loop lag to detect UI or frame processing stalls (Part 2)."""
+
+    def __init__(self, sample_interval_s: float = 0.05, max_history: int = 100):
+        self.sample_interval_s = sample_interval_s
+        self.max_history = max_history
+        self._samples: collections.deque[float] = collections.deque(maxlen=max_history)
+        self._task: Optional[asyncio.Task] = None
+        self._running: bool = False
+        self.current_lag_ms: float = 0.0
+        self.p95_lag_ms: float = 0.0
+        self.max_lag_ms: float = 0.0
+
+    def start(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+        if self._running:
+            return
+        self._running = True
+        try:
+            loop = loop or asyncio.get_running_loop()
+            self._task = loop.create_task(self._monitor_loop())
+        except RuntimeError:
+            pass
+
+    def stop(self) -> None:
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+    async def _monitor_loop(self) -> None:
+        while self._running:
+            t0 = time.perf_counter()
+            try:
+                await asyncio.sleep(self.sample_interval_s)
+            except asyncio.CancelledError:
+                break
+            elapsed = time.perf_counter() - t0
+            lag = max(0.0, (elapsed - self.sample_interval_s) * 1000.0)
+            self._samples.append(lag)
+            self.current_lag_ms = lag
+            if len(self._samples) >= 10:
+                self.p95_lag_ms = float(np.percentile(list(self._samples), 95))
+                self.max_lag_ms = float(max(self._samples))
+                if self.p95_lag_ms > 50.0:
+                    logger.warning(
+                        f"EVENT LOOP LAG HIGH: p95={self.p95_lag_ms:.1f}ms, max={self.max_lag_ms:.1f}ms. "
+                        f"Active tasks count={len(asyncio.all_tasks())}"
+                    )
+
+    def get_stats(self) -> dict[str, float]:
+        return {
+            "current_lag_ms": round(self.current_lag_ms, 2),
+            "p95_lag_ms": round(self.p95_lag_ms, 2),
+            "max_lag_ms": round(self.max_lag_ms, 2),
+        }
+
+
+class TwoLaneSTTService(SegmentedSTTService):
+    """Two-Lane STT service for Candidly AI (Part 2):
+    - Lane 1 (Interim): Fast streaming captions emitted every ~400ms while user speaks.
+    - Lane 2 (Accuracy): Segmented ASR on VAD stop with 500ms pre-roll + 300ms post-roll.
+      Uses Parakeet TDT 0.6B or Whisper Large v3 Turbo via MLX in background threads.
+      Tags each segment with monotonic sequence ID `seq`.
+      Includes RMS silence check, hallucination guard, and acoustic echo cancellation.
+    """
 
     def __init__(
         self,
         *,
         model_name: str = "mlx-community/parakeet-tdt-0.6b-v2",
         sample_rate: int = 16000,
-        trailing_silence_secs: float = 0.42,
-        on_stt_final: Optional[Callable[[str, float, float], None]] = None,
+        trailing_silence_secs: float = 0.30,
+        on_stt_interim: Optional[Callable[[str], None]] = None,
+        on_stt_final: Optional[Callable[[str, float, Optional[float], int], None]] = None,
+        session_trace: Optional[Any] = None,
         **kwargs,
     ):
         super().__init__(
@@ -255,85 +398,210 @@ class ParakeetSTTService(SegmentedSTTService):
             **kwargs,
         )
         self._model_name = model_name
-        self._model = _SHARED_PARAKEET_MODEL
         self._mock_mode = os.getenv("VOICE_MOCK", "").lower() in {"1", "true", "yes"}
+        self._on_stt_interim = on_stt_interim
         self._on_stt_final = on_stt_final
+        self._session_trace = session_trace
+
+        # Models
+        self._parakeet = _SHARED_PARAKEET_MODEL
+        self._whisper = _SHARED_WHISPER_MODEL
+
+        # Pre-roll circular frame buffer (500 ms @ 16kHz 16-bit mono = 16000 bytes)
+        self._pre_roll_bytes = int(sample_rate * 2 * 0.50)
+        self._pre_roll_buffer = bytearray()
+
+        # Speech tracking & monotonic sequence
+        self._segment_seq: int = 0
         self.last_stt_final_ms: Optional[float] = None
         self.last_stt_confidence: Optional[float] = None
         self.audio_segments_received: int = 0
+        self.last_ai_speech: str = ""
+
+        # Lane 1 interim task
+        self._interim_task: Optional[asyncio.Task] = None
+        self._interim_last_text: str = ""
 
     @property
     def wants_wav_segments(self) -> bool:
         return False
 
-    def _ensure_model(self):
-        if self._model is None and not self._mock_mode:
-            self._model = _load_parakeet_singleton(self._model_name)
+    def _ensure_models(self):
+        if self._mock_mode:
+            return
+        if self._parakeet is None:
+            self._parakeet = _load_parakeet_singleton()
+        if self._whisper is None:
+            self._whisper = _load_whisper_singleton()
+
+    async def process_audio_frame(self, frame: InputAudioRawFrame, direction: Any):
+        # Continuous circular pre-roll buffer when user is not speaking (500ms pre-roll)
+        if not self._user_speaking:
+            self._pre_roll_buffer += frame.audio
+            if len(self._pre_roll_buffer) > self._pre_roll_bytes:
+                discarded = len(self._pre_roll_buffer) - self._pre_roll_bytes
+                self._pre_roll_buffer = self._pre_roll_buffer[discarded:]
+
+        await super().process_audio_frame(frame, direction)
+
+    async def _handle_user_started_speaking(self, frame: VADUserStartedSpeakingFrame):
+        self._user_speaking = True
+        # Prepend 500ms pre-roll audio so first syllable is never clipped
+        if self._pre_roll_buffer:
+            self._audio_buffer = bytearray(self._pre_roll_buffer) + self._audio_buffer
+            self._pre_roll_buffer.clear()
+
+        # Start Lane 1 periodic interim transcription
+        if self._interim_task and not self._interim_task.done():
+            self._interim_task.cancel()
+        self._interim_task = asyncio.create_task(self._lane1_interim_loop())
+
+    async def _handle_user_stopped_speaking(self, frame: VADUserStoppedSpeakingFrame):
+        # Stop Lane 1
+        if self._interim_task and not self._interim_task.done():
+            self._interim_task.cancel()
+            self._interim_task = None
+        await super()._handle_user_stopped_speaking(frame)
+
+    async def _lane1_interim_loop(self):
+        """Lane 1: fast streaming captions every ~400ms for live visual feedback."""
+        try:
+            while self._user_speaking:
+                await asyncio.sleep(0.40)
+                if not self._user_speaking or len(self._audio_buffer) < 4800:
+                    continue
+                # Fast transcribe current speech buffer snapshot
+                buf_snap = bytes(self._audio_buffer)
+                audio_np = np.frombuffer(buf_snap, dtype=np.int16).astype(np.float32) / 32768.0
+                if len(audio_np) > 1600:
+                    text = await asyncio.to_thread(self._fast_transcribe, audio_np)
+                    if text and text != self._interim_last_text:
+                        self._interim_last_text = text
+                        if self._on_stt_interim:
+                            try:
+                                self._on_stt_interim(text)
+                            except Exception:
+                                pass
+                        if self._session_trace:
+                            self._session_trace.log_stt(
+                                lane="lane1_streaming",
+                                text=text,
+                                is_final=False,
+                            )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"Lane 1 interim exception: {e}")
+
+    def _fast_transcribe(self, audio_np: np.ndarray) -> str:
+        self._ensure_models()
+        if self._mock_mode:
+            return "Speaking..."
+        if self._parakeet is not None:
+            try:
+                import mlx.core as mx
+                from parakeet_mlx.audio import get_logmel
+                with _MLX_LOCK:
+                    audio_mx = mx.array(audio_np, dtype=mx.float32)
+                    mel = get_logmel(audio_mx, self._parakeet.preprocessor_config)
+                    res = self._parakeet.generate(mel)
+                    if res:
+                        return getattr(res[0], "text", str(res[0])).strip()
+            except Exception:
+                pass
+        return ""
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
-        """Transcribe segmented speech from VAD and record stt_final_ms."""
+        """Lane 2: Accuracy segmented ASR on VAD stop with sequence tagging and guards."""
         t0 = time.perf_counter()
-        self._ensure_model()
+        self._ensure_models()
         text = ""
-        confidence = 0.92
 
-        if self._model is not None and not self._mock_mode:
-            try:
-                if audio.startswith(b"RIFF"):
-                    with io.BytesIO(audio) as bio:
-                        with wave.open(bio, "rb") as wf:
-                            n_frames = wf.getnframes()
-                            raw_pcm = wf.readframes(n_frames)
-                else:
-                    raw_pcm = audio
+        if audio.startswith(b"RIFF"):
+            with io.BytesIO(audio) as bio:
+                with wave.open(bio, "rb") as wf:
+                    raw_pcm = wf.readframes(wf.getnframes())
+        else:
+            raw_pcm = audio
 
-                audio_np = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32) / 32768.0
-                rms = float(np.sqrt(np.mean(np.square(audio_np)))) if len(audio_np) > 0 else 0.0
-                if rms > 0.005:
-                    self.audio_segments_received += 1
+        audio_np = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(np.square(audio_np)))) if len(audio_np) > 0 else 0.0
 
-                min_samples = getattr(self._model.preprocessor_config, "hop_length", 160)
-                if len(audio_np) >= min_samples:
-                    import mlx.core as mx
-                    from parakeet_mlx.audio import get_logmel
-
-                    def _transcribe():
-                        with _MLX_LOCK:
-                            audio_mx = mx.array(audio_np, dtype=mx.float32)
-                            mel = get_logmel(audio_mx, self._model.preprocessor_config)
-                            results = self._model.generate(mel)
-                            if results and len(results) > 0:
-                                return getattr(results[0], "text", str(results[0]))
-                            return ""
-
-                    text = await asyncio.to_thread(_transcribe)
-                    # parakeet-mlx does not compute token/sentence confidence scores; store NULL
-                    confidence = None
-            except Exception as e:
-                logger.error(f"Error running Parakeet transcription: {e}")
-                text = ""
-
-        if not text and self._mock_mode:
+        if rms > 0.005:
             self.audio_segments_received += 1
-            text = "Thank you for the question. In my previous role I built scalable real-time systems with React and Python."
+
+            if not self._mock_mode:
+                def _do_accuracy_transcribe():
+                    with _MLX_LOCK:
+                        # 1. Prefer Parakeet (lower WER, lower latency, 5.4% average WER)
+                        if self._parakeet is not None:
+                            try:
+                                import mlx.core as mx
+                                from parakeet_mlx.audio import get_logmel
+                                audio_mx = mx.array(audio_np, dtype=mx.float32)
+                                mel = get_logmel(audio_mx, self._parakeet.preprocessor_config)
+                                res = self._parakeet.generate(mel)
+                                if res:
+                                    return getattr(res[0], "text", str(res[0])).strip()
+                            except Exception as pe:
+                                logger.debug(f"Parakeet ASR fallback: {pe}")
+
+                        # 2. Whisper fallback
+                        if self._whisper is not None:
+                            try:
+                                res = self._whisper.generate(audio_np)
+                                return getattr(res, "text", str(res)).strip()
+                            except Exception as we:
+                                logger.debug(f"Whisper ASR fallback: {we}")
+
+                        return ""
+
+                text = await asyncio.to_thread(_do_accuracy_transcribe)
+            else:
+                text = "Thank you for the question. In my previous role I built scalable real-time systems with React and Python."
+
+        # Guard 1: Hallucination guard
+        text = filter_hallucinations(text, audio_np)
+
+        # Guard 2: Acoustic echo guard
+        if is_acoustic_echo(text, self.last_ai_speech):
+            logger.info(f"Acoustic echo detected and suppressed: '{text}'")
+            text = ""
 
         stt_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         self.last_stt_final_ms = stt_ms
-        self.last_stt_confidence = None
 
-        text = text.strip()
-        if text:
-            logger.info(f"STT Transcript ({stt_ms:.1f}ms): '{text}'")
+        clean_text = text.strip()
+        if clean_text:
+            self._segment_seq += 1
+            seq = self._segment_seq
+            logger.info(f"STT Accuracy Transcript (seq={seq}, {stt_ms:.1f}ms): '{clean_text}'")
             if self._on_stt_final:
                 try:
-                    self._on_stt_final(text, stt_ms, None)
+                    self._on_stt_final(clean_text, stt_ms, None, seq)
+                except TypeError:
+                    self._on_stt_final(clean_text, stt_ms, None)
                 except Exception:
                     pass
+
+            if self._session_trace:
+                self._session_trace.log_stt(
+                    lane="lane2_accuracy",
+                    text=clean_text,
+                    is_final=True,
+                    latency_ms=stt_ms,
+                    seq=seq,
+                )
+
             yield TranscriptionFrame(
-                text=text,
+                text=clean_text,
                 user_id="candidate",
                 timestamp=str(time.time()),
             )
+
+
+# Backward-compatible alias
+ParakeetSTTService = TwoLaneSTTService
 
 
 class KokoroTTSService(TTSService):
@@ -494,10 +762,12 @@ def build_voice_pipeline_components(
     connection: SmallWebRTCConnection,
     api_key: Optional[str] = None,
     speech_speed: float = 1.0,
-    on_stt_final: Optional[Callable[[str, float, float], None]] = None,
+    on_stt_interim: Optional[Callable[[str], None]] = None,
+    on_stt_final: Optional[Callable[[str, float, Optional[float], int], None]] = None,
     on_tts_first_audio: Optional[Callable[[float], None]] = None,
+    session_trace: Optional[Any] = None,
 ):
-    """Constructs the configured voice components for Pipecat."""
+    """Constructs the configured voice components for Pipecat with Two-Lane STT and lag monitor."""
     transport = SmallWebRTCTransport(
         webrtc_connection=connection,
         params=TransportParams(
@@ -524,7 +794,11 @@ def build_voice_pipeline_components(
         stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=smart_turn)]
     )
     turn_analyzer = UserTurnProcessor(user_turn_strategies=turn_strategies)
-    stt = ParakeetSTTService(on_stt_final=on_stt_final)
+    stt = TwoLaneSTTService(
+        on_stt_interim=on_stt_interim,
+        on_stt_final=on_stt_final,
+        session_trace=session_trace,
+    )
     tts = KokoroTTSService(speed=speech_speed, on_first_audio=on_tts_first_audio)
     sentence_aggregator = SentenceAggregator()
 
@@ -537,6 +811,7 @@ def build_voice_pipeline_components(
     avatar = AvatarProcessor() if AvatarProcessor is not None else None
     rtvi = RTVIProcessor()
     rtvi_observer = RTVIObserver(rtvi=rtvi)
+    lag_monitor = EventLoopLagMonitor()
 
     if avatar is not None:
         @rtvi.event_handler("on_client_ready")
@@ -557,4 +832,5 @@ def build_voice_pipeline_components(
         "avatar": avatar,
         "rtvi": rtvi,
         "rtvi_observer": rtvi_observer,
+        "lag_monitor": lag_monitor,
     }

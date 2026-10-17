@@ -19,22 +19,23 @@ from backend.app.services.question_generation.provider import (
 
 ControlToken = Literal["ADVANCE", "FOLLOWUP", "REPEAT", "CLARIFY", "REDIRECT", "HOLD", "NO_EXPERIENCE"]
 
-# Pre-synthesized varied acknowledgements; includes empty string so we skip ack ~25% of turns
-ACK_POOL: list[str] = [
-    "Got it.",
-    "Makes sense.",
-    "",
+# Neutral bridge pool (R3.4): max 5 words, strictly neutral, zero praise ("Great", "Good", "Excellent")
+NEUTRAL_BRIDGES: list[str] = [
+    "Thanks, that's clear.",
+    "Okay, got it.",
     "Understood.",
-    "Fair enough.",
     "",
-    "Okay, thanks.",
-    "I see.",
 ]
 
+ACK_POOL: list[str] = NEUTRAL_BRIDGES
 
-def pick_varied_ack(turn_index: int) -> str:
-    """Return a short varied acknowledgement or empty string (to skip ack naturally)."""
-    return ACK_POOL[turn_index % len(ACK_POOL)]
+
+def pick_neutral_bridge(turn_index: int) -> str:
+    """Return a short neutral bridge (max 5 words) or empty string."""
+    return NEUTRAL_BRIDGES[turn_index % len(NEUTRAL_BRIDGES)]
+
+
+pick_varied_ack = pick_neutral_bridge
 
 
 class FollowupDecision(BaseModel):
@@ -60,6 +61,118 @@ class SectionTurnDecision:
     model_name: Optional[str] = None
     is_fast_path: bool = False
     is_injection: bool = False
+    coverage_updates: list[dict[str, Any]] = field(default_factory=list)
+    tokens: dict[str, int] = field(default_factory=dict)
+    degraded: bool = False
+    is_fragment: bool = False
+
+
+# Code-request forbidden patterns in spoken interviews
+CODE_REQUEST_PATTERNS = [
+    (r"\bwrite (a |an )?(function|method|class|code|script|snippet|program)\b", "write code/function/program"),
+    (r"\bwrite code\b", "write code"),
+    (r"\bcode aloud\b", "code aloud"),
+    (r"\btype out\b", "type out code"),
+    (r"\bcode up\b", "code up"),
+    (r"\bimplement (a |an )?(function|method|class|script|snippet)\b", "implement function/class"),
+    (r"\bfunction that\b", "function that (code request)"),
+    (r"\bclass that\b", "class that (code request)"),
+    (r"\b(code )?snippet\b", "code snippet"),
+    (r"\b(exact )?syntax\b", "syntax request"),
+    (r"\bwhiteboard\b", "whiteboard coding"),
+    (r"\bprogram (a |an )\b", "program an algorithm"),
+]
+
+
+def validate_free_probe_guard(probe_text: str) -> tuple[bool, str]:
+    """Validate free probe: 1 question, <= 25 words, no code/whiteboard, no praise, no naming target technique."""
+    cleaned = (probe_text or "").strip()
+    if not cleaned:
+        return False, "Empty probe text"
+
+    if cleaned.count("?") != 1:
+        return False, f"Expected exactly 1 question mark, got {cleaned.count('?')}"
+
+    words = cleaned.split()
+    if len(words) > 25:
+        return False, f"Exceeds 25 words ({len(words)} words)"
+
+    lower = cleaned.lower()
+    for pat, desc in CODE_REQUEST_PATTERNS:
+        if re.search(pat, lower):
+            return False, f"Code request prohibited: {desc}"
+
+    praise_terms = [r"\bgreat\b", r"\bgood\b", r"\bexcellent\b", r"\bawesome\b", r"\bfantastic\b", r"\bnice\b", r"\bperfect\b"]
+    for p in praise_terms:
+        if re.search(p, lower):
+            return False, f"Evaluative acknowledgement prohibited: {p}"
+
+    meta_terms = ["star method", "probing for depth", "car framework", "expectation", "rubric"]
+    for m in meta_terms:
+        if m in lower:
+            return False, f"Meta interview term prohibited: '{m}'"
+
+    return True, "Valid"
+
+
+def validate_coverage_quotes_verbatim(
+    coverage_items: list[dict[str, Any]],
+    candidate_answer: str,
+) -> list[dict[str, Any]]:
+    """Validate that every evidence quote in coverage is a verbatim substring of candidate answer."""
+    validated = []
+    lower_cand = (candidate_answer or "").lower()
+    for item in coverage_items:
+        exp_id = item.get("expectation_id", "")
+        status = item.get("status", "not_covered")
+        quote = (item.get("quote") or "").strip().strip("\"'")
+
+        if quote and (quote in candidate_answer or quote.lower() in lower_cand):
+            validated.append({
+                "expectation_id": exp_id,
+                "status": status,
+                "quote": quote,
+            })
+        else:
+            if quote:
+                logger.warning("Dropping ungrounded coverage quote: '%s' not found verbatim in candidate answer", quote)
+            validated.append({
+                "expectation_id": exp_id,
+                "status": status,
+                "quote": "",
+            })
+    return validated
+
+
+def make_degraded_rule_based_decision(
+    candidate_answer: str,
+    available_probes: list[dict[str, Any]],
+    turn_index: int,
+) -> dict[str, Any]:
+    """Fallback when live Gemini calls fail or are rate-limited. Selects stored probe by trigger or advances."""
+    lower = candidate_answer.lower()
+    for p in available_probes:
+        trig = (p.get("trigger_condition") or "").lower()
+        if trig and trig != "n/a":
+            trig_words = [w for w in re.findall(r"\b[a-z]{4,}\b", trig) if w not in {"candidate", "mentions", "discusses", "when"}]
+            if trig_words and any(tw in lower for tw in trig_words):
+                return {
+                    "intent": "trigger_match_degraded",
+                    "action": "PROBE_STORED",
+                    "probe_id": p.get("id"),
+                    "free_probe_text": "",
+                    "coverage": [],
+                    "degraded": True,
+                }
+
+    return {
+        "intent": "advance_degraded",
+        "action": "ENOUGH",
+        "probe_id": None,
+        "free_probe_text": "",
+        "coverage": [],
+        "degraded": True,
+    }
 
 
 @dataclass
@@ -740,21 +853,40 @@ async def stream_section_turn_decision(
                 is_fast_path=True,
             )
 
-    # 2. Section Time Budget Check: Fast-advance if out of time
+    # 2. Fragment Guard (R3.4): Do not decide on fragmentary/empty turns (< 6 words)
+    words = cleaned.split()
+    short_affirmatives = {"yes", "yeah", "ready", "sure", "i am ready", "let's start", "ok", "okay", "start"}
+    clean_lower = lower.strip(".!? ")
+    if len(words) < 6 and clean_lower not in short_affirmatives:
+        reply = "Please go on, I'm listening."
+        if on_sentence:
+            await on_sentence(reply)
+        return SectionTurnDecision(
+            action="hold",
+            control_token="HOLD",
+            spoken_reply=reply,
+            reasoning="Candidate answer is fragmentary (< 6 words); prompting to continue without deciding",
+            llm_ttft_ms=0.0,
+            is_fast_path=True,
+            is_fragment=True,
+        )
+
+    # 3. Section Time Budget Check: Fast-advance if out of time (<= 20s remaining)
     if time_left_secs <= 20.0:
-        ack = pick_varied_ack(turn_index)
-        if ack and on_sentence:
-            await on_sentence(ack)
+        bridge = pick_neutral_bridge(turn_index)
+        reply = bridge if bridge else "Understood."
+        if on_sentence:
+            await on_sentence(reply)
         return SectionTurnDecision(
             action="enough",
             control_token="ENOUGH",
-            spoken_reply=ack,
+            spoken_reply=reply,
             reasoning="Section time budget expired (<= 20s remaining)",
             llm_ttft_ms=0.0,
             is_fast_path=True,
         )
 
-    # 3. Deterministic Simulator / Mock Mode
+    # 4. Deterministic Simulator / Mock Mode
     if os.getenv("GEMINI_MOCK", "").lower() in {"1", "true", "yes"}:
         if available_probes:
             p = available_probes[0]
@@ -770,24 +902,25 @@ async def stream_section_turn_decision(
                 llm_ttft_ms=1.0,
                 is_fast_path=True,
             )
-        ack = pick_varied_ack(turn_index)
-        if ack and on_sentence:
-            await on_sentence(ack)
+        bridge = pick_neutral_bridge(turn_index)
+        reply = bridge if bridge else "Understood."
+        if on_sentence:
+            await on_sentence(reply)
         return SectionTurnDecision(
             action="enough",
             control_token="ENOUGH",
-            spoken_reply=ack,
+            spoken_reply=reply,
             reasoning="Mock advance on section complete",
             llm_ttft_ms=1.0,
             is_fast_path=True,
         )
 
-    # 4. Build Compact Dynamic Prompt
+    # 5. Build Compact Structured Prompt (Single Call: Decision + Coverage)
     exp_lines = [
-        f"- [{e.get('importance', 'core').upper()}]: {e.get('expectation_text')} (status: {e.get('status', 'not_probed')})"
+        f"- ID: {e.get('id')} | Importance: {e.get('importance', 'core').upper()} | Expectation: {e.get('expectation_text')} (Current status: {e.get('status', 'not_probed')})"
         for e in expectations
     ]
-    exp_block = "\n".join(exp_lines) if exp_lines else "- General technical competence: not_probed"
+    exp_block = "\n".join(exp_lines) if exp_lines else "- ID: general | Importance: CORE | Expectation: General technical depth"
 
     probe_lines = [
         f"- ID: {p.get('id')} | Trigger: {p.get('trigger_condition', 'N/A')} | Question: {p.get('question_text')}"
@@ -805,191 +938,185 @@ async def stream_section_turn_decision(
             f"{t.get('speaker', 'speaker').upper()}: {t.get('text', '')[:250]}"
             for t in recent_dialogue[-4:]
         ]
-        recent_turns_block = "Recent Dialogue:\n" + "\n".join(formatted) + "\n"
+        recent_turns_block = "Recent Dialogue:\n" + "\n".join(formatted) + "\n\n"
 
-    dynamic_prompt = (
+    structured_prompt = (
         f"You are an expert technical voice interviewer evaluating candidate responses for: {section_name} ({priority_tier}).\n"
         f"Time remaining in section: {time_left_secs:.0f} seconds.\n\n"
-        f"Section Expectations (SERVER-ONLY, NEVER DISCLOSE TO CANDIDATE):\n{exp_block}\n\n"
-        f"Available Probes with Triggers:\n{probe_block}\n\n"
-        f"Candidate Resume Notes for this Skill:\n{candidate_resume_notes or 'None'}\n\n"
+        f"Section Expectations (SERVER-ONLY, NEVER DISCLOSE):\n{exp_block}\n\n"
+        f"Available Stored Probes with Triggers:\n{probe_block}\n\n"
+        f"Candidate Resume Context for this Skill:\n{candidate_resume_notes or 'None'}\n\n"
         f"{recent_turns_block}"
-        f"Candidate's Latest Spoken Turn:\n"
-        f"<candidate_turn>{candidate_answer}</candidate_turn>\n\n"
-        "Decision Rules:\n"
-        "- REPEAT: Candidate asked you to repeat the question.\n"
-        "- HOLD: Candidate explicitly asked for a moment/time to think.\n"
-        "- CLARIFY: Candidate asked what you meant, gave an ambiguous answer, or drifted off-topic.\n"
-        "- NO_EXPERIENCE: Candidate explicitly has no direct experience with this scenario.\n"
-        "- PROBE:<probe_id>: Candidate mentioned a trigger topic for an available probe (or resume probe) and core expectations still need coverage. Line 2+ MUST be that probe's question text.\n"
-        "- FREE_PROBE: Core expectations need probing, but no pre-written probe trigger matched. Line 2+ is a targeted 1-sentence spoken question.\n"
-        "- ENOUGH: Core expectations are covered, OR out of time (< 30s), OR candidate has covered this skill thoroughly. Line 2+ is a brief 2-4 word acknowledgement (e.g. 'Got it.', 'Makes sense.').\n\n"
-        "STRICT OUTPUT FORMAT:\n"
-        "Line 1: EXACTLY ONE TOKEN: PROBE:<probe_id> | FREE_PROBE | ENOUGH | NO_EXPERIENCE | REPEAT | CLARIFY | HOLD\n"
-        "Line 2+: Spoken text (1-2 short sentences max, plain conversational English, <= 35 words, exactly 1 question mark if asking a question, zero markdown or code syntax)."
+        f"Full Candidate Answer for this Question:\n<candidate_answer>\n{cleaned}\n</candidate_answer>\n\n"
+        "EVALUATION & DECISION RULES:\n"
+        "1. Coverage Assessment:\n"
+        "   For each expectation, assess status: 'demonstrated' (clear technical mastery/depth), 'probed' (basic mention), or 'not_probed'.\n"
+        "   For every 'demonstrated' or 'probed' item, provide a verbatim 'quote' from <candidate_answer>. Quote MUST be exact words.\n"
+        "2. Action Selection:\n"
+        "   - REPEAT: Candidate asked to repeat the question.\n"
+        "   - HOLD: Candidate explicitly asked for time/moment to think.\n"
+        "   - CLARIFY: Candidate asked for clarification of the question.\n"
+        "   - NO_EXPERIENCE: Candidate explicitly said they have no experience or don't know.\n"
+        "   - OFF_TOPIC: Candidate drifted to an unrelated topic.\n"
+        "   - PROBE_STORED: Core expectations need depth AND a stored probe trigger matched. Return probe_id.\n"
+        "   - PROBE_FREE: Core expectations need depth BUT no stored probe trigger matched. Return free_probe_text (1 concise question, <= 25 words, conceptual/trade-offs only, zero code syntax, neutral tone).\n"
+        "   - ENOUGH: Core expectations covered, OR <= 25s left, OR candidate demonstrated thorough competence. Advance section.\n\n"
+        "STRICT JSON OUTPUT (no markdown outside JSON):\n"
+        "{\n"
+        '  "intent": "Brief description of candidate response",\n'
+        '  "action": "PROBE_STORED" | "PROBE_FREE" | "ENOUGH" | "NO_EXPERIENCE" | "REPEAT" | "CLARIFY" | "HOLD" | "OFF_TOPIC",\n'
+        '  "probe_id": "<matching probe id or null>",\n'
+        '  "free_probe_text": "<question text if PROBE_FREE, else null>",\n'
+        '  "coverage": [\n'
+        '    {"expectation_id": "<id>", "status": "demonstrated"|"probed"|"not_probed", "quote": "<exact verbatim quote>"}\n'
+        '  ]\n'
+        "}"
     )
 
     from google.genai import types
 
     t_start = time.perf_counter()
-    ttft_ms: Optional[float] = None
-    control_token: str = "ENOUGH"
+    action = "enough"
+    control_token = "ENOUGH"
     selected_probe_id: Optional[str] = None
-    first_line_parsed = False
-    buffer = ""
-    spoken_sentences: list[str] = []
-    full_spoken_list: list[str] = []
+    free_probe_text: Optional[str] = None
+    coverage_updates: list[dict[str, Any]] = []
+    tokens: dict[str, int] = {}
     provider_used = "gemini"
     model_used = LIVE_MODEL_NAME
+    degraded = False
 
     try:
         client = get_gemini_client()
-
-        def _start_stream():
-            cfg_kwargs: dict[str, Any] = {
-                "max_output_tokens": 90,
-                "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
-            }
-            if "lite" not in LIVE_MODEL_NAME.lower():
-                cfg_kwargs["temperature"] = 0.2
-                try:
-                    cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0, include_thoughts=False)
-                except Exception:
-                    pass
-            return client.models.generate_content_stream(
-                model=LIVE_MODEL_NAME,
-                contents=dynamic_prompt,
-                config=types.GenerateContentConfig(**cfg_kwargs),
-            )
-
-        stream = await asyncio.to_thread(_start_stream)
-
-        def _next_chunk(it):
+        cfg_kwargs: dict[str, Any] = {
+            "temperature": 0.1,
+            "max_output_tokens": 300,
+            "response_mime_type": "application/json",
+            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+        }
+        if "lite" not in LIVE_MODEL_NAME.lower():
             try:
-                return next(it), False
-            except StopIteration:
-                return None, True
+                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0, include_thoughts=False)
+            except Exception:
+                pass
 
-        iterator = iter(stream)
-        while True:
-            chunk, done = await asyncio.to_thread(_next_chunk, iterator)
-            if done:
-                break
-            chunk_text = getattr(chunk, "text", "") or ""
-            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                meta = chunk.usage_metadata
-                in_tok = getattr(meta, "prompt_token_count", None)
-                th_tok = getattr(meta, "thoughts_token_count", None)
-                cand_tok = getattr(meta, "candidates_token_count", None)
-                if in_tok is not None:
-                    logger.info("Live decision token counts: input=%s, thinking=%s, candidates=%s", in_tok, th_tok, cand_tok)
-            if not chunk_text:
-                continue
-            if ttft_ms is None:
-                ttft_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
-            buffer += chunk_text
+        resp = await asyncio.to_thread(
+            client.models.generate_content,
+            model=LIVE_MODEL_NAME,
+            contents=structured_prompt,
+            config=types.GenerateContentConfig(**cfg_kwargs),
+        )
 
-            if not first_line_parsed and "\n" in buffer:
-                first_line, buffer = buffer.split("\n", 1)
-                token_cand = first_line.strip().strip(":*- ")
-                if token_cand.startswith("PROBE:"):
-                    control_token = "PROBE"
-                    selected_probe_id = token_cand.split(":", 1)[1].strip()
-                else:
-                    for valid in ("FREE_PROBE", "ENOUGH", "NO_EXPERIENCE", "REPEAT", "CLARIFY", "HOLD"):
-                        if valid in token_cand.upper():
-                            control_token = valid
-                            break
-                first_line_parsed = True
+        if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+            meta = resp.usage_metadata
+            tokens["prompt"] = getattr(meta, "prompt_token_count", 0) or 0
+            tokens["thinking"] = getattr(meta, "thoughts_token_count", 0) or 0
+            tokens["completion"] = getattr(meta, "candidates_token_count", 0) or 0
+            logger.info("Live decision tokens: input=%s, thinking=%s, candidates=%s", tokens["prompt"], tokens["thinking"], tokens["completion"])
 
-            if first_line_parsed:
-                while re.search(r"[.!?]\s+", buffer):
-                    m = re.search(r"^(.*?[.!?])\s+(.*)$", buffer, flags=re.DOTALL)
-                    if not m:
-                        break
-                    sent, buffer = m.group(1), m.group(2)
-                    cleaned_sent = sanitize_spoken_text(sent)
-                    if cleaned_sent:
-                        spoken_sentences.append(cleaned_sent)
-                        full_spoken_list.append(cleaned_sent)
-                        if on_sentence:
-                            await on_sentence(cleaned_sent)
+        resp_text = resp.text or "{}"
+        decision_data = json.loads(resp_text)
+        action_raw = str(decision_data.get("action", "ENOUGH")).upper()
+        control_token = action_raw
 
-        # Flush any trailing sentence
-        remaining = sanitize_spoken_text(buffer)
-        if remaining:
-            spoken_sentences.append(remaining)
-            full_spoken_list.append(remaining)
-            if on_sentence:
-                await on_sentence(remaining)
+        action_map = {
+            "PROBE_STORED": "probe",
+            "PROBE_FREE": "free_probe",
+            "ENOUGH": "enough",
+            "NO_EXPERIENCE": "no_experience",
+            "REPEAT": "repeat",
+            "CLARIFY": "clarify",
+            "HOLD": "hold",
+            "OFF_TOPIC": "clarify",
+        }
+        action = action_map.get(action_raw, "enough")
+        selected_probe_id = decision_data.get("probe_id")
+        free_probe_text = decision_data.get("free_probe_text")
 
-        if not first_line_parsed and buffer:
-            first_line = buffer.strip()
-            if first_line.startswith("PROBE:"):
-                control_token = "PROBE"
-                selected_probe_id = first_line.split(":", 1)[1].strip()
-            else:
-                for valid in ("FREE_PROBE", "ENOUGH", "NO_EXPERIENCE", "REPEAT", "CLARIFY", "HOLD"):
-                    if valid in first_line.upper():
-                        control_token = valid
-                        break
+        # Validate coverage quotes verbatim against candidate answer
+        raw_coverage = decision_data.get("coverage", [])
+        coverage_updates = validate_coverage_quotes_verbatim(raw_coverage, cleaned)
 
     except Exception as exc:
-        logger.warning("Gemini live stream turn failed: %s; evaluating backup failover", exc)
-        from backend.app.services.llm_router import can_failover_candidate_data, call_backup_chat_sync, BACKUP_MODEL_LIVE, rotate_gemini_key
+        logger.warning("Gemini live decision call failed: %s; using rule-based degraded fallback", exc)
+        from backend.app.services.llm_router import rotate_gemini_key
         if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc) or "503" in str(exc):
-            rotate_gemini_key("Live stream rate-limited or 503")
+            rotate_gemini_key("Live decision rate-limited or 503")
 
-        if can_failover_candidate_data():
-            try:
-                provider_used = "backup"
-                model_used = BACKUP_MODEL_LIVE
-                messages = [{"role": "user", "content": dynamic_prompt}]
-                bk_text, bk_model = call_backup_chat_sync(messages=messages, model=BACKUP_MODEL_LIVE, timeout=4.0)
-                ttft_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
-                lines = bk_text.strip().split("\n")
-                first_line = lines[0].strip().strip(":*- ")
-                if first_line.startswith("PROBE:"):
-                    control_token = "PROBE"
-                    selected_probe_id = first_line.split(":", 1)[1].strip()
-                else:
-                    for valid in ("FREE_PROBE", "ENOUGH", "NO_EXPERIENCE", "REPEAT", "CLARIFY", "HOLD"):
-                        if valid in first_line.upper():
-                            control_token = valid
-                            break
-                spoken = " ".join(lines[1:]).strip() if len(lines) > 1 else ""
-                full_spoken_list = [sanitize_spoken_text(spoken)] if spoken else []
-                if on_sentence and full_spoken_list:
-                    await on_sentence(full_spoken_list[0])
-            except Exception as bk_exc:
-                logger.error("Backup failover also failed: %s", bk_exc)
+        degraded_data = make_degraded_rule_based_decision(cleaned, available_probes, turn_index)
+        action = "probe" if degraded_data["action"] == "PROBE_STORED" else "enough"
+        control_token = degraded_data["action"]
+        selected_probe_id = degraded_data["probe_id"]
+        degraded = True
+        provider_used = "rule_based"
+        model_used = "degraded"
+
+    # 6. Validate Free Probe Guard if action is PROBE_FREE
+    if action == "free_probe":
+        is_valid, reason = validate_free_probe_guard(free_probe_text or "")
+        if not is_valid:
+            logger.warning("Free probe failed guard (%s): '%s'. Falling back to stored probe or advance.", reason, free_probe_text)
+            if available_probes:
+                action = "probe"
+                control_token = "PROBE_STORED"
+                selected_probe_id = available_probes[0].get("id")
+            else:
+                action = "enough"
                 control_token = "ENOUGH"
-        else:
-            control_token = "ENOUGH"
 
-    action_map = {
-        "PROBE": "probe",
-        "FREE_PROBE": "free_probe",
-        "ENOUGH": "enough",
-        "NO_EXPERIENCE": "no_experience",
-        "REPEAT": "repeat",
-        "CLARIFY": "clarify",
-        "HOLD": "hold",
-    }
-    action = action_map.get(control_token, "enough")
-    final_spoken = " ".join(full_spoken_list).strip()
-    if not final_spoken:
-        final_spoken = pick_varied_ack(turn_index) if action == "enough" else ""
+    # 7. Assemble Spoken Text in Code: [optional neutral bridge, max 5 words] + [exactly ONE question]
+    bridge = pick_neutral_bridge(turn_index)
+    spoken_reply = ""
+
+    if action == "probe" and selected_probe_id:
+        target_p = next((p for p in available_probes if p.get("id") == selected_probe_id), None)
+        if not target_p and resume_probe and resume_probe.get("id") == selected_probe_id:
+            target_p = resume_probe
+        if not target_p and available_probes:
+            target_p = available_probes[0]
+
+        if target_p:
+            p_text = target_p.get("question_text", "").strip()
+            spoken_reply = f"{bridge} {p_text}".strip() if bridge else p_text
+
+    elif action == "free_probe" and free_probe_text:
+        spoken_reply = f"{bridge} {free_probe_text.strip()}".strip() if bridge else free_probe_text.strip()
+
+    elif action == "repeat":
+        spoken_reply = ""
+
+    elif action == "hold":
+        spoken_reply = "Of course, take a moment."
+
+    elif action == "clarify":
+        spoken_reply = f"In other words, how would you approach the key trade-offs in {section_name}?"
+
+    elif action == "no_experience":
+        spoken_reply = ""
+
+    elif action == "enough":
+        spoken_reply = bridge if bridge else "Understood."
+
+    if not spoken_reply and action == "enough":
+        spoken_reply = "Understood."
+
+    if on_sentence and spoken_reply:
+        await on_sentence(spoken_reply)
+
+    ttft_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
 
     return SectionTurnDecision(
         action=action,
         control_token=control_token,
         selected_probe_id=selected_probe_id,
-        spoken_reply=final_spoken,
-        reasoning=f"Streamed {control_token} via {provider_used} ({model_used})",
+        spoken_reply=spoken_reply,
+        reasoning=f"Decision {control_token} via {provider_used}/{model_used}" + (" [DEGRADED]" if degraded else ""),
         llm_ttft_ms=ttft_ms,
         provider=provider_used,
         model_name=model_used,
+        coverage_updates=coverage_updates,
+        tokens=tokens,
+        degraded=degraded,
     )
 
 

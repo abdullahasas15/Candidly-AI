@@ -209,19 +209,29 @@ def validate_question_text(
             message=f"{role} uses definition-first phrasing instead of scenario or 'walk me through'",
         ))
 
-    # 5. Prohibit Writing Code Aloud
-    code_aloud_patterns = [
-        r"\bwrite code\b", r"\bcode aloud\b", r"\btype out\b",
-        r"\bwrite a function\b", r"\bwrite the syntax\b", r"\bwrite a script\b"
+    # 5. Prohibit Code-Request Patterns (Voice Interview is Verbal Only)
+    code_request_patterns = [
+        (r"\bwrite (a |an )?(function|method|class|code|script|snippet|program)\b", "write code/function/program"),
+        (r"\bwrite code\b", "write code"),
+        (r"\bcode aloud\b", "code aloud"),
+        (r"\btype out\b", "type out code"),
+        (r"\bcode up\b", "code up"),
+        (r"\bimplement (a |an )?(function|method|class|script|snippet)\b", "implement function/class"),
+        (r"\bfunction that\b", "function that (code request)"),
+        (r"\bclass that\b", "class that (code request)"),
+        (r"\b(code )?snippet\b", "code snippet"),
+        (r"\b(exact )?syntax\b", "syntax request"),
+        (r"\bwhiteboard\b", "whiteboard coding"),
+        (r"\bprogram (a |an )\b", "program an algorithm"),
     ]
-    for cap in code_aloud_patterns:
-        if re.search(cap, lower_text):
+    for cap_pat, cap_desc in code_request_patterns:
+        if re.search(cap_pat, lower_text):
             issues.append(ValidationIssue(
                 severity="error",
                 section_index=section_index,
                 skill_name=skill_name,
-                field=f"{role}.code_aloud",
-                message=f"{role} asks candidate to write or recite code aloud (prohibited in voice interviews)",
+                field=f"{role}.code_request",
+                message=f"{role} contains code-request pattern '{cap_desc}' (voice interviews are verbal only: conceptual approach, ideas, trade-offs, and complexity)",
             ))
 
     # 6. Expectation Leakage Check
@@ -734,7 +744,7 @@ def run_batched_blueprint_llm_review_sync(
         f"Role: {job_title}\n"
         f"Target Seniority: {seniority_level}\n\n"
         "You are an expert technical interviewer evaluating an interview blueprint for voice delivery.\n"
-        "Critically evaluate each section against these 5 checks:\n"
+        "Critically evaluate each section against these 6 checks:\n"
         "1. RELEVANCE TO SKILL (CRITICAL ERROR): Does every expectation, question, and probe strictly belong to the declared skill? "
         "If an item evaluates a completely unrelated engineering domain (for example, relational database indexing, SQL sharding, or B-trees placed under 'Kubernetes Operations' or 'AI Engineering'), "
         "you MUST flag it as an ERROR with issue_type='relevance'.\n"
@@ -745,7 +755,8 @@ def run_batched_blueprint_llm_review_sync(
         "FORBIDDEN FOR ENTRY: CPU cache lines, memory layout / alignment, lock-free concurrency, distributed consensus (Raft/Paxos), multi-region active-active replication, organization-wide architecture governance. If any question or escalation asks about these, flag as an ERROR with issue_type='seniority_fit'.\n"
         "   - SENIOR / LEAD (L5+): Target topics are system trade-offs, scalability, fault tolerance, observability, and failure domains. "
         "FORBIDDEN FOR SENIOR: Trivial element lookup from a list or dictionary, basic loop/variable syntax definitions. If any question asks trivial definitions, flag as an ERROR with issue_type='seniority_fit'.\n"
-        "5. VOICE SUITABILITY: Natural verbal flow, concise (under ~35-45 words), ends with a single question mark.\n\n"
+        "5. VOICE SUITABILITY: Natural verbal flow, concise (under ~35-45 words), ends with a single question mark.\n"
+        "6. VERBAL-ONLY QUESTION FRAMING (CRITICAL ERROR): Spoken voice interview only. Prohibit all code-request patterns: 'write', 'implement', 'code up', 'function that', 'class that', 'snippet', 'syntax', 'whiteboard', 'program'. Candidates must be asked for approach, conceptual ideas, trade-offs, and complexity explained aloud, NEVER writing or reciting syntax. Flag any violation with issue_type='code_request'.\n\n"
         f"Sections to review:\n{json.dumps(skill_sections_summary, indent=2)}\n\n"
         "Return your evaluation as valid JSON matching this schema:\n"
         "{\n"

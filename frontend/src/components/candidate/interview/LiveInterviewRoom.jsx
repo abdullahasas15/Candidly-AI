@@ -364,6 +364,9 @@ export default function LiveInterviewRoom({
   // Real-time Subtitles for AI Interviewer and Candidate
   const [aiSubtitle, setAiSubtitle] = useState('');
   const [candidateSubtitle, setCandidateSubtitle] = useState('');
+  const [candidateIsInterim, setCandidateIsInterim] = useState(false);
+  const [showQuestionCard, setShowQuestionCard] = useState(true);
+  const [showHeadphoneNotice, setShowHeadphoneNotice] = useState(true);
   const audioCtxRef = useRef(null);
 
   // Timer
@@ -691,9 +694,12 @@ export default function LiveInterviewRoom({
             setAiSubtitle(msg.text);
             if (msg.question_text) {
               setCurrentQuestionText(msg.question_text);
+            } else if (msg.text.includes('?') || msg.phase === 'deep_dive') {
+              setCurrentQuestionText(msg.text);
             }
           } else if (msg.type === 'candidate-speech-transcript' && msg.text) {
             setCandidateSubtitle(msg.text);
+            setCandidateIsInterim(Boolean(msg.is_interim));
           }
         });
 
@@ -1121,6 +1127,23 @@ export default function LiveInterviewRoom({
         </div>
       </header>
 
+      {/* Headphone Recommended Notice */}
+      {showHeadphoneNotice && (
+        <div className="bg-indigo-950/70 border-b border-indigo-800/40 px-4 py-1.5 text-xs text-indigo-200 flex items-center justify-between z-30">
+          <div className="flex items-center gap-2 mx-auto">
+            <span>🎧</span>
+            <span><strong>Headphone Recommended:</strong> Please wear headphones to prevent acoustic echo and ensure high speech accuracy.</span>
+          </div>
+          <button
+            onClick={() => setShowHeadphoneNotice(false)}
+            className="text-indigo-400 hover:text-indigo-200 text-xs px-2 cursor-pointer"
+            title="Dismiss notice"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Hardware Disconnect Warning Banner (Part C3) */}
       {deviceWarning && (
         <div className="bg-amber-500/95 text-slate-950 px-4 py-2 text-xs font-bold flex items-center justify-center gap-3 z-40">
@@ -1190,18 +1213,27 @@ export default function LiveInterviewRoom({
             )}
           </div>
 
-          {/* Candidate Live Subtitle Transcript Banner (toggled by captionsEnabled — Part G1) */}
+          {/* Candidate Live Subtitle Transcript Banner (Dual-Lane STT: Lane 1 Interim + Lane 2 Accuracy) */}
           {captionsEnabled && (
             <div className="absolute bottom-20 left-4 right-4 z-10 rounded-2xl bg-slate-950/90 p-3.5 backdrop-blur-md border border-emerald-500/30 shadow-xl transition-all">
               <div className="flex items-center justify-between text-[11px] font-semibold text-slate-400 mb-1">
                 <span className="flex items-center gap-1.5 text-emerald-400 font-mono tracking-wide">
-                  <span className={`h-2 w-2 rounded-full bg-emerald-400 ${candidateState === 'speaking' ? 'animate-ping' : ''}`} />
-                  CANDIDATE LIVE SPEECH
+                  <span className={`h-2 w-2 rounded-full bg-emerald-400 ${candidateState === 'speaking' || candidateIsInterim ? 'animate-ping' : ''}`} />
+                  {candidateIsInterim ? 'CANDIDATE LIVE SPEECH (STREAMING)' : 'CANDIDATE SPEECH (ACCURACY)'}
                 </span>
                 <span className="text-[10px] text-slate-500 font-mono">PARAKEET TDT STT</span>
               </div>
-              <p className="text-xs sm:text-sm font-medium text-slate-100 line-clamp-3">
-                {candidateSubtitle || (candidateState === 'speaking' ? 'Listening and transcribing response...' : 'Microphone active — speak anytime to respond...')}
+              <p className={`text-xs sm:text-sm font-medium line-clamp-3 transition-colors ${candidateIsInterim ? 'text-slate-300 italic' : 'text-slate-100 not-italic'}`}>
+                {candidateSubtitle ? (
+                  <>
+                    <span>{candidateSubtitle}</span>
+                    {candidateIsInterim && (
+                      <span className="inline-block w-1.5 h-1.5 ml-1.5 rounded-full bg-emerald-400 animate-pulse align-middle" />
+                    )}
+                  </>
+                ) : (
+                  candidateState === 'speaking' ? 'Listening and transcribing response...' : 'Microphone active — speak anytime to respond...'
+                )}
               </p>
             </div>
           )}
@@ -1326,7 +1358,7 @@ export default function LiveInterviewRoom({
               : 'border-slate-800'
           }`}
         >
-          {/* Top Overlay Badge */}
+          {/* Top Overlay Badge & Prominent Bot State Indicator Pill */}
           <div className="absolute top-4 left-4 z-10 flex items-center gap-2">
             <div className="flex items-center gap-2 rounded-full bg-slate-950/70 px-3 py-1 text-xs font-semibold backdrop-blur-md border border-slate-700/50">
               <Bot className="h-3.5 w-3.5 text-indigo-400" />
@@ -1334,32 +1366,92 @@ export default function LiveInterviewRoom({
             </div>
 
             {aiState === 'speaking' && (
-              <span className="flex items-center gap-1.5 rounded-full bg-indigo-500/20 px-2.5 py-1 text-[11px] font-bold text-indigo-400 backdrop-blur-md border border-indigo-500/40 animate-pulse">
-                <span className="h-2 w-2 rounded-full bg-indigo-400" /> Speaking
+              <span className="flex items-center gap-1.5 rounded-full bg-violet-500/20 px-3 py-1 text-xs font-bold text-violet-300 backdrop-blur-md border border-violet-500/40 shadow-sm animate-pulse">
+                <Volume2 className="h-3.5 w-3.5 text-violet-400" />
+                <span>Speaking...</span>
               </span>
             )}
             {aiState === 'thinking' && (
-              <span className="flex items-center gap-1.5 rounded-full bg-amber-500/20 px-2.5 py-1 text-[11px] font-bold text-amber-400 backdrop-blur-md border border-amber-500/40">
-                <Loader2 className="h-3 w-3 animate-spin" /> Thinking...
+              <span className="flex items-center gap-1.5 rounded-full bg-amber-500/20 px-3 py-1 text-xs font-bold text-amber-300 backdrop-blur-md border border-amber-500/40 shadow-sm">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400" />
+                <span>Processing response...</span>
               </span>
             )}
             {aiState === 'listening' && (
-              <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/20 px-2.5 py-1 text-[11px] font-semibold text-emerald-400 backdrop-blur-md border border-emerald-500/30">
-                Listening to you
+              <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold text-emerald-300 backdrop-blur-md border border-emerald-500/40 shadow-sm">
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                </span>
+                <span>Listening to you...</span>
+              </span>
+            )}
+            {aiState === 'interrupted' && (
+              <span className="flex items-center gap-1.5 rounded-full bg-rose-500/20 px-3 py-1 text-xs font-semibold text-rose-300 backdrop-blur-md border border-rose-500/40 shadow-sm">
+                <span>Listening (interrupted)</span>
               </span>
             )}
             {aiState === 'idle' && (
-              <span className="rounded-full bg-slate-800 px-2.5 py-1 text-[11px] font-medium text-slate-400">
+              <span className="rounded-full bg-slate-800/80 px-3 py-1 text-xs font-medium text-slate-400 border border-slate-700/40">
                 Ready
               </span>
             )}
           </div>
 
+          {/* Dedicated Question Card (Pinned & Toggleable) */}
+          {showQuestionCard && (currentQuestionText || aiSubtitle) && (
+            <div className="absolute top-16 left-4 right-4 z-20 rounded-2xl bg-slate-950/95 border border-indigo-500/40 p-4 shadow-2xl backdrop-blur-md transition-all">
+              <div className="flex items-center justify-between gap-3 mb-2 border-b border-slate-800/80 pb-2">
+                <div className="flex items-center gap-2">
+                  <span className="flex h-2 w-2 rounded-full bg-indigo-400 animate-pulse" />
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-400 font-mono">
+                    Current Question
+                  </span>
+                  {skillName && (
+                    <span className="rounded-md bg-indigo-950/80 px-2 py-0.5 text-[10px] font-bold text-indigo-300 border border-indigo-700/50">
+                      {skillName}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleRepeatQuestion}
+                    disabled={!interviewBegun || repeatingQuestion}
+                    className="flex items-center gap-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 px-2.5 py-1 text-xs font-semibold transition-all disabled:opacity-40 cursor-pointer"
+                    title="Ask AI to repeat the question"
+                  >
+                    <RotateCcw className={`h-3 w-3 ${repeatingQuestion ? 'animate-spin' : ''}`} />
+                    <span>{repeatingQuestion ? 'Repeating...' : 'Repeat'}</span>
+                  </button>
+                  <button
+                    onClick={() => setShowQuestionCard(false)}
+                    className="text-slate-400 hover:text-slate-200 p-1 rounded-md text-xs cursor-pointer"
+                    title="Minimize question card"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs sm:text-sm font-semibold text-slate-100 leading-relaxed max-h-24 overflow-y-auto">
+                {currentQuestionText || aiSubtitle}
+              </p>
+            </div>
+          )}
+          {!showQuestionCard && (currentQuestionText || aiSubtitle) && (
+            <button
+              onClick={() => setShowQuestionCard(true)}
+              className="absolute top-4 right-4 z-20 flex items-center gap-1.5 rounded-full bg-slate-900/90 border border-indigo-500/40 px-3 py-1.5 text-xs font-semibold text-indigo-300 shadow-lg backdrop-blur-md hover:bg-slate-800 transition-all cursor-pointer"
+            >
+              <MessageSquare className="h-3.5 w-3.5 text-indigo-400" />
+              <span>Show Question</span>
+            </button>
+          )}
+
           {/* Talking Head Avatar Container */}
           <CyberBotAvatar aiState={aiState} />
 
           {/* AI Interviewer Live Speech & Question Subtitle Card */}
-          {captionsEnabled && (
+          {captionsEnabled && !showQuestionCard && (
             <div className="absolute bottom-4 left-4 right-4 z-10 rounded-2xl bg-slate-950/90 p-4 backdrop-blur-md border border-indigo-500/40 shadow-2xl transition-all">
               <div className="flex items-center justify-between text-[11px] font-semibold text-slate-400 mb-1.5">
                 <span className="flex items-center gap-1.5 text-indigo-400 font-mono tracking-wide">
@@ -1413,6 +1505,12 @@ export default function LiveInterviewRoom({
                     Establishing Real-Time Audio Pipeline...
                   </span>
                 )}
+              </div>
+
+              {/* Headphone Recommendation */}
+              <div className="mt-4 flex items-center justify-center gap-2 rounded-xl bg-slate-950/80 px-3.5 py-2.5 border border-slate-800 text-[11px] text-slate-300">
+                <span className="text-base">🎧</span>
+                <span><strong>Headphone Recommended:</strong> Please wear headphones to prevent acoustic echo and ensure high audio accuracy.</span>
               </div>
 
               {/* Action Buttons */}

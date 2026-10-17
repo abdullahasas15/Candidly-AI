@@ -57,7 +57,9 @@ from backend.app.services.interview.followup_policy import (
     stream_section_turn_decision,
     update_coverage_status,
     update_section_expectation_coverage_async,
+    validate_coverage_quotes_verbatim,
 )
+from backend.app.services.interview.trace import SessionTrace
 from backend.app.services.interview.state_machine import (
     InterviewPhase,
     PacingController,
@@ -181,8 +183,15 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         self._active_ai_full_text: str = ""
         self._active_ai_started_monotonic: Optional[float] = None
 
-        # Turn merge & silence timer state
+        # Trace logger
+        self.session_trace = SessionTrace(self.session_id)
+
+        # Turn merge, accumulation & silence timer state
         self._merge_buffer: str = ""
+        self._accumulated_speech_segments: List[str] = []
+        self._accumulated_full_text: str = ""
+        self._active_turn_id: int = 0
+        self._commit_timer_task: Optional[asyncio.Task] = None
         self._active_turn_task: Optional[asyncio.Task] = None
         self._silence_task: Optional[asyncio.Task] = None
         self._last_activity_monotonic: float = time.monotonic()
@@ -190,10 +199,109 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         self._hold_extension_secs: float = 0.0
         self._audio_segments_received_fn = lambda: 1
 
-    def record_stt_metrics(self, text: str, stt_ms: float, confidence: Optional[float] = None) -> None:
+    def record_stt_interim(self, interim_text: str) -> None:
+        """Lane 1 interim caption: update UI live as words are spoken."""
+        clean = (interim_text or "").strip()
+        if not clean:
+            return
+        self._last_activity_monotonic = time.monotonic()
+        live_text = f"{self._accumulated_full_text} {clean}".strip() if self._accumulated_full_text else clean
+        asyncio.create_task(
+            self.emit_ui_state("candidate-speech-transcript", {"text": live_text, "is_interim": True})
+        )
+
+    def record_stt_metrics(self, text: str, stt_ms: float, confidence: Optional[float] = None, seq: int = 0) -> None:
+        """Lane 2 accuracy segment: append to accumulated speech and update UI."""
+        clean = (text or "").strip()
+        if not clean:
+            return
         self._last_stt_final_ms = stt_ms
         self._last_stt_confidence = confidence
         self._last_activity_monotonic = time.monotonic()
+        self._accumulated_speech_segments.append(clean)
+        self._accumulated_full_text = " ".join(self._accumulated_speech_segments).strip()
+        asyncio.create_task(
+            self.emit_ui_state(
+                "candidate-speech-transcript",
+                {"text": self._accumulated_full_text, "is_interim": False, "seq": seq},
+            )
+        )
+        # Schedule turn commit
+        self._schedule_turn_commit()
+
+    def _schedule_turn_commit(self) -> None:
+        """Schedule turn commit with merge window (1.5s) and trailing-thought detection (up to 2.5s)."""
+        if self._commit_timer_task and not self._commit_timer_task.done():
+            self._commit_timer_task.cancel()
+
+        text = self._accumulated_full_text.strip()
+        if not text:
+            return
+
+        trailing_thought = bool(
+            re.search(r"(?i)\b(because|and|or|so|like|which|but|if|when|also)\s*$", text)
+            or text.endswith(",")
+        )
+        # Wait up to 2.5s if trailing thought, else 1.2s silence
+        timeout = 2.5 if trailing_thought else 1.2
+        self._commit_timer_task = asyncio.create_task(self._commit_turn_after_delay(timeout))
+
+    async def _commit_turn_after_delay(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            await self._commit_full_turn()
+        except asyncio.CancelledError:
+            pass
+
+    async def _commit_full_turn(self) -> None:
+        """Commits accumulated speech segments into a single full candidate turn."""
+        candidate_text = self._accumulated_full_text.strip()
+        self._accumulated_speech_segments = []
+        self._accumulated_full_text = ""
+        if not candidate_text:
+            return
+
+        self._active_turn_id += 1
+        curr_turn_id = self._active_turn_id
+        words = candidate_text.split()
+
+        # Fragment Guard: answers < 6 words and not affirmative
+        is_affirmative = bool(
+            re.match(r"^(yes|yep|yeah|sure|ready|sounds good|i am|ok|okay|let's go|let's do it)[.!]?$", candidate_text.lower().strip())
+        ) or (self.current_phase in (InterviewPhase.GREETING, InterviewPhase.READY_CHECK))
+
+        if len(words) < 6 and not is_affirmative and self.current_phase == InterviewPhase.DEEP_DIVE:
+            logger.info(f"Fragment Guard triggered on short answer ({len(words)} words): '{candidate_text}'")
+            hold_reply = "Please go on, I'm listening."
+            self.last_ai_speech = hold_reply
+            self.session_trace.log_commit(
+                turn_id=str(curr_turn_id),
+                reason="fragment_guard_hold",
+                full_answer=candidate_text,
+                word_count=len(words),
+                speech_duration_s=self._candidate_speech_duration,
+            )
+            await self.persist_turn(
+                turn_type=TurnType.CLARIFICATION.value,
+                speaker="ai",
+                text=hold_reply,
+            )
+            await self.emit_ui_state("ai-speech-transcript", {"text": hold_reply, "phase": self.current_phase.value})
+            await self.emit_ui_state("interview-bot-state", {"state": "listening"})
+            await self.push_frame(TTSSpeakFrame(hold_reply))
+            return
+
+        self.session_trace.log_commit(
+            turn_id=str(curr_turn_id),
+            reason="silence_timeout",
+            full_answer=candidate_text,
+            word_count=len(words),
+            speech_duration_s=self._candidate_speech_duration,
+        )
+
+        if self._active_turn_task and not self._active_turn_task.done():
+            self._active_turn_task.cancel()
+        self._active_turn_task = asyncio.create_task(self.handle_candidate_answer(candidate_text, curr_turn_id))
 
     def record_tts_first_audio(self, tts_ms: float) -> None:
         if not self._awaiting_first_bot_audio or not self._active_candidate_turn_id:
@@ -786,7 +894,62 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             counts[tier] = counts.get(tier, 0) + 1
         return counts
 
-    async def _handle_blueprint_candidate_answer(self, cleaned: str, cand_turn: InterviewTranscriptTurn):
+    async def _persist_decision_coverage(
+        self,
+        session_id: str,
+        section_id: str,
+        coverage_updates: list[dict[str, Any]],
+        turn_id: str,
+    ) -> None:
+        """Persist structured decision coverage updates directly to session_expectation_coverage table."""
+        if not coverage_updates:
+            return
+        try:
+            from backend.app.models import SessionExpectationCoverage
+            async with AsyncSessionLocal() as db:
+                for item in coverage_updates:
+                    exp_id = item.get("expectation_id")
+                    if not exp_id:
+                        continue
+                    status = item.get("status", "not_probed")
+                    quote = item.get("quote")
+
+                    stmt = select(SessionExpectationCoverage).where(
+                        SessionExpectationCoverage.session_id == session_id,
+                        SessionExpectationCoverage.expectation_id == exp_id,
+                    )
+                    res = await db.execute(stmt)
+                    cov = res.scalars().first()
+                    if not cov:
+                        cov = SessionExpectationCoverage(
+                            session_id=session_id,
+                            expectation_id=exp_id,
+                            status=status,
+                            evidence_turn_ids=[turn_id] if turn_id else [],
+                            evidence_quote=quote,
+                        )
+                        db.add(cov)
+                    else:
+                        if status in ("covered", "demonstrated"):
+                            cov.status = status
+                        elif status in ("partial", "probed") and cov.status not in ("covered", "demonstrated"):
+                            cov.status = status
+                        if quote:
+                            cov.evidence_quote = quote
+                        ev_ids = list(cov.evidence_turn_ids or [])
+                        if turn_id and turn_id not in ev_ids:
+                            ev_ids.append(turn_id)
+                            cov.evidence_turn_ids = ev_ids
+                await db.commit()
+        except Exception as exc:
+            logger.debug(f"Failed to persist decision coverage: {exc}")
+
+    async def _handle_blueprint_candidate_answer(
+        self,
+        cleaned: str,
+        cand_turn: InterviewTranscriptTurn,
+        curr_turn_id: Optional[int] = None,
+    ):
         """Execute the sectioned live delivery state machine (Checkpoint R3.4)."""
         if self.current_phase in (InterviewPhase.CLOSING, InterviewPhase.COMPLETED):
             return
@@ -923,16 +1086,6 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             alloc_mins = float(sec.get("allocated_minutes", 4.0) or 4.0)
             time_left_secs = max(0.0, (alloc_mins * 60.0) - elapsed)
 
-            # Fire-and-forget asynchronous expectation coverage update (R3.5)
-            asyncio.create_task(
-                update_section_expectation_coverage_async(
-                    self.session_id,
-                    sec["section_id"],
-                    cleaned,
-                    cand_turn.id,
-                )
-            )
-
             streamed_sentences: list[str] = []
             async def _on_sentence_chunk(sentence: str):
                 streamed_sentences.append(sentence)
@@ -959,7 +1112,55 @@ class InterviewCoordinatorProcessor(FrameProcessor):
                 turn_index=self.current_turn_sequence,
                 on_sentence=_on_sentence_chunk,
             )
+
+            # Check for stale turn commit (if candidate spoke again while decision was running)
+            if curr_turn_id is not None and curr_turn_id != self._active_turn_id:
+                logger.info("Dropping stale decision result: turn %s != active %s", curr_turn_id, self._active_turn_id)
+                return
+
             self._pending_llm_ttft_ms = decision.llm_ttft_ms
+
+            # Persist coverage updates directly from single structured decision
+            if decision.coverage_updates:
+                asyncio.create_task(
+                    self._persist_decision_coverage(
+                        self.session_id,
+                        sec["section_id"],
+                        decision.coverage_updates,
+                        cand_turn.id,
+                    )
+                )
+            else:
+                asyncio.create_task(
+                    update_section_expectation_coverage_async(
+                        self.session_id,
+                        sec["section_id"],
+                        cleaned,
+                        cand_turn.id,
+                    )
+                )
+
+            # Log decision in session trace
+            if self.session_trace:
+                toks = decision.tokens or {}
+                self.session_trace.log_decision(
+                    turn_id=str(curr_turn_id or self._active_turn_id),
+                    action=decision.action,
+                    decision_json={
+                        "control_token": decision.control_token,
+                        "selected_probe_id": decision.selected_probe_id,
+                        "reasoning": decision.reasoning,
+                        "spoken_reply": decision.spoken_reply,
+                        "coverage_count": len(decision.coverage_updates),
+                    },
+                    provider=decision.provider or "gemini",
+                    model=decision.model_name or "gemini-2.5-flash",
+                    latency_ms=decision.llm_ttft_ms or 0.0,
+                    prompt_tokens=toks.get("prompt", 0),
+                    thinking_tokens=toks.get("thinking", 0),
+                    completion_tokens=toks.get("completion", 0),
+                    degraded=decision.degraded,
+                )
 
             if decision.is_injection:
                 await self.log_integrity_event(
@@ -1214,10 +1415,14 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             # Completed all skill sections -> move to Phase 5 Candidate Questions!
             await self.move_to_candidate_questions(ack_prefix=prefix_ack)
 
-    async def handle_candidate_answer(self, candidate_text: str):
+    async def handle_candidate_answer(self, candidate_text: str, turn_id: Optional[int] = None):
         """Processes candidate STT transcription and advances conversation flow with streaming decisions."""
         cleaned = (candidate_text or "").strip()
         if not cleaned:
+            return
+
+        if turn_id is not None and turn_id != self._active_turn_id:
+            logger.info("Dropping stale candidate answer commit: turn %s != active %s", turn_id, self._active_turn_id)
             return
 
         # Combine with any merged partial turn if candidate paused & resumed before bot audio started
@@ -1263,7 +1468,7 @@ class InterviewCoordinatorProcessor(FrameProcessor):
 
             # Section state machine branch for Blueprint Sessions (Checkpoint R3.4)
             if self.is_blueprint_session:
-                await self._handle_blueprint_candidate_answer(cleaned, cand_turn)
+                await self._handle_blueprint_candidate_answer(cleaned, cand_turn, curr_turn_id=turn_id)
                 return
 
             # Phase: READY_CHECK -> SELF_INTRO (or directly DEEP_DIVE if candidate already gave long intro)
@@ -1669,6 +1874,10 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         if isinstance(frame, UserStartedSpeakingFrame):
             self._last_activity_monotonic = time.monotonic()
             self._candidate_speech_started_monotonic = time.monotonic()
+            # If a turn commit was pending within merge window, cancel it so speech continues smoothly
+            if self._commit_timer_task and not self._commit_timer_task.done():
+                self._commit_timer_task.cancel()
+                logger.info("Resumed speaking within merge window; cancelled pending turn commit.")
             # Turn merge (Part A6): if candidate resumes speaking before bot audio starts, merge turns
             if (self.is_thinking or self._awaiting_first_bot_audio) and self._active_turn_task and not self._active_turn_task.done():
                 self._active_turn_task.cancel()
@@ -1681,6 +1890,8 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             if self._candidate_speech_started_monotonic is not None:
                 self._candidate_speech_duration = time.monotonic() - self._candidate_speech_started_monotonic
                 self._candidate_speech_started_monotonic = None
+            if self._accumulated_full_text:
+                self._schedule_turn_commit()
 
         elif isinstance(frame, TranscriptionFrame):
             if frame.user_id == "candidate" and frame.text:
@@ -1714,9 +1925,12 @@ class InterviewCoordinatorProcessor(FrameProcessor):
                     await self.push_frame(InterruptionFrame(), direction)
                     await self.emit_ui_state("interview-bot-state", {"state": "interrupted"})
 
-                if self._active_turn_task and not self._active_turn_task.done():
-                    self._active_turn_task.cancel()
-                self._active_turn_task = asyncio.create_task(self.handle_candidate_answer(speech_text))
+                # If segment accumulation or commit timer is active, let _commit_full_turn handle the full turn!
+                # Only directly dispatch if no accumulation callback was hooked (fallback for raw tests)
+                if not self._accumulated_speech_segments and not (self._commit_timer_task and not self._commit_timer_task.done()):
+                    if self._active_turn_task and not self._active_turn_task.done():
+                        self._active_turn_task.cancel()
+                    self._active_turn_task = asyncio.create_task(self.handle_candidate_answer(speech_text))
 
         elif isinstance(frame, (BotStartedSpeakingFrame, TTSStartedFrame)):
             self.is_speaking = True
@@ -1839,12 +2053,16 @@ class LiveInterviewRunner:
         comps = build_voice_pipeline_components(
             connection,
             speech_speed=self.speech_speed,
+            on_stt_interim=self.coordinator.record_stt_interim,
             on_stt_final=self.coordinator.record_stt_metrics,
             on_tts_first_audio=self.coordinator.record_tts_first_audio,
+            session_trace=self.coordinator.session_trace,
         )
         self.tts_service = comps["tts"]
         self.stt_service = comps["stt"]
         self.coordinator._audio_segments_received_fn = lambda: getattr(self.stt_service, "audio_segments_received", 1)
+        comps["lag_monitor"].start()
+        self.lag_monitor = comps["lag_monitor"]
 
         # Pre-warm greeting audio in background during connection handshake
         asyncio.create_task(self.prewarm_greeting())
@@ -1903,6 +2121,11 @@ class LiveInterviewRunner:
 
     async def cleanup(self):
         try:
+            if hasattr(self, "lag_monitor") and self.lag_monitor:
+                try:
+                    self.lag_monitor.stop()
+                except Exception:
+                    pass
             if self.coordinator and self.coordinator._silence_task and not self.coordinator._silence_task.done():
                 self.coordinator._silence_task.cancel()
             if self.runner:
