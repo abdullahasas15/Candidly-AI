@@ -2,6 +2,7 @@ import asyncio
 import os
 import base64
 import hmac
+import re
 import time
 from dotenv import load_dotenv
 from datetime import datetime
@@ -1651,6 +1652,7 @@ async def webrtc_session_offer(
             "question_state": q.question_state or "not_started",
             "coverage_status": q.coverage_status or {},
             "evidence_turn_ids": q.evidence_turn_ids or [],
+            "kind": q.kind,  # R3.5 simple mode: welcome / intro_hook / anchor / escalation / candidate_qa / closing
         }
         for q in active_questions
     ]
@@ -1673,10 +1675,15 @@ async def webrtc_session_offer(
     candidate_hour = payload.get("candidate_local_hour")
     if candidate_hour is None and isinstance(payload.get("requestData"), dict):
         candidate_hour = payload["requestData"].get("candidate_local_hour")
+    # R3.5: interview mode — the client may request "simple" or "adaptive"; env default wins otherwise.
+    interview_mode = os.getenv("INTERVIEW_MODE", "simple")
+    requested_mode = payload.get("mode") or (payload.get("requestData") or {}).get("mode")
+    if requested_mode in ("simple", "adaptive"):
+        interview_mode = requested_mode
 
     logger.info(
         f"=== [WebRTC Session Offer] Candidate '{candidate_name}' establishing WebRTC room "
-        f"for session {session_id} (hour={candidate_hour}) ==="
+        f"for session {session_id} (hour={candidate_hour}, mode={interview_mode}) ==="
     )
 
     try:
@@ -1698,7 +1705,9 @@ async def webrtc_session_offer(
             integrity_policy_tier=integrity_policy_tier,
             speech_speed=float(session.speech_speed or 1.0),
             captions_enabled=bool(session.captions_enabled if session.captions_enabled is not None else True),
+            mode=interview_mode,
         )
+        answer.setdefault("mode", interview_mode) if isinstance(answer, dict) else None
         return answer
     except InterviewerBusyError as busy_err:
         raise HTTPException(status_code=429, detail=str(busy_err))
@@ -1787,6 +1796,128 @@ async def repeat_interview_question(
         idx = min(session.current_question_index or 0, max(0, len(active_qs) - 1))
         fallback_text = active_qs[idx].question_text if active_qs else "Please tell me about your background."
         return {"status": "repeated", "text": fallback_text}
+
+
+@app.post("/api/interview-sessions/{session_id}/commit-turn")
+async def commit_interview_turn(
+    session_id: str,
+    payload: dict = Body(default={}),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """R3.5 simple mode: the candidate pressed "I'm done answering".
+
+    Commits the accumulated live words as the answer and moves the scripted
+    interviewer to the bridge + next question. Latency budget: <= 1 s.
+    """
+    stmt = (
+        select(InterviewSession)
+        .where(InterviewSession.id == session_id)
+        .options(selectinload(InterviewSession.application))
+    )
+    session = (await db.execute(stmt)).scalars().first()
+    if not session or not session.application:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    owns_session = (
+        (session.application.candidate_id == current_user.id)
+        or (session.application.email and session.application.email.lower() == current_user.email.lower())
+        or current_user.role in ("recruiter", "admin")
+    )
+    if not owns_session:
+        raise HTTPException(status_code=403, detail="Not authorized for this session")
+
+    reason = (payload or {}).get("reason", "button")
+    try:
+        result = await interview_manager.commit_turn(session_id, reason=reason)
+    except KeyError as exc:
+        logger.warning(f"Commit turn notice for {session_id}: {exc}")
+        raise HTTPException(status_code=409, detail="Live session is not connected yet.")
+    return result
+
+
+@app.get("/api/stt/status")
+async def stt_status():
+    """STT provider readiness for the pre-flight gate (Part 4).
+
+    Blocks "Enter interview" until the resolved provider reports ready — the
+    candidate must never start an interview that cannot transcribe them.
+    """
+    from backend.app.services.interview.stt_provider import resolve_stt_provider, helper_is_built
+
+    provider, probe = resolve_stt_provider()
+    info: Dict[str, Any] = {
+        "provider": provider,
+        "locale": os.getenv("STT_LOCALE", "en-US"),
+        "requested": os.getenv("STT_PROVIDER", "auto"),
+        "ready": False,
+        "detail": probe.as_dict().get("detail", "") if hasattr(probe, "as_dict") else str(probe),
+        "helper_built": helper_is_built(),
+        "mode": os.getenv("INTERVIEW_MODE", "simple"),
+    }
+    if provider in ("apple_speechanalyzer", "apple_sfspeech"):
+        ready = False
+        try:
+            from backend.app.services.interview.stt_provider import AppleSpeechProcess
+
+            proc = AppleSpeechProcess(provider=provider, locale=info["locale"])
+            ready = await proc.start()
+            await proc.stop()
+        except Exception as exc:
+            logger.debug(f"[STT] status probe notice: {exc}")
+        info["ready"] = ready
+        if ready:
+            info["detail"] = f"{provider} ready"
+    else:
+        info["ready"] = bool(provider)
+    return info
+
+
+@app.post("/api/stt/preflight-check")
+async def stt_preflight_check(payload: dict = Body(...)):
+    """Pre-flight speech check (R3.5 Part 4): the candidate reads a sentence in the
+    real browser -> server path; pass requires >= 80% word match via the resolved provider.
+    """
+    import base64
+    import difflib
+
+    from backend.app.services.interview.stt_provider import transcribe_with_provider_async
+
+    expected = (payload or {}).get("expected") or (
+        "Testing, testing. Can you hear me clearly? I am reading this sentence out loud right now."
+    )
+    audio_b64 = (payload or {}).get("audio_base64") or ""
+    if not audio_b64:
+        raise HTTPException(status_code=400, detail="audio_base64 (WAV or 16kHz PCM16) is required")
+    try:
+        raw = base64.b64decode(audio_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="audio_base64 is not valid base64")
+
+    started = time.perf_counter()
+    result = await transcribe_with_provider_async(raw, provider=os.getenv("STT_PROVIDER") or None, locale=os.getenv("STT_LOCALE", "en-US"))
+    latency_ms = round((time.perf_counter() - started) * 1000.0, 1)
+
+    transcript = (result.get("text") or "").strip()
+    expected_words = [w for w in re.findall(r"[a-z0-9']+", expected.lower())]
+    got_words = [w for w in re.findall(r"[a-z0-9']+", transcript.lower())]
+    ratio = (
+        difflib.SequenceMatcher(a=expected_words, b=got_words).ratio()
+        if expected_words or got_words
+        else 0.0
+    )
+    passed = bool(got_words) and ratio >= 0.8 and result.get("provider") != "unavailable"
+    resp = {
+        "provider": result.get("provider"),
+        "transcript": transcript,
+        "expected": expected,
+        "match_ratio": round(ratio, 3),
+        "pass": passed,
+        "latency_ms": round(result.get("latency_ms") or latency_ms, 1),
+        "error": result.get("error"),
+        "detail": result.get("detail_src", result.get("detail")),
+    }
+    logger.info(f"[STT] pre-flight check: pass={resp['pass']} ratio={resp['match_ratio']} provider={resp['provider']}")
+    return resp
 
 
 @app.patch("/api/interview-sessions/{session_id}/settings")

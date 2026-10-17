@@ -1,0 +1,659 @@
+{
+  "generated_at": "2026-10-17 21:06:20",
+  "base_dir": "/Users/mohammadabdullah/Documents/CANDIDLY AI VOICE INTERVIEW PLATFORM/debug/sessions",
+  "totals": {
+    "sessions_scanned": 5,
+    "sessions_with_timeline": 3,
+    "timeline_events_total": 30,
+    "stt_finals_total": 7,
+    "stt_final_latency_ms": {
+      "count": 7,
+      "min": 1686.7,
+      "median": 8716.8,
+      "max": 23015.5,
+      "mean": 10187.9
+    },
+    "garbled_finals_total": 2,
+    "chopped_commits_total": 2,
+    "fallback_events_total": 1,
+    "fallback_total_ms": 6805.6,
+    "audio_files_total": 0,
+    "extra_capture_files": []
+  },
+  "sessions": [
+    {
+      "session_id": "9ef5b269-31ba-42eb-bee5-5e5c1203eccd",
+      "dir": "/Users/mohammadabdullah/Documents/CANDIDLY AI VOICE INTERVIEW PLATFORM/debug/sessions/9ef5b269-31ba-42eb-bee5-5e5c1203eccd",
+      "timeline_exists": false,
+      "timeline_lines": 0,
+      "first_ts": null,
+      "last_ts": null,
+      "duration_s": null,
+      "event_counts": {},
+      "stt_interims": {
+        "count": 0,
+        "items": []
+      },
+      "stt_finals": {
+        "count": 0,
+        "latency_ms": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null,
+          "mean": null
+        },
+        "by_lane": {},
+        "items": []
+      },
+      "garble": {
+        "garbled_final_count": 0,
+        "garbled_final_rate": 0.0,
+        "flags": {},
+        "garbled_finals": [],
+        "garbled_interim_script_examples": []
+      },
+      "turn_chopping": {
+        "commit_count": 0,
+        "groups": [],
+        "commits_with_finals": 0,
+        "chopped_commit_count": 0,
+        "chopped_commit_ratio": 0.0,
+        "max_finals_in_one_commit": 0,
+        "avg_finals_per_commit": 0.0
+      },
+      "fallbacks": {
+        "count": 0,
+        "total_ms": 0,
+        "events": []
+      },
+      "audio": {
+        "files": [],
+        "count": 0,
+        "total_bytes": 0,
+        "total_duration_s": 0,
+        "capture_wired": false
+      }
+    },
+    {
+      "session_id": "a91c6e92-09a9-4422-a48a-704d2538d6c2",
+      "dir": "/Users/mohammadabdullah/Documents/CANDIDLY AI VOICE INTERVIEW PLATFORM/debug/sessions/a91c6e92-09a9-4422-a48a-704d2538d6c2",
+      "timeline_exists": true,
+      "timeline_lines": 21,
+      "first_ts": 1792243886.891207,
+      "last_ts": 1792243970.968811,
+      "duration_s": 84.1,
+      "event_counts": {
+        "SMART_TURN": 7,
+        "STT": 8,
+        "COMMIT": 5,
+        "DECISION": 1
+      },
+      "stt_interims": {
+        "count": 1,
+        "items": [
+          {
+            "ts": 1792243925.456713,
+            "lane": "lane1_streaming",
+            "text": "इन द ब्रांच",
+            "latency_ms": 0.0,
+            "seq": 0
+          }
+        ]
+      },
+      "stt_finals": {
+        "count": 7,
+        "latency_ms": {
+          "count": 7,
+          "min": 1686.7,
+          "median": 8716.8,
+          "max": 23015.5,
+          "mean": 10187.9
+        },
+        "by_lane": {
+          "lane2_accuracy": {
+            "count": 7,
+            "latency_ms": {
+              "count": 7,
+              "min": 1686.7,
+              "median": 8716.8,
+              "max": 23015.5,
+              "mean": 10187.9
+            }
+          }
+        },
+        "items": [
+          {
+            "ts": 1792243886.896249,
+            "lane": "lane2_accuracy",
+            "text": "Yahi Yahi, I'm ready to begin it. Start the interview.",
+            "latency_ms": 23015.5,
+            "seq": 1
+          },
+          {
+            "ts": 1792243921.057745,
+            "lane": "lane2_accuracy",
+            "text": "Yeah, yeah, I am myself. I am",
+            "latency_ms": 8716.8,
+            "seq": 2
+          },
+          {
+            "ts": 1792243924.1598852,
+            "lane": "lane2_accuracy",
+            "text": "Harm my harm myself.",
+            "latency_ms": 2984.7,
+            "seq": 3
+          },
+          {
+            "ts": 1792243926.18477,
+            "lane": "lane2_accuracy",
+            "text": "I am my I am myself Muhammad Abdullah currently studying in fourth year of",
+            "latency_ms": 1686.7,
+            "seq": 4
+          },
+          {
+            "ts": 1792243928.501448,
+            "lane": "lane2_accuracy",
+            "text": "A B",
+            "latency_ms": 1907.2,
+            "seq": 5
+          },
+          {
+            "ts": 1792243943.88903,
+            "lane": "lane2_accuracy",
+            "text": "In Sebiati Hyderabad.",
+            "latency_ms": 15110.7,
+            "seq": 6
+          },
+          {
+            "ts": 1792243962.538145,
+            "lane": "lane2_accuracy",
+            "text": "in the in the branch of artificial intelligence and data science.",
+            "latency_ms": 17893.8,
+            "seq": 7
+          }
+        ]
+      },
+      "garble": {
+        "garbled_final_count": 2,
+        "garbled_final_rate": 0.286,
+        "flags": {
+          "word_repeated_2x": [
+            {
+              "text": "Yahi Yahi, I'm ready to begin it. Start the interview.",
+              "index": 0,
+              "detail": "'Yahi' repeated 2x consecutively"
+            },
+            {
+              "text": "Yeah, yeah, I am myself. I am",
+              "index": 1,
+              "detail": "'Yeah' repeated 2x consecutively"
+            }
+          ]
+        },
+        "garbled_finals": [
+          {
+            "index": 0,
+            "text": "Yahi Yahi, I'm ready to begin it. Start the interview.",
+            "lane": "lane2_accuracy",
+            "latency_ms": 23015.5,
+            "flags": [
+              {
+                "flag": "word_repeated_2x",
+                "detail": "'Yahi' repeated 2x consecutively"
+              }
+            ]
+          },
+          {
+            "index": 1,
+            "text": "Yeah, yeah, I am myself. I am",
+            "lane": "lane2_accuracy",
+            "latency_ms": 8716.8,
+            "flags": [
+              {
+                "flag": "word_repeated_2x",
+                "detail": "'Yeah' repeated 2x consecutively"
+              }
+            ]
+          }
+        ],
+        "garbled_interim_script_examples": [
+          {
+            "text": "इन द ब्रांच",
+            "lane": "lane1_streaming",
+            "scripts": [
+              "devanagari",
+              "devanagari",
+              "devanagari",
+              "devanagari",
+              "devanagari",
+              "devanagari",
+              "devanagari",
+              "devanagari",
+              "devanagari"
+            ]
+          }
+        ]
+      },
+      "turn_chopping": {
+        "commit_count": 5,
+        "groups": [
+          {
+            "turn_id": "1",
+            "reason": "silence_timeout",
+            "commit_ts": 1792243888.491233,
+            "word_count": 10,
+            "full_answer": "Yahi Yahi, I'm ready to begin it. Start the interview.",
+            "final_count": 1,
+            "seqs": [
+              1
+            ],
+            "final_latency_ms": [
+              23015.5
+            ],
+            "finals": [
+              {
+                "seq": 1,
+                "text": "Yahi Yahi, I'm ready to begin it. Start the interview.",
+                "latency_ms": 23015.5
+              }
+            ]
+          },
+          {
+            "turn_id": "2",
+            "reason": "silence_timeout",
+            "commit_ts": 1792243925.664515,
+            "word_count": 11,
+            "full_answer": "Yeah, yeah, I am myself. I am Harm my harm myself.",
+            "final_count": 2,
+            "seqs": [
+              2,
+              3
+            ],
+            "final_latency_ms": [
+              8716.8,
+              2984.7
+            ],
+            "finals": [
+              {
+                "seq": 2,
+                "text": "Yeah, yeah, I am myself. I am",
+                "latency_ms": 8716.8
+              },
+              {
+                "seq": 3,
+                "text": "Harm my harm myself.",
+                "latency_ms": 2984.7
+              }
+            ]
+          },
+          {
+            "turn_id": "3",
+            "reason": "silence_timeout",
+            "commit_ts": 1792243931.559513,
+            "word_count": 16,
+            "full_answer": "I am my I am myself Muhammad Abdullah currently studying in fourth year of A B",
+            "final_count": 2,
+            "seqs": [
+              4,
+              5
+            ],
+            "final_latency_ms": [
+              1686.7,
+              1907.2
+            ],
+            "finals": [
+              {
+                "seq": 4,
+                "text": "I am my I am myself Muhammad Abdullah currently studying in fourth year of",
+                "latency_ms": 1686.7
+              },
+              {
+                "seq": 5,
+                "text": "A B",
+                "latency_ms": 1907.2
+              }
+            ]
+          },
+          {
+            "turn_id": "4",
+            "reason": "fragment_guard_hold",
+            "commit_ts": 1792243945.3970208,
+            "word_count": 3,
+            "full_answer": "In Sebiati Hyderabad.",
+            "final_count": 1,
+            "seqs": [
+              6
+            ],
+            "final_latency_ms": [
+              15110.7
+            ],
+            "finals": [
+              {
+                "seq": 6,
+                "text": "In Sebiati Hyderabad.",
+                "latency_ms": 15110.7
+              }
+            ]
+          },
+          {
+            "turn_id": "5",
+            "reason": "silence_timeout",
+            "commit_ts": 1792243964.110788,
+            "word_count": 11,
+            "full_answer": "in the in the branch of artificial intelligence and data science.",
+            "final_count": 1,
+            "seqs": [
+              7
+            ],
+            "final_latency_ms": [
+              17893.8
+            ],
+            "finals": [
+              {
+                "seq": 7,
+                "text": "in the in the branch of artificial intelligence and data science.",
+                "latency_ms": 17893.8
+              }
+            ]
+          }
+        ],
+        "commits_with_finals": 5,
+        "chopped_commit_count": 2,
+        "chopped_commit_ratio": 0.4,
+        "max_finals_in_one_commit": 2,
+        "avg_finals_per_commit": 1.4
+      },
+      "fallbacks": {
+        "count": 1,
+        "total_ms": 6805.6,
+        "events": [
+          {
+            "ts": 1792243970.968811,
+            "event_type": "DECISION",
+            "provider": "failure_safety",
+            "model": "degraded",
+            "latency_ms": 6805.6,
+            "degraded": true,
+            "action": "probe",
+            "spoken_reply": "Thanks, that's clear. Could you explain how you measured the exact cache miss rate during that processing run?"
+          }
+        ]
+      },
+      "audio": {
+        "files": [],
+        "count": 0,
+        "total_bytes": 0,
+        "total_duration_s": 0,
+        "capture_wired": false
+      }
+    },
+    {
+      "session_id": "test-bargein-session",
+      "dir": "/Users/mohammadabdullah/Documents/CANDIDLY AI VOICE INTERVIEW PLATFORM/debug/sessions/test-bargein-session",
+      "timeline_exists": false,
+      "timeline_lines": 0,
+      "first_ts": null,
+      "last_ts": null,
+      "duration_s": null,
+      "event_counts": {},
+      "stt_interims": {
+        "count": 0,
+        "items": []
+      },
+      "stt_finals": {
+        "count": 0,
+        "latency_ms": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null,
+          "mean": null
+        },
+        "by_lane": {},
+        "items": []
+      },
+      "garble": {
+        "garbled_final_count": 0,
+        "garbled_final_rate": 0.0,
+        "flags": {},
+        "garbled_finals": [],
+        "garbled_interim_script_examples": []
+      },
+      "turn_chopping": {
+        "commit_count": 0,
+        "groups": [],
+        "commits_with_finals": 0,
+        "chopped_commit_count": 0,
+        "chopped_commit_ratio": 0.0,
+        "max_finals_in_one_commit": 0,
+        "avg_finals_per_commit": 0.0
+      },
+      "fallbacks": {
+        "count": 0,
+        "total_ms": 0,
+        "events": []
+      },
+      "audio": {
+        "files": [],
+        "count": 0,
+        "total_bytes": 0,
+        "total_duration_s": 0,
+        "capture_wired": false
+      }
+    },
+    {
+      "session_id": "test-merge-session",
+      "dir": "/Users/mohammadabdullah/Documents/CANDIDLY AI VOICE INTERVIEW PLATFORM/debug/sessions/test-merge-session",
+      "timeline_exists": true,
+      "timeline_lines": 1,
+      "first_ts": 1792239608.171249,
+      "last_ts": 1792239608.171249,
+      "duration_s": 0.0,
+      "event_counts": {
+        "COMMIT": 1
+      },
+      "stt_interims": {
+        "count": 0,
+        "items": []
+      },
+      "stt_finals": {
+        "count": 0,
+        "latency_ms": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null,
+          "mean": null
+        },
+        "by_lane": {},
+        "items": []
+      },
+      "garble": {
+        "garbled_final_count": 0,
+        "garbled_final_rate": 0.0,
+        "flags": {},
+        "garbled_finals": [],
+        "garbled_interim_script_examples": []
+      },
+      "turn_chopping": {
+        "commit_count": 1,
+        "groups": [
+          {
+            "turn_id": "1",
+            "reason": "silence_timeout",
+            "commit_ts": 1792239608.171249,
+            "word_count": 14,
+            "full_answer": "In our distributed service we used PostgreSQL with read replicas for high read throughput.",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          }
+        ],
+        "commits_with_finals": 0,
+        "chopped_commit_count": 0,
+        "chopped_commit_ratio": 0.0,
+        "max_finals_in_one_commit": 0,
+        "avg_finals_per_commit": 0.0
+      },
+      "fallbacks": {
+        "count": 0,
+        "total_ms": 0,
+        "events": []
+      },
+      "audio": {
+        "files": [],
+        "count": 0,
+        "total_bytes": 0,
+        "total_duration_s": 0,
+        "capture_wired": false
+      }
+    },
+    {
+      "session_id": "test-timing-session",
+      "dir": "/Users/mohammadabdullah/Documents/CANDIDLY AI VOICE INTERVIEW PLATFORM/debug/sessions/test-timing-session",
+      "timeline_exists": true,
+      "timeline_lines": 8,
+      "first_ts": 1792242038.97472,
+      "last_ts": 1792242608.614388,
+      "duration_s": 569.6,
+      "event_counts": {
+        "COMMIT": 8
+      },
+      "stt_interims": {
+        "count": 0,
+        "items": []
+      },
+      "stt_finals": {
+        "count": 0,
+        "latency_ms": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null,
+          "mean": null
+        },
+        "by_lane": {},
+        "items": []
+      },
+      "garble": {
+        "garbled_final_count": 0,
+        "garbled_final_rate": 0.0,
+        "flags": {},
+        "garbled_finals": [],
+        "garbled_interim_script_examples": []
+      },
+      "turn_chopping": {
+        "commit_count": 8,
+        "groups": [
+          {
+            "turn_id": "1",
+            "reason": "silence_timeout",
+            "commit_ts": 1792242038.97472,
+            "word_count": 8,
+            "full_answer": "In our backend service we deployed Redis caching.",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          },
+          {
+            "turn_id": "2",
+            "reason": "silence_timeout",
+            "commit_ts": 1792242048.4703271,
+            "word_count": 24,
+            "full_answer": "When designing the database schema we thought We scaled the PostgreSQL database with read replicas, and We also added Kafka for event streaming and",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          },
+          {
+            "turn_id": "1",
+            "reason": "silence_timeout",
+            "commit_ts": 1792242229.072926,
+            "word_count": 8,
+            "full_answer": "In our backend service we deployed Redis caching.",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          },
+          {
+            "turn_id": "2",
+            "reason": "silence_timeout",
+            "commit_ts": 1792242238.568116,
+            "word_count": 24,
+            "full_answer": "When designing the database schema we thought We scaled the PostgreSQL database with read replicas, and We also added Kafka for event streaming and",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          },
+          {
+            "turn_id": "1",
+            "reason": "silence_timeout",
+            "commit_ts": 1792242366.692999,
+            "word_count": 8,
+            "full_answer": "In our backend service we deployed Redis caching.",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          },
+          {
+            "turn_id": "2",
+            "reason": "silence_timeout",
+            "commit_ts": 1792242376.1913972,
+            "word_count": 24,
+            "full_answer": "When designing the database schema we thought We scaled the PostgreSQL database with read replicas, and We also added Kafka for event streaming and",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          },
+          {
+            "turn_id": "1",
+            "reason": "silence_timeout",
+            "commit_ts": 1792242599.120571,
+            "word_count": 8,
+            "full_answer": "In our backend service we deployed Redis caching.",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          },
+          {
+            "turn_id": "2",
+            "reason": "silence_timeout",
+            "commit_ts": 1792242608.614388,
+            "word_count": 24,
+            "full_answer": "When designing the database schema we thought We scaled the PostgreSQL database with read replicas, and We also added Kafka for event streaming and",
+            "final_count": 0,
+            "seqs": [],
+            "final_latency_ms": [],
+            "finals": []
+          }
+        ],
+        "commits_with_finals": 0,
+        "chopped_commit_count": 0,
+        "chopped_commit_ratio": 0.0,
+        "max_finals_in_one_commit": 0,
+        "avg_finals_per_commit": 0.0
+      },
+      "fallbacks": {
+        "count": 0,
+        "total_ms": 0,
+        "events": []
+      },
+      "audio": {
+        "files": [],
+        "count": 0,
+        "total_bytes": 0,
+        "total_duration_s": 0,
+        "capture_wired": false
+      }
+    }
+  ]
+}

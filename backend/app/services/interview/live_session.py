@@ -6,8 +6,8 @@ resilience, latency instrumentation, and post-interview Judge triggering.
 """
 
 import asyncio
-from datetime import datetime, timezone
 import os
+from datetime import datetime, timezone
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -2087,6 +2087,7 @@ class LiveInterviewRunner:
         integrity_policy_tier: str = "Moderate",
         speech_speed: float = 1.0,
         captions_enabled: bool = True,
+        mode: Optional[str] = None,
     ):
         self.session_id = session_id
         self.application_id = application_id
@@ -2104,6 +2105,10 @@ class LiveInterviewRunner:
         self.integrity_policy_tier = integrity_policy_tier
         self.speech_speed = speech_speed
         self.captions_enabled = captions_enabled
+        # R3.5: INTERVIEW_MODE=simple (default) uses the scripted coordinator;
+        # INTERVIEW_MODE=adaptive keeps the LLM-driven coordinator.
+        self.mode = (mode or os.getenv("INTERVIEW_MODE", "simple")).strip().lower()
+        self.stt_provider_name: Optional[str] = None
 
         self.handler = SmallWebRTCRequestHandler()
         self.connection: Optional[SmallWebRTCConnection] = None
@@ -2114,8 +2119,39 @@ class LiveInterviewRunner:
         self.runner: Optional[PipelineRunner] = None
         self._runner_task: Optional[asyncio.Task] = None
 
+    async def _start_stt_early(self) -> None:
+        """Pre-start the STT provider at pipeline assembly (no first-turn cold boot)."""
+        try:
+            started = await self.stt_service.ensure_started()
+            logger.info(f"[simple] STT provider pre-start: ready={started} provider={getattr(self.stt_service, '_provider_name', '?')}")
+        except Exception as exc:
+            logger.debug(f"[simple] STT pre-start notice: {exc}")
+
     async def prewarm_greeting(self) -> None:
         """Pre-render the personalized greeting + ready-check during pre-flight so 'Begin' starts instantly (Part A4)."""
+        if self.mode == "simple":
+            from backend.app.services.interview.simple_session import SimpleInterviewCoordinator
+
+            temp = SimpleInterviewCoordinator(
+                session_id=self.session_id,
+                candidate_name=self.candidate_name,
+                role_title=self.role_title,
+                questions=self.questions,
+                candidate_local_hour=self.candidate_local_hour,
+                duration_planned_mins=self.duration_planned_mins,
+                allow_grace_extension=self.allow_grace_extension,
+                skill_time_allocations_mins=self.skill_time_allocations_mins,
+                speech_speed=self.speech_speed,
+                captions_enabled=self.captions_enabled,
+                enable_silence_monitor=False,
+            )
+            combined = temp._build_greeting_text()
+            if temp.intro_q:
+                combined = f"{combined} {(temp.intro_q.get('question_text') or '').strip()}"
+            await pre_synthesize_phrase(combined, speed=self.speech_speed)
+            await self._warm_stt_helper()
+            return
+
         temp_coord = InterviewCoordinatorProcessor(
             session_id=self.session_id,
             candidate_name=self.candidate_name,
@@ -2139,10 +2175,88 @@ class LiveInterviewRunner:
         except Exception:
             pass
 
+    async def _warm_stt_helper(self) -> None:
+        """Pre-warm the Apple STT helper during pre-flight (Part 4: Enter blocked until ready)."""
+        try:
+            if isinstance(self.stt_service, object) and hasattr(self.stt_service, "ensure_started"):
+                ok = await self.stt_service.ensure_started()
+                logger.info(f"[simple] STT helper warm during pre-flight: ready={ok}")
+        except Exception as exc:
+            logger.debug(f"[simple] STT warm notice: {exc}")
+
     async def on_connection(self, connection: SmallWebRTCConnection):
         """Callback invoked when SmallWebRTC creates a peer connection."""
         self.connection = connection
 
+        if self.mode == "simple":
+            from backend.app.services.interview.simple_session import SimpleInterviewCoordinator
+
+            self.coordinator = SimpleInterviewCoordinator(
+                session_id=self.session_id,
+                candidate_name=self.candidate_name,
+                role_title=self.role_title,
+                questions=self.questions,
+                candidate_local_hour=self.candidate_local_hour,
+                duration_planned_mins=self.duration_planned_mins,
+                allow_grace_extension=self.allow_grace_extension,
+                skill_time_allocations_mins=self.skill_time_allocations_mins,
+                job_public_fields=self.job_public_fields,
+                speech_speed=self.speech_speed,
+                captions_enabled=self.captions_enabled,
+            )
+            comps = build_voice_pipeline_components(
+                connection,
+                speech_speed=self.speech_speed,
+                on_stt_interim=self.coordinator.record_stt_interim,
+                on_stt_final=self.coordinator.record_stt_final,
+                on_stt_final_chunk=self.coordinator.record_stt_final_chunk,
+                on_tts_first_audio=self.coordinator.record_tts_first_audio,
+                session_trace=self.coordinator.session_trace,
+            )
+            self.tts_service = comps["tts"]
+            self.stt_service = comps["stt"]
+            self.coordinator._stt_service = self.stt_service
+            self.stt_provider_name = comps.get("stt_provider")
+            comps["lag_monitor"].start()
+            self.lag_monitor = comps["lag_monitor"]
+
+            # Warm the STT helper NOW so the first "Begin" answers come out instantly
+            # (helper boots while the greeting plays, never on candidate speech).
+            self.coordinator._stt_wait_task = asyncio.create_task(self._start_stt_early())
+
+            pipeline_processors = [
+                comps["transport"].input(),
+                comps["rtvi"],
+                comps["vad"],
+                comps["turn_analyzer"],
+                comps["stt"],
+                self.coordinator,
+                comps["tts"],
+            ]
+            if comps["avatar"] is not None:
+                pipeline_processors.append(comps["avatar"])
+            pipeline_processors.append(comps["transport"].output())
+
+            pipeline = Pipeline(pipeline_processors)
+            self.task = PipelineTask(
+                pipeline,
+                params=PipelineParams(
+                    allow_interruptions=False,  # R3.5 simple mode: bot speech is never cut
+                    audio_in_sample_rate=16000,
+                    audio_out_sample_rate=24000,
+                ),
+                observers=[comps["rtvi_observer"]],
+            )
+            self.runner = PipelineRunner()
+            self._runner_task = asyncio.create_task(self.runner.run(self.task))
+
+            @connection.event_handler("closed")
+            async def _on_close(conn):
+                await self.handle_disconnect()
+
+            return
+
+        # ---------------- adaptive mode (R3.4c coordinator) ------------------
         self.coordinator = InterviewCoordinatorProcessor(
             session_id=self.session_id,
             application_id=self.application_id,
@@ -2306,6 +2420,7 @@ class LiveInterviewManager:
         integrity_policy_tier: str = "Moderate",
         speech_speed: float = 1.0,
         captions_enabled: bool = True,
+        mode: Optional[str] = None,
     ) -> LiveInterviewRunner:
         if self.is_busy_for_session(session_id):
             raise InterviewerBusyError(
@@ -2329,6 +2444,7 @@ class LiveInterviewManager:
                 integrity_policy_tier=integrity_policy_tier,
                 speech_speed=speech_speed,
                 captions_enabled=captions_enabled,
+                mode=mode,
             )
             self._runners[session_id] = runner
         return self._runners[session_id]
@@ -2352,6 +2468,7 @@ class LiveInterviewManager:
         integrity_policy_tier: str = "Moderate",
         speech_speed: float = 1.0,
         captions_enabled: bool = True,
+        mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         runner = self.get_or_create_runner(
             session_id=session_id,
@@ -2370,10 +2487,20 @@ class LiveInterviewManager:
             integrity_policy_tier=integrity_policy_tier,
             speech_speed=speech_speed,
             captions_enabled=captions_enabled,
+            mode=mode,
         )
         req = SmallWebRTCRequest.from_dict(request_dict)
         answer = await runner.handler.handle_web_request(req, runner.on_connection)
         return answer
+
+    async def commit_turn(self, session_id: str, reason: str = "button") -> Dict[str, Any]:
+        """R3.5 simple mode: commit the candidate's current answer (state COMMITTED)."""
+        runner = self._runners.get(session_id)
+        if not runner or not runner.coordinator:
+            raise KeyError(f"No active live session runner found for {session_id}")
+        if not hasattr(runner.coordinator, "commit_turn"):
+            return {"status": "unsupported", "mode": runner.mode}
+        return await runner.coordinator.commit_turn(reason=reason)
 
     async def handle_patch(self, session_id: str, patch_dict: Dict[str, Any]):
         runner = self._runners.get(session_id)
@@ -2421,25 +2548,40 @@ class LiveInterviewManager:
             return {
                 "active": False,
                 "phase": "scheduled",
+                "mode": runner.mode if runner else (os.getenv("INTERVIEW_MODE", "simple")),
                 "interviewer_busy": self.is_busy_for_session(session_id),
             }
         c = runner.coordinator
-        return {
+        status = {
             "active": True,
+            "mode": runner.mode,
             "has_begun": c.has_begun,
             "phase": c.current_phase.value,
             "is_speaking": c.is_speaking,
-            "is_thinking": c.is_thinking,
-            "current_question_index": c.current_question_index,
+            "current_question_index": getattr(c, "current_lead_question_index", getattr(c, "current_question_index", 0)),
             "total_questions": len(c.questions),
             "is_completed": c.is_completed,
             "last_ai_speech": c.last_ai_speech,
             "last_candidate_speech": c.last_candidate_speech,
             "remaining_seconds": round(c.pacing.remaining_seconds(), 1),
-            "grace_extended": c.pacing.grace_extended,
             "speech_speed": c.speech_speed,
             "captions_enabled": c.captions_enabled,
         }
+        if runner.mode == "simple":
+            state = getattr(c, "state", "listening")
+            status["is_thinking"] = False
+            status["grace_extended"] = c.pacing.grace_extended
+            status["turn_state"] = state
+            status["commit_ready"] = state == "listening"
+            status["answering"] = state == "listening" and bool(getattr(c, "_turn_text", ""))
+            status["commits_total"] = getattr(c, "_commits_total", 0)
+            stt = getattr(runner, "stt_service", None)
+            status["stt_provider"] = getattr(stt, "_provider_name", None) or getattr(runner, "stt_provider_name", None)
+            status["stt_ready"] = bool(getattr(stt, "provider_ready", False))
+        else:
+            status["is_thinking"] = c.is_thinking
+            status["grace_extended"] = c.pacing.grace_extended
+        return status
 
     async def handle_probe_offer(self, request_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Ephemeral probe for pre-flight network checks."""

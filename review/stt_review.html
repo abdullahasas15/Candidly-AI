@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Candidly R3.5 — Offline STT Review</title>
+<style>
+ body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; margin: 24px auto; max-width: 1200px; color: #1c2733; background: #f5f7fa; line-height: 1.45; }
+ h1 { font-size: 1.5rem; margin-bottom: 2px; }
+ h2 { font-size: 1.15rem; margin-top: 34px; border-bottom: 2px solid #d7dee6; padding-bottom: 4px; }
+ h3 { font-size: 1rem; margin-bottom: 6px; }
+ .sub { color: #5a6b7b; font-size: .85rem; }
+ .card { background: #fff; border: 1px solid #dfe6ee; border-radius: 10px; padding: 14px 16px; margin: 12px 0; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+ table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+ th, td { border: 1px solid #e2e8ef; padding: 7px 10px; text-align: left; vertical-align: top; font-size: .88rem; }
+ th { background: #eef2f7; }
+ .txt { white-space: pre-wrap; }
+ .chip { display: inline-block; margin-top: 6px; font-size: .72rem; color: #44566b; background: #eef3f8; border: 1px solid #d8e2ec; border-radius: 8px; padding: 1px 7px; }
+ .err { color: #b3261e; background: #fdeceb; border-radius: 6px; padding: 4px 7px; white-space: pre-wrap; }
+ .dim { color: #8595a6; }
+ .note { background: #fff8e6; border: 1px solid #ecd98b; border-radius: 8px; padding: 8px 12px; font-size: .86rem; }
+ .mono { font-family: ui-monospace, Menlo, monospace; font-size: .84rem; }
+ .good { color: #106b21; }
+ .flag { display: inline-block; background: #fbe9e7; border: 1px solid #f0b9ae; color: #8c2b1f; border-radius: 6px; font-size: .75rem; padding: 1px 7px; margin: 2px 4px 2px 0; }
+ audio { width: 100%; margin: 8px 0 4px; }
+ .stats { display: flex; flex-wrap: wrap; gap: 10px; }
+ .stat { background: #fff; border: 1px solid #dfe6ee; border-radius: 10px; padding: 10px 14px; min-width: 170px; }
+ .stat b { font-size: 1.25rem; display: block; }
+ .stat span { color: #5a6b7b; font-size: .78rem; }
+ .pos { color: #b3261e; }
+ li { margin: 3px 0; }
+ code { background: #eef2f7; border-radius: 4px; padding: 0 4px; }
+</style></head><body>
+<h1>Candidly R3.5 — Offline STT Review (Part 0)</h1>
+<div class="sub">Generated 2026-10-17 21:06:18 · offline replay verified: Apple on-device helper + Parakeet MLX + Whisper MLX · no mic, no network APIs · total build time 45.0 s</div>
+<div class="sub mono">apple_stt binary: /Users/mohammadabdullah/Documents/CANDIDLY AI VOICE INTERVIEW PLATFORM/native/apple_stt/.build/release/apple_stt (built: True) · MLX loader: voice_pipeline singletons</div>
+
+<div class="note"><b>Capture wiring:</b> No captured audio found in debug/sessions/*/audio — audio segment capture was wired only in R3.5 (DEBUG_AUDIO_CAPTURE=1 now on; future sessions will populate audio/). For review purposes the pipeline was exercised on a demo sample (not from sessions).</div>
+<h2>Sessions analyzed (timeline.jsonl)</h2>
+<div class="card">
+<h3>9ef5b269-31ba-42eb-bee5-5e5c1203eccd</h3>
+<div class="sub mono"><span class="pos">no timeline.jsonl — nothing to analyze</span></div>
+<table>
+<tr><th>STT finals</th><td colspan="3"><b>0</b></td></tr>
+<tr><th>Fallback / failure_safety</th><td colspan="3"><span class="dim">none</span></td></tr>
+<tr><th>Turn chopping</th><td colspan="3">commit windows: 0 · commits with finals: 0 · <b>chopped (&gt;1 final): 0</b> · max finals in one commit: 0 · avg 0.0</td></tr>
+<tr><th>Garble flags</th><td class="txt"><span class="dim">none flagged</span></td></tr>
+<tr><th>Captured audio</th><td colspan="3"><span class="pos">none captured</span> (capture wired only in R3.5)</td></tr>
+</table></div>
+<div class="card">
+<h3>a91c6e92-09a9-4422-a48a-704d2538d6c2</h3>
+<div class="sub mono">events: COMMIT:5 · DECISION:1 · SMART_TURN:7 · STT:8 · speech span 84.1 s</div>
+<table>
+<tr><th>STT finals</th><td colspan="3"><b>7</b> · latency ms: min 1686.7 / <b>median 8716.8</b> / max 23015.5 (mean 10187.9)</td></tr>
+<tr><th>Fallback / failure_safety</th><td colspan="3">1 event(s), 6805.6 ms total<ul><li class='mono'>DECISION · provider=failure_safety · model=degraded · 6805.6 ms · degraded=True</li></ul></td></tr>
+<tr><th>Turn chopping</th><td colspan="3">commit windows: 5 · commits with finals: 5 · <b>chopped (&gt;1 final): 2</b> · max finals in one commit: 2 · avg 1.4</td></tr>
+<tr><th>Garble flags</th><td class="txt"><span class='flag'>word_repeated_2x ×2 — “Yahi Yahi, I&#x27;m ready to begin it. Start the in”</span> <span class='flag'>interim non-Latin script — “इन द ब्रांच”</span></td></tr>
+<tr><th>Captured audio</th><td colspan="3"><span class="pos">none captured</span> (capture wired only in R3.5)</td></tr>
+</table></div>
+<div class="card"><table><tr><th>#[lane]</th><th>finals</th><th style="width:60%">text</th><th>latency</th></tr><tr><td class='mono'>seq 1</td><td class='mono'>lane2_accuracy</td><td>Yahi Yahi, I&#x27;m ready to begin it. Start the interview.</td><td class='mono'>23015.5 ms</td></tr><tr><td class='mono'>seq 2</td><td class='mono'>lane2_accuracy</td><td>Yeah, yeah, I am myself. I am</td><td class='mono'>8716.8 ms</td></tr><tr><td class='mono'>seq 3</td><td class='mono'>lane2_accuracy</td><td>Harm my harm myself.</td><td class='mono'>2984.7 ms</td></tr><tr><td class='mono'>seq 4</td><td class='mono'>lane2_accuracy</td><td>I am my I am myself Muhammad Abdullah currently studying in fourth year of</td><td class='mono'>1686.7 ms</td></tr><tr><td class='mono'>seq 5</td><td class='mono'>lane2_accuracy</td><td>A B</td><td class='mono'>1907.2 ms</td></tr><tr><td class='mono'>seq 6</td><td class='mono'>lane2_accuracy</td><td>In Sebiati Hyderabad.</td><td class='mono'>15110.7 ms</td></tr><tr><td class='mono'>seq 7</td><td class='mono'>lane2_accuracy</td><td>in the in the branch of artificial intelligence and data science.</td><td class='mono'>17893.8 ms</td></tr></table></div>
+<div class="card">
+<h3>test-bargein-session</h3>
+<div class="sub mono"><span class="pos">no timeline.jsonl — nothing to analyze</span></div>
+<table>
+<tr><th>STT finals</th><td colspan="3"><b>0</b></td></tr>
+<tr><th>Fallback / failure_safety</th><td colspan="3"><span class="dim">none</span></td></tr>
+<tr><th>Turn chopping</th><td colspan="3">commit windows: 0 · commits with finals: 0 · <b>chopped (&gt;1 final): 0</b> · max finals in one commit: 0 · avg 0.0</td></tr>
+<tr><th>Garble flags</th><td class="txt"><span class="dim">none flagged</span></td></tr>
+<tr><th>Captured audio</th><td colspan="3"><span class="pos">none captured</span> (capture wired only in R3.5)</td></tr>
+</table></div>
+<div class="card">
+<h3>test-merge-session</h3>
+<div class="sub mono">events: COMMIT:1 · speech span 0.0 s</div>
+<table>
+<tr><th>STT finals</th><td colspan="3"><b>0</b></td></tr>
+<tr><th>Fallback / failure_safety</th><td colspan="3"><span class="dim">none</span></td></tr>
+<tr><th>Turn chopping</th><td colspan="3">commit windows: 1 · commits with finals: 0 · <b>chopped (&gt;1 final): 0</b> · max finals in one commit: 0 · avg 0.0</td></tr>
+<tr><th>Garble flags</th><td class="txt"><span class="dim">none flagged</span></td></tr>
+<tr><th>Captured audio</th><td colspan="3"><span class="pos">none captured</span> (capture wired only in R3.5)</td></tr>
+</table></div>
+<div class="card">
+<h3>test-timing-session</h3>
+<div class="sub mono">events: COMMIT:8 · speech span 569.6 s</div>
+<table>
+<tr><th>STT finals</th><td colspan="3"><b>0</b></td></tr>
+<tr><th>Fallback / failure_safety</th><td colspan="3"><span class="dim">none</span></td></tr>
+<tr><th>Turn chopping</th><td colspan="3">commit windows: 8 · commits with finals: 0 · <b>chopped (&gt;1 final): 0</b> · max finals in one commit: 0 · avg 0.0</td></tr>
+<tr><th>Garble flags</th><td class="txt"><span class="dim">none flagged</span></td></tr>
+<tr><th>Captured audio</th><td colspan="3"><span class="pos">none captured</span> (capture wired only in R3.5)</td></tr>
+</table></div>
+<h2>Transcription comparison (offline replay)</h2>
+<div class="sub">Latency notes — <b>Apple latency_ms is helper wall time incl. realtime-style feeding of the whole file</b> (dictation coupling), not the live lane-latency. Live cell shown when the segment maps to a candidate turn in timeline.jsonl (approximate by index order).</div>
+<div class="card">
+<h3>seg000 · demo sample (not from sessions) — r35_voice_16k.wav <span class="sub">(4.92 s, 161618 B)</span></h3>
+<audio controls preload="none" src="audio/demo__r35_voice_16k.wav"></audio>
+<table><tr><th style="width:25%">Live (in-session)</th><th style="width:25%">Apple SpeechAnalyzer</th><th style="width:25%">Parakeet (MLX)</th><th style="width:25%">Whisper (MLX)</th></tr>
+<tr><td><div class="txt dim">— (no in-session transcript)</div></td><td><div class="txt">Testing the Apple Speech transcriber, this is a live streaming check with real speech</div><div class="chip">latency 13706.5 ms · elapsed 13.71 s</div></td><td><div class="txt">Testing the Apple Speech Transcriber, this is a live streaming check with real speech.</div><div class="chip">elapsed 3.69 s</div></td><td><div class="txt">testing the Apple Speech Transcriber. This is a live streaming check with real speech.</div><div class="chip">elapsed 4.72 s</div></td></tr></table>
+<div class="sub">Parakeet vs Apple: 100% overlap (13 words) · Whisper vs Apple: 100% overlap (13 words)</div>
+</div>
+<h2>Apple locale check (en-US vs en-IN)</h2>
+<div class="card">
+<div class="sub">Representative segment: demo sample (not from sessions) — r35_voice_16k.wav. Identical bytes streamed to the on-device helper with two locales.</div>
+<table><tr><th style="width:20%">locale</th><th>text</th><th style="width:18%">latency</th></tr>
+<tr><td class="mono">en-US</td><td><div class="txt">Testing the Apple Speech transcriber, this is a live streaming check with real speech</div><div class="chip">latency 13706.5 ms</div></td></tr>
+<tr><td class="mono">en-IN</td><td><div class="txt">Testing the Apple Speech transcriber, this is a live streaming check with real speech</div><div class="chip">latency 12787.0 ms</div></td></tr>
+</table></div>
+<h2>Findings</h2><div class='card'><ol>
+<li><b>STT final latency (live lane 2):</b> 7 finals across captured sessions; min 1686.7 ms, median 8716.8 ms, max 23015.5 ms — the max shows answer windows waiting on model finalization well above the ~1 s conversational budget.</li>
+<li><b>Garbled finals:</b> 2 of 7 flagged. Examples: “Yahi Yahi, I'm ready to begin it. Start the inte” (word_repeated_2x); “Yeah, yeah, I am myself. I am” (word_repeated_2x); interim “इन द ब्रांच” (non-Latin script). The Devanagari interim came from the streaming lane while locale/auto-select had not settled.</li>
+<li><b>Turn chopping:</b> 2 commit window(s) received &gt;1 candidate final: turn 2 (silence_timeout): 2 finals seq[2, 3]; turn 3 (silence_timeout): 2 finals seq[4, 5] — the answer was transcribed in two passes and committed together per window.</li>
+<li><b>Fallbacks:</b> 1 degraded/failure_safety decision(s), 6805.6 ms spent on safety paths (LLM outage visible mid-session).</li>
+<li><b>Captured audio:</b> 0 file(s) — audio was never captured in these sessions; audio segment capture was wired only in R3.5. This review therefore replays a demo sample (labeled below as such) to exercise all three local transcribers end-to-end.</li>
+<li><b>Cross-provider agreement (demo):</b> mean word-overlap vs Apple — Parakeet 100% · Whisper 100%. Apple dictation stitching vs one-shot MLX decode of the same 5 s window; differences are casings/pauses wording.</li>
+<li><b>Provider cost (offline):</b> Apple 13.71 s wall (realtime-paced feed), Parakeet 3.69 s, Whisper 4.72 s. Parakeet is by far the cheapest local fallback.</li>
+</ol><div class='sub'>Auto-generated from debug/sessions timelines + offline transcriptions · 2026-10-17 21:06:18</div></div>
+</body></html>
