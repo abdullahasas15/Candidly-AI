@@ -78,6 +78,9 @@ CLAUDE.md
 .gemini/
 DATABASE_TABLES_AND_LLM_PIPELINE.md
 
+# Review outputs (generated reports + captured-audio analysis; regenerable)
+review/
+
 # Operating System & IDE Artifacts
 .DS_Store
 **/.DS_Store
