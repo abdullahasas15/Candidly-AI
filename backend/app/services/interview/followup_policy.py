@@ -775,11 +775,11 @@ async def answer_candidate_closing_question(
 async def stream_section_turn_decision(
     *,
     section_name: str,
-    priority_tier: str,
-    time_left_secs: float,
+    priority_tier: str = "P0",
+    time_left_secs: float = 300.0,
     candidate_answer: str,
-    expectations: list[dict[str, Any]],
-    available_probes: list[dict[str, Any]],
+    expectations: Optional[list[dict[str, Any]]] = None,
+    available_probes: Optional[list[dict[str, Any]]] = None,
     resume_probe: Optional[dict[str, Any]] = None,
     candidate_resume_notes: str = "",
     recent_dialogue: Optional[list[dict[str, str]]] = None,
@@ -794,6 +794,8 @@ async def stream_section_turn_decision(
       PROBE:<probe_id> | FREE_PROBE | ENOUGH | NO_EXPERIENCE | REPEAT | CLARIFY | HOLD
     followed by spoken text.
     """
+    expectations = expectations or []
+    available_probes = available_probes or []
     cleaned = (candidate_answer or "").strip()
     lower = cleaned.lower()
 
@@ -999,81 +1001,113 @@ async def stream_section_turn_decision(
     model_used = LIVE_MODEL_NAME
     degraded = False
 
-    try:
-        client = get_gemini_client()
-        budget = thinking_budget if thinking_budget is not None else int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
-        output_limit = 300 + (budget if budget > 0 else 0)
-        cfg_kwargs: dict[str, Any] = {
-            "temperature": 0.1,
-            "max_output_tokens": output_limit,
-            "response_mime_type": "application/json",
-            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
-        }
-        if budget >= 0:
-            try:
-                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget, include_thoughts=False)
-            except Exception:
-                pass
+    from backend.app.services.llm_router import GEMINI_KEY_MANAGER, rotate_gemini_key
 
-        resp = await asyncio.to_thread(
-            client.models.generate_content,
-            model=LIVE_MODEL_NAME,
-            contents=structured_prompt,
-            config=types.GenerateContentConfig(**cfg_kwargs),
-        )
+    for attempt in range(2):
+        t_call_start = time.perf_counter()
+        try:
+            t_client_0 = time.perf_counter()
+            client = get_gemini_client()
+            client_creation_ms = (time.perf_counter() - t_client_0) * 1000.0
+            _, key_name, key_idx = GEMINI_KEY_MANAGER.get_current_key()
 
-        if hasattr(resp, "usage_metadata") and resp.usage_metadata:
-            meta = resp.usage_metadata
-            tokens["prompt"] = getattr(meta, "prompt_token_count", 0) or 0
-            tokens["thinking"] = getattr(meta, "thoughts_token_count", 0) or 0
-            tokens["completion"] = getattr(meta, "candidates_token_count", 0) or 0
-            logger.info("Live decision tokens: input=%s, thinking=%s, candidates=%s", tokens["prompt"], tokens["thinking"], tokens["completion"])
+            budget = thinking_budget if thinking_budget is not None else int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
+            output_limit = 300 + (budget if budget > 0 else 0)
+            cfg_kwargs: dict[str, Any] = {
+                "temperature": 0.1,
+                "max_output_tokens": output_limit,
+                "response_mime_type": "application/json",
+                "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+            }
+            if budget > 0:
+                try:
+                    cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget, include_thoughts=False)
+                except Exception:
+                    pass
 
-        resp_text = (resp.text or "{}").strip()
-        json_str = resp_text
-        if "```" in json_str:
-            json_str = re.sub(r"^```(?:json)?\s*", "", json_str)
-            json_str = re.sub(r"\s*```$", "", json_str)
-        s_idx = json_str.find("{")
-        e_idx = json_str.rfind("}")
-        if s_idx != -1 and e_idx != -1 and e_idx > s_idx:
-            json_str = json_str[s_idx : e_idx + 1]
+            req_t0 = time.perf_counter()
+            resp = await asyncio.to_thread(
+                client.models.generate_content,
+                model=LIVE_MODEL_NAME,
+                contents=structured_prompt,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+            req_t1 = time.perf_counter()
+            req_to_fb_ms = (req_t1 - req_t0) * 1000.0
+            total_call_ms = (time.perf_counter() - t_call_start) * 1000.0
 
-        decision_data = json.loads(json_str)
-        action_raw = str(decision_data.get("action", "ENOUGH")).upper()
-        control_token = action_raw
+            if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+                meta = resp.usage_metadata
+                tokens["prompt"] = getattr(meta, "prompt_token_count", 0) or 0
+                tokens["thinking"] = getattr(meta, "thoughts_token_count", 0) or 0
+                tokens["completion"] = getattr(meta, "candidates_token_count", 0) or 0
 
-        action_map = {
-            "PROBE_STORED": "probe",
-            "PROBE_FREE": "free_probe",
-            "ENOUGH": "enough",
-            "NO_EXPERIENCE": "no_experience",
-            "REPEAT": "repeat",
-            "CLARIFY": "clarify",
-            "HOLD": "hold",
-            "OFF_TOPIC": "clarify",
-        }
-        action = action_map.get(action_raw, "enough")
-        selected_probe_id = decision_data.get("probe_id")
-        free_probe_text = decision_data.get("free_probe_text")
+            logger.info(
+                "Decision call metric: client_creation_ms=%.1f, key_index=%d, key_name=%s, retries=%d, req_to_first_byte_ms=%.1f, total_ms=%.1f, input_tokens=%d, thinking_tokens=%d, completion_tokens=%d",
+                client_creation_ms, key_idx, key_name, attempt, req_to_fb_ms, total_call_ms, tokens.get("prompt", 0), tokens.get("thinking", 0), tokens.get("completion", 0)
+            )
 
-        # Validate coverage quotes verbatim against candidate answer
-        raw_coverage = decision_data.get("coverage", [])
-        coverage_updates = validate_coverage_quotes_verbatim(raw_coverage, cleaned)
+            resp_text = (resp.text or "").strip()
+            if not resp_text or resp_text == "{}":
+                raise ValueError("Empty or invalid response received from Gemini live decision call")
 
-    except Exception as exc:
-        logger.warning("Gemini live decision call failed: %s; using rule-based degraded fallback", exc)
-        from backend.app.services.llm_router import rotate_gemini_key
-        if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc) or "503" in str(exc):
-            rotate_gemini_key("Live decision rate-limited or 503")
+            json_str = resp_text
+            if "```" in json_str:
+                json_str = re.sub(r"^```(?:json)?\s*", "", json_str)
+                json_str = re.sub(r"\s*```$", "", json_str)
+            s_idx = json_str.find("{")
+            e_idx = json_str.rfind("}")
+            if s_idx != -1 and e_idx != -1 and e_idx > s_idx:
+                json_str = json_str[s_idx : e_idx + 1]
 
-        degraded_data = make_degraded_rule_based_decision(cleaned, available_probes, turn_index)
-        action = "probe" if degraded_data["action"] == "PROBE_STORED" else "enough"
-        control_token = degraded_data["action"]
-        selected_probe_id = degraded_data["probe_id"]
-        degraded = True
-        provider_used = "rule_based"
-        model_used = "degraded"
+            decision_data = json.loads(json_str)
+            action_raw = str(decision_data.get("action", "")).upper()
+            if not action_raw:
+                raise ValueError("Decision JSON missing 'action' field")
+
+            action_map = {
+                "PROBE_STORED": "probe",
+                "PROBE_FREE": "free_probe",
+                "ENOUGH": "enough",
+                "NO_EXPERIENCE": "no_experience",
+                "REPEAT": "repeat",
+                "CLARIFY": "clarify",
+                "HOLD": "hold",
+                "OFF_TOPIC": "clarify",
+            }
+            action = action_map.get(action_raw, "enough")
+            control_token = action_raw
+            selected_probe_id = decision_data.get("probe_id")
+            free_probe_text = decision_data.get("free_probe_text")
+
+            # Validate coverage quotes verbatim against candidate answer
+            raw_coverage = decision_data.get("coverage", [])
+            coverage_updates = validate_coverage_quotes_verbatim(raw_coverage, cleaned)
+            break  # Success!
+
+        except Exception as exc:
+            logger.warning("Gemini live decision attempt %d/2 failed: %s", attempt + 1, exc)
+            rotate_gemini_key(f"Live decision call failed on attempt {attempt + 1}: {exc}")
+            if attempt == 0:
+                await asyncio.sleep(0.3)
+                continue
+
+            # ATTEMPT 2 FAILED: STRICT FAILURE SAFETY (R3.4c Item 4)
+            # JSON parse failure, timeout, 429, or empty result must NEVER become ENOUGH or advance!
+            logger.warning("Gemini live decision exhausted retries; activating strict failure safety (never advance).")
+            degraded = True
+            provider_used = "failure_safety"
+            model_used = "degraded"
+
+            # 1. Keep listening ("Could you say a bit more?", max once)
+            # 2. Or use degraded stored probe
+            if available_probes and (turn_index is None or turn_index > 0):
+                action = "probe"
+                control_token = "PROBE_STORED"
+                selected_probe_id = available_probes[0].get("id")
+            else:
+                action = "hold"
+                control_token = "HOLD"
 
     # 6. Validate Free Probe Guard if action is PROBE_FREE
     if action == "free_probe":
@@ -1110,7 +1144,7 @@ async def stream_section_turn_decision(
         spoken_reply = ""
 
     elif action == "hold":
-        spoken_reply = "Of course, take a moment."
+        spoken_reply = "Could you say a bit more?" if degraded else "Of course, take a moment."
 
     elif action == "clarify":
         spoken_reply = f"In other words, how would you approach the key trade-offs in {section_name}?"

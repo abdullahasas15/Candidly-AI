@@ -641,15 +641,40 @@ class TwoLaneSTTService(SegmentedSTTService):
             self._segment_seq += 1
             seq = self._segment_seq
             logger.info(f"STT Accuracy Transcript (seq={seq}, {stt_ms:.1f}ms): '{clean_text}'")
+
+            # Evaluate Smart Turn v3 on the speech segment (R3.4c Smart Turn Gating)
+            smart_prob = 1.0
+            smart_complete = True
+            if not self._mock_mode and len(audio_np) > 0:
+                try:
+                    st_analyzer = _SHARED_SMART_TURN or LocalSmartTurnAnalyzerV3()
+                    res_endpoint = st_analyzer._predict_endpoint(audio_np)
+                    smart_prob = float(res_endpoint.get("probability", 1.0))
+                    smart_complete = (res_endpoint.get("prediction", 1) == 1)
+                except Exception as ste:
+                    logger.debug(f"Smart turn evaluation: {ste}")
+
+            # Trailing conjunction/filler or punctuation override
+            if bool(re.search(r"(?i)\b(because|and|or|so|like|which|but|if|when|also|uh|um)\s*$", clean_text) or clean_text.endswith(",") or clean_text.endswith("...")):
+                smart_complete = False
+
             if self._on_stt_final:
                 try:
-                    self._on_stt_final(clean_text, stt_ms, None, seq)
+                    self._on_stt_final(clean_text, stt_ms, smart_prob, seq, smart_complete)
                 except TypeError:
-                    self._on_stt_final(clean_text, stt_ms, None)
+                    try:
+                        self._on_stt_final(clean_text, stt_ms, smart_prob, seq)
+                    except TypeError:
+                        self._on_stt_final(clean_text, stt_ms, smart_prob)
                 except Exception:
                     pass
 
             if self._session_trace:
+                self._session_trace.log_smart_turn(
+                    probability=smart_prob,
+                    is_complete=smart_complete,
+                    silence_s=0.0,
+                )
                 self._session_trace.log_stt(
                     lane="lane2_accuracy",
                     text=clean_text,

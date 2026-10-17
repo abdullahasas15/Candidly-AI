@@ -148,8 +148,30 @@ def print_timeline(session_id: str):
     print("=" * 80)
 
 
+def get_latest_session_id() -> str:
+    sessions_dir = Path("debug/sessions")
+    if not sessions_dir.exists():
+        print("Error: debug/sessions does not exist.")
+        sys.exit(1)
+    session_dirs = [
+        d for d in sessions_dir.iterdir()
+        if d.is_dir() and (d / "timeline.jsonl").exists()
+    ]
+    if not session_dirs:
+        print("Error: No sessions with timeline.jsonl found in debug/sessions.")
+        sys.exit(1)
+    latest = max(session_dirs, key=lambda d: (d / "timeline.jsonl").stat().st_mtime)
+    return latest.name
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python scripts/print_turn_timeline.py <session_id>")
+        print("Usage: python scripts/print_turn_timeline.py <session_id | --last>")
         sys.exit(1)
-    print_timeline(sys.argv[1])
+
+    target_id = sys.argv[1]
+    if target_id == "--last":
+        target_id = get_latest_session_id()
+        print(f"Targeting latest session: {target_id}")
+
+    print_timeline(target_id)
