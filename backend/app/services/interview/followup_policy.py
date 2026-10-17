@@ -1029,8 +1029,17 @@ async def stream_section_turn_decision(
             tokens["completion"] = getattr(meta, "candidates_token_count", 0) or 0
             logger.info("Live decision tokens: input=%s, thinking=%s, candidates=%s", tokens["prompt"], tokens["thinking"], tokens["completion"])
 
-        resp_text = resp.text or "{}"
-        decision_data = json.loads(resp_text)
+        resp_text = (resp.text or "{}").strip()
+        json_str = resp_text
+        if "```" in json_str:
+            json_str = re.sub(r"^```(?:json)?\s*", "", json_str)
+            json_str = re.sub(r"\s*```$", "", json_str)
+        s_idx = json_str.find("{")
+        e_idx = json_str.rfind("}")
+        if s_idx != -1 and e_idx != -1 and e_idx > s_idx:
+            json_str = json_str[s_idx : e_idx + 1]
+
+        decision_data = json.loads(json_str)
         action_raw = str(decision_data.get("action", "ENOUGH")).upper()
         control_token = action_raw
 

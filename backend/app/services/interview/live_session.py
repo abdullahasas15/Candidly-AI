@@ -200,6 +200,7 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         self._consecutive_fragment_count: int = 0
         self._hold_extension_secs: float = 0.0
         self._audio_segments_received_fn = lambda: 1
+        self._stt_service: Optional[Any] = None
 
     def record_stt_interim(self, interim_text: str) -> None:
         """Lane 1 interim caption: update UI live as words are spoken."""
@@ -1957,6 +1958,9 @@ class InterviewCoordinatorProcessor(FrameProcessor):
 
         elif isinstance(frame, (BotStartedSpeakingFrame, TTSStartedFrame)):
             self.is_speaking = True
+            if self._stt_service is not None:
+                self._stt_service.set_bot_speaking(True)
+                self._stt_service.last_ai_speech = self.last_ai_speech
             self.is_thinking = False
             self._awaiting_first_bot_audio = False
             self._last_activity_monotonic = time.monotonic()
@@ -1964,6 +1968,8 @@ class InterviewCoordinatorProcessor(FrameProcessor):
 
         elif isinstance(frame, (BotStoppedSpeakingFrame, TTSStoppedFrame)):
             self.is_speaking = False
+            if self._stt_service is not None:
+                self._stt_service.set_bot_speaking(False)
             self._last_activity_monotonic = time.monotonic()
             await self.emit_ui_state("interview-bot-state", {"state": "listening"})
 
@@ -2083,6 +2089,7 @@ class LiveInterviewRunner:
         )
         self.tts_service = comps["tts"]
         self.stt_service = comps["stt"]
+        self.coordinator._stt_service = self.stt_service
         self.coordinator._audio_segments_received_fn = lambda: getattr(self.stt_service, "audio_segments_received", 1)
         comps["lag_monitor"].start()
         self.lag_monitor = comps["lag_monitor"]
