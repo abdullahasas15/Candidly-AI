@@ -2387,6 +2387,39 @@ async def list_candidate_applications(
             asyncio.create_task(_run_candidate_personalization(app.id))
             gen_status = "running"
 
+        # Self-heal succeeded-but-session-less rows (R3.5b): materialization creates the
+        # session + question plan in ONE commit, so a missing session here means the
+        # background task never ran to completion on some path (legacy rows, older
+        # crashes). The plan is zero-LLM DB writes — build it inline so interview_ready
+        # is true on this very fetch instead of waiting for a visit to some other page
+        # that lazily creates the session via GET /interview-session.
+        if (
+            not is_completed
+            and run
+            and run.status == "succeeded"
+            and session is None
+            and app.job
+            and app.job.active_blueprint_id
+        ):
+            try:
+                from backend.app.services.interview.plan_materializer import materialize_blueprint_session_plan
+
+                session = InterviewSession(
+                    application_id=app.id,
+                    job_id=app.job_id,
+                    status="scheduled",
+                    duration_planned_mins=app.job.interview_duration_mins or 20,
+                    gemini_model_used=os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite"),
+                )
+                db.add(session)
+                await db.flush()
+                await materialize_blueprint_session_plan(session, db)
+                await db.commit()
+                logger.info("Self-healed session plan inline for application %s (generation already succeeded)", app.id)
+            except Exception:
+                logger.exception("Inline plan materialization failed for application %s", app.id)
+                session = None
+
         is_ready = bool(
             run
             and run.status == "succeeded"
