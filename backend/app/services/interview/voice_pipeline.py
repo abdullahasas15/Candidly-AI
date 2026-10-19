@@ -19,8 +19,15 @@ import re
 import threading
 import time
 import wave
+
+try:
+    import certifi
+    if not os.environ.get("SSL_CERT_FILE"):
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+except Exception:
+    pass
 from collections.abc import AsyncGenerator
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from loguru import logger
@@ -29,6 +36,8 @@ from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnal
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     InputAudioRawFrame,
     TranscriptionFrame,
@@ -37,13 +46,12 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
-)
-from pipecat.frames.vad_frames import (
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.aggregators.sentence import SentenceAggregator
 from pipecat.processors.audio.vad_processor import VADProcessor
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.frameworks.rtvi.observer import RTVIObserver
 from pipecat.processors.frameworks.rtvi.processor import RTVIProcessor
 from pipecat.services.google.llm import GoogleLLMService
@@ -140,6 +148,32 @@ def _load_parakeet_singleton(model_name: str = "mlx-community/parakeet-tdt-0.6b-
             logger.warning(f"Parakeet model load deferred / fallback: {e}")
             _SHARED_PARAKEET_MODEL = None
         return _SHARED_PARAKEET_MODEL
+
+
+_SHARED_NEMOTRON_MODEL = None
+_NEMOTRON_LOAD_ATTEMPTED = False
+
+
+def _load_nemotron_singleton(
+    model_name: str = "mlx-community/nemotron-3.5-asr-streaming-0.6b",
+) -> Any:
+    global _SHARED_NEMOTRON_MODEL, _NEMOTRON_LOAD_ATTEMPTED
+    if os.getenv("VOICE_MOCK", "").lower() in {"1", "true", "yes"}:
+        return None
+    with _MLX_LOCK:
+        if _SHARED_NEMOTRON_MODEL is not None or _NEMOTRON_LOAD_ATTEMPTED:
+            return _SHARED_NEMOTRON_MODEL
+        _NEMOTRON_LOAD_ATTEMPTED = True
+        try:
+            import mlx_audio.stt as stt
+            t0 = time.perf_counter()
+            logger.info(f"Loading Nemotron 3.5 Streaming ASR model: {model_name}...")
+            _SHARED_NEMOTRON_MODEL = stt.load_model(model_name)
+            logger.info(f"Nemotron 3.5 Streaming loaded in {(time.perf_counter() - t0)*1000:.0f}ms")
+        except Exception as e:
+            logger.warning(f"Nemotron streaming load deferred / fallback: {e}")
+            _SHARED_NEMOTRON_MODEL = None
+        return _SHARED_NEMOTRON_MODEL
 
 
 def _load_kokoro_singleton(
@@ -404,8 +438,14 @@ class TwoLaneSTTService(SegmentedSTTService):
         self._session_trace = session_trace
 
         # Models
+        self._nemotron = _SHARED_NEMOTRON_MODEL
         self._parakeet = _SHARED_PARAKEET_MODEL
         self._whisper = _SHARED_WHISPER_MODEL
+
+        # Echo gate & bot speaking tracking (R3.4b)
+        self.is_bot_speaking: bool = False
+        self._segment_started_while_bot_speaking: bool = False
+        self._pre_flight_noise_floor: float = float(os.getenv("STT_NOISE_FLOOR", "0.005"))
 
         # Pre-roll circular frame buffer (500 ms @ 16kHz 16-bit mono = 16000 bytes)
         self._pre_roll_bytes = int(sample_rate * 2 * 0.50)
@@ -426,13 +466,27 @@ class TwoLaneSTTService(SegmentedSTTService):
     def wants_wav_segments(self) -> bool:
         return False
 
+    def set_bot_speaking(self, is_speaking: bool) -> None:
+        """Explicitly set bot speaking status for echo suppression gating."""
+        self.is_bot_speaking = is_speaking
+
     def _ensure_models(self):
         if self._mock_mode:
             return
+        if self._nemotron is None:
+            self._nemotron = _load_nemotron_singleton()
         if self._parakeet is None:
             self._parakeet = _load_parakeet_singleton()
         if self._whisper is None:
             self._whisper = _load_whisper_singleton()
+
+    async def process_frame(self, frame: Frame, direction: Any):
+        # Track bot speaking status from pipeline frames
+        if isinstance(frame, (TTSStartedFrame, BotStartedSpeakingFrame)):
+            self.is_bot_speaking = True
+        elif isinstance(frame, (TTSStoppedFrame, BotStoppedSpeakingFrame)):
+            self.is_bot_speaking = False
+        await super().process_frame(frame, direction)
 
     async def process_audio_frame(self, frame: InputAudioRawFrame, direction: Any):
         # Continuous circular pre-roll buffer when user is not speaking (500ms pre-roll)
@@ -446,6 +500,8 @@ class TwoLaneSTTService(SegmentedSTTService):
 
     async def _handle_user_started_speaking(self, frame: VADUserStartedSpeakingFrame):
         self._user_speaking = True
+        # Gating rule (R3.4b): Record whether this speech segment began while bot was speaking
+        self._segment_started_while_bot_speaking = self.is_bot_speaking
         # Prepend 500ms pre-roll audio so first syllable is never clipped
         if self._pre_roll_buffer:
             self._audio_buffer = bytearray(self._pre_roll_buffer) + self._audio_buffer
@@ -497,6 +553,21 @@ class TwoLaneSTTService(SegmentedSTTService):
         self._ensure_models()
         if self._mock_mode:
             return "Speaking..."
+        # 1. Prefer Nemotron 3.5 streaming for fast interim tokens
+        if self._nemotron is not None:
+            try:
+                with _MLX_LOCK:
+                    res = self._nemotron.generate(audio_np)
+                    if hasattr(res, "text") and res.text:
+                        return res.text.strip()
+                    elif isinstance(res, list) and len(res) > 0:
+                        t = getattr(res[0], "text", str(res[0])).strip()
+                        if t:
+                            return t
+            except Exception as ne:
+                logger.debug(f"Nemotron fast transcribe fallback: {ne}")
+
+        # 2. Fallback to Parakeet
         if self._parakeet is not None:
             try:
                 import mlx.core as mx
@@ -563,10 +634,12 @@ class TwoLaneSTTService(SegmentedSTTService):
         # Guard 1: Hallucination guard
         text = filter_hallucinations(text, audio_np)
 
-        # Guard 2: Acoustic echo guard
-        if is_acoustic_echo(text, self.last_ai_speech):
-            logger.info(f"Acoustic echo detected and suppressed: '{text}'")
-            text = ""
+        # Guard 2: Acoustic echo guard (R3.4b)
+        # Apply ONLY if segment started while bot was speaking. Never drop soft speech if bot was silent.
+        if self._segment_started_while_bot_speaking:
+            if is_acoustic_echo(text, self.last_ai_speech):
+                logger.info(f"Acoustic echo detected during bot speech and suppressed: '{text}'")
+                text = ""
 
         stt_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         self.last_stt_final_ms = stt_ms
@@ -576,15 +649,40 @@ class TwoLaneSTTService(SegmentedSTTService):
             self._segment_seq += 1
             seq = self._segment_seq
             logger.info(f"STT Accuracy Transcript (seq={seq}, {stt_ms:.1f}ms): '{clean_text}'")
+
+            # Evaluate Smart Turn v3 on the speech segment (R3.4c Smart Turn Gating)
+            smart_prob = 1.0
+            smart_complete = True
+            if not self._mock_mode and len(audio_np) > 0:
+                try:
+                    st_analyzer = _SHARED_SMART_TURN or LocalSmartTurnAnalyzerV3()
+                    res_endpoint = st_analyzer._predict_endpoint(audio_np)
+                    smart_prob = float(res_endpoint.get("probability", 1.0))
+                    smart_complete = (res_endpoint.get("prediction", 1) == 1)
+                except Exception as ste:
+                    logger.debug(f"Smart turn evaluation: {ste}")
+
+            # Trailing conjunction/filler or punctuation override
+            if bool(re.search(r"(?i)\b(because|and|or|so|like|which|but|if|when|also|uh|um)\s*$", clean_text) or clean_text.endswith(",") or clean_text.endswith("...")):
+                smart_complete = False
+
             if self._on_stt_final:
                 try:
-                    self._on_stt_final(clean_text, stt_ms, None, seq)
+                    self._on_stt_final(clean_text, stt_ms, smart_prob, seq, smart_complete)
                 except TypeError:
-                    self._on_stt_final(clean_text, stt_ms, None)
+                    try:
+                        self._on_stt_final(clean_text, stt_ms, smart_prob, seq)
+                    except TypeError:
+                        self._on_stt_final(clean_text, stt_ms, smart_prob)
                 except Exception:
                     pass
 
             if self._session_trace:
+                self._session_trace.log_smart_turn(
+                    probability=smart_prob,
+                    is_complete=smart_complete,
+                    silence_s=0.0,
+                )
                 self._session_trace.log_stt(
                     lane="lane2_accuracy",
                     text=clean_text,
@@ -602,6 +700,624 @@ class TwoLaneSTTService(SegmentedSTTService):
 
 # Backward-compatible alias
 ParakeetSTTService = TwoLaneSTTService
+
+
+class ProviderSTTService(SegmentedSTTService):
+    """R3.5 provider-based STT (apple_speechanalyzer / apple_sfspeech strategy).
+
+    One provider produces BOTH the live words (partials, streamed in real time like
+    Mac dictation) and the final text (segments finalized by the Apple model itself,
+    or forced at turn commit via FLUSH). No second transcription pass ever runs.
+
+    Callback contract (identical shape to TwoLaneSTTService):
+      on_stt_interim(text)                                     -> live captions
+      on_stt_final(text, stt_ms, smart_prob, seq, smart_complete) -> legacy finales
+      on_stt_final_chunk(text, seq)                            -> R3.5 granular chunk event
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        locale: str = "en-US",
+        sample_rate: int = 16000,
+        trailing_silence_secs: float = 0.30,
+        on_stt_interim: Optional[Callable[[str], None]] = None,
+        on_stt_final: Optional[Callable[[str, float, Optional[float], int], None]] = None,
+        on_stt_final_chunk: Optional[Callable[[str, int], None]] = None,
+        session_trace: Optional[Any] = None,
+        **kwargs,
+    ):
+        super().__init__(
+            sample_rate=sample_rate,
+            trailing_silence_secs=trailing_silence_secs,
+            **kwargs,
+        )
+        from backend.app.services.interview.stt_provider import AppleSpeechProcess
+
+        self._provider_name = provider
+        self._locale = locale
+        self._on_stt_interim = on_stt_interim
+        self._on_stt_final = on_stt_final
+        self._on_stt_final_chunk = on_stt_final_chunk
+        self._session_trace = session_trace
+        context_terms = []
+        try:
+            raw = os.getenv("STT_CONTEXT_TERMS", "")
+            context_terms = [t.strip() for t in raw.split(",") if t.strip()][:100]
+        except Exception:
+            pass
+
+        self.helper = AppleSpeechProcess(
+            provider=provider,
+            locale=locale,
+            context_terms=context_terms,
+            on_partial=self._handle_provider_partial,
+            on_final=self._handle_provider_final,
+        )
+
+        # Echo / bot-speaking gate (same semantics as TwoLaneSTTService, R3.5 simple mode
+        # never feeds bot-shaped audio at all).
+        self.is_bot_speaking: bool = False
+        self._segment_started_while_bot_speaking: bool = False
+        self._pre_flight_noise_floor: float = float(os.getenv("STT_NOISE_FLOOR", "0.005"))
+        self._pre_roll_bytes = int(sample_rate * 2 * 0.50)
+        self._pre_roll_buffer = bytearray()
+        self._window_final_chunks: list = []
+        self._latest_partial: str = ""
+        self._utterance_text: str = ""  # stitched cumulative for the live utterance
+        self._segment_seq: int = 0
+        self._window_seq: int = 0
+        self.last_stt_final_ms: Optional[float] = None
+        self.last_stt_confidence: Optional[float] = None
+        self.audio_segments_received: int = 0
+        self.last_ai_speech: str = ""
+        self._audio_capture_seq: int = 0
+        self.provider_ready: bool = False
+        self.provider_start_failed: bool = False
+
+        # R3.5b: finalize-of-record state + caption cadence metrics.
+        # _finals_seen is cumulative; _finals_at_last_partial snapshots it on every
+        # partial, so final > snapshot means the newest partial is already finalized.
+        self._finals_seen: int = 0
+        self._finals_at_last_partial: int = 0
+        self.last_finalize_source: str = "none"  # none|no-provider|already-final|finalized|fallback
+        self._feed_chunk_bytes = int(sample_rate * 2 * 0.10)  # ~100ms @ 16k PCM16 mono
+        self._feed_buffer = bytearray()
+        self._speech_window_started: Optional[float] = None
+        self._first_partial_monotonic: Optional[float] = None
+        self._last_partial_monotonic: Optional[float] = None
+        self._partial_intervals: List[float] = []
+        self.last_first_caption_ms: Optional[float] = None
+        self.last_partial_interval_ms: Optional[float] = None
+
+    # -- sliding partials -----------------------------------------------------
+    @staticmethod
+    def _stitch(committed: str, incoming: str) -> str:
+        """Stitch Apple's sliding volatile window into a stable cumulative utterance."""
+        from backend.app.services.interview.stt_provider import stitch_sliding_text
+
+        return stitch_sliding_text(committed, incoming)
+
+    @property
+    def wants_wav_segments(self) -> bool:
+        return False
+
+    def set_bot_speaking(self, is_speaking: bool) -> None:
+        if is_speaking:
+            # Flush the partial feed chunk so user audio is never withheld across the gate.
+            try:
+                asyncio.get_running_loop().create_task(self._drain_feed_buffer())
+            except RuntimeError:
+                self._feed_buffer.clear()
+        self.is_bot_speaking = is_speaking
+
+    async def _drain_feed_buffer(self) -> None:
+        """Feed the coalesced ~100ms chunk buffer now (end of speech / echo gate)."""
+        if self._feed_buffer and self.provider_ready:
+            chunk = bytes(self._feed_buffer)
+            self._feed_buffer.clear()
+            try:
+                await self.helper.feed(chunk)
+            except Exception:
+                pass
+
+    async def ensure_started(self) -> bool:
+        if self.provider_ready or self.provider_start_failed:
+            return self.provider_ready
+        try:
+            self.provider_ready = await self.helper.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[STT] provider start failed: {exc}")
+        self.provider_start_failed = not self.provider_ready
+        if self.provider_ready and self._session_trace:
+            self._session_trace.log_stt(
+                lane=f"provider_start:{self._provider_name}",
+                text=f"locale={self._locale}",
+                is_final=True,
+                latency_ms=0.0,
+            )
+        return self.provider_ready
+
+    async def stop(self) -> None:
+        try:
+            await self.helper.stop()
+        except Exception:
+            pass
+
+    def reset_turn(self) -> None:
+        """Clear utterance accumulation when moving to a new interview turn."""
+        self._utterance_text = ""
+        self._latest_partial = ""
+        self._window_final_chunks = []
+
+    # -- provider events (dictation stream) ----------------------------------
+
+    def _handle_provider_partial(self, text: str) -> None:
+        # R3.5b caption-cadence metrics: interval between partials + first-caption delay.
+        now = time.perf_counter()
+        self._finals_at_last_partial = self._finals_seen
+        if self._last_partial_monotonic is not None:
+            self._partial_intervals.append((now - self._last_partial_monotonic) * 1000.0)
+            self.last_partial_interval_ms = round(self._partial_intervals[-1], 1)
+        self._last_partial_monotonic = now
+        if self._first_partial_monotonic is None:
+            self._first_partial_monotonic = now
+            if self._speech_window_started is not None:
+                self.last_first_caption_ms = round((now - self._speech_window_started) * 1000.0, 1)
+        if self._session_trace:
+            self._session_trace.log_stt(
+                lane=f"{self._provider_name}_partial",
+                text=text,
+                is_final=False,
+                latency_ms=self.last_partial_interval_ms or 0.0,
+                meta={"first_delay_ms": self.last_first_caption_ms, "interval_ms": self.last_partial_interval_ms},
+            )
+        self._latest_partial = text
+        self._utterance_text = self._stitch(self._utterance_text, text)
+        if self._on_stt_interim:
+            try:
+                self._on_stt_interim(self._utterance_text)
+            except Exception:
+                pass
+
+    def _handle_provider_final(self, text: str, seq: int, start: float, end: float) -> None:
+        final_clean = (text or "").strip()
+        self._finals_seen += 1
+        self._window_final_chunks.append(final_clean)
+        # A spontaneous final usually repeats text already emitted in partials for its
+        # range. Keep the stitching monotonic: append finals ONLY when they add content
+        # (never clear the cumulative partials — a final covers just its own range).
+        if final_clean and final_clean.lower() not in self._utterance_text.lower():
+            self._utterance_text = (
+                f"{self._utterance_text} {final_clean}".strip() if self._utterance_text else final_clean
+            )
+        if self._on_stt_final_chunk:
+            try:
+                self._on_stt_final_chunk(text, self._window_seq)
+            except Exception:
+                pass
+        if self._session_trace:
+            self._session_trace.log_stt(
+                lane=f"{self._provider_name}_final",
+                text=text,
+                is_final=True,
+                latency_ms=max(0.0, (end - start) * 1000.0),
+                seq=self._window_seq,
+            )
+
+    # -- pipeline hooks -------------------------------------------------------
+
+    async def process_audio_frame(self, frame: InputAudioRawFrame, direction: Any):
+        if not self._user_speaking:
+            self._pre_roll_buffer += frame.audio
+            if len(self._pre_roll_buffer) > self._pre_roll_bytes:
+                discarded = len(self._pre_roll_buffer) - self._pre_roll_bytes
+                self._pre_roll_buffer = self._pre_roll_buffer[discarded:]
+
+        # Feed the analyzer in coalesced ~100ms chunks (R3.5b caption cadence) while
+        # the bot is NOT speaking (echo gate). Also skip feeding when the provider
+        # died so the frame path stays cheap.
+        if self.provider_ready and not self.is_bot_speaking:
+            self._feed_buffer += frame.audio
+            if len(self._feed_buffer) >= self._feed_chunk_bytes:
+                chunk = bytes(self._feed_buffer)
+                self._feed_buffer.clear()
+                await self.helper.feed(chunk)
+
+        await super().process_audio_frame(frame, direction)
+
+    async def _handle_user_started_speaking(self, frame: VADUserStartedSpeakingFrame):
+        self._user_speaking = True
+        self._segment_started_while_bot_speaking = self.is_bot_speaking
+        self._window_final_chunks = []
+        self._latest_partial = ""
+        # Keep self._utterance_text across mid-turn pauses so candidate speech accumulates monotonically;
+        # reset_turn() clears it upon commit or new step.
+        self._window_seq += 1
+        # R3.5b: fresh cadence metrics for this speech window.
+        self._speech_window_started = time.perf_counter()
+        self._first_partial_monotonic = None
+        self._last_partial_monotonic = None
+        self._partial_intervals = []
+        self.last_first_caption_ms = None
+        self.last_partial_interval_ms = None
+        self._finals_at_last_partial = self._finals_seen
+        if self._pre_roll_buffer:
+            self._audio_buffer = bytearray(self._pre_roll_buffer) + self._audio_buffer
+            self._pre_roll_buffer.clear()
+        await self.ensure_started()
+
+    async def flush_and_wait(self, timeout: float = 1.0) -> Optional[str]:
+        """R3.5b turn-commit finalize: the analyzer's FLUSHed final is the answer of record.
+
+        Sends FLUSH (the analyzer's finalize through the last fed audio — the session
+        stays warm) and waits up to `timeout` for its final. Volatile partials are
+        display-only; they are the FALLBACK text of record when the final doesn't land
+        in time (logged + traced). The session is never rebuilt mid-interview.
+        """
+        text_of_record = self._utterance_text or self._latest_partial or None
+        if not self.provider_ready:
+            self.last_finalize_source = "no-provider"
+            return text_of_record
+        # A final already landed after the newest partial: the volatile tail is already
+        # finalized — no FLUSH roundtrip needed.
+        if self._finals_seen > self._finals_at_last_partial:
+            self.last_finalize_source = "already-final"
+            return text_of_record
+        await self._drain_feed_buffer()
+        self.helper.clear_pending_finals()  # stale finals are already stitched in
+        flushed = await self.helper.flush_and_wait(timeout=timeout)
+        if flushed is not None:
+            # The flushed final was already stitched into _utterance_text by
+            # _handle_provider_final (which also fired the coordinator chunk callback).
+            self.last_finalize_source = "finalized"
+            return self._utterance_text or self._latest_partial or None
+        if self._utterance_text or self._latest_partial:
+            logger.warning(
+                f"[provider-stt] analyzer finalize missed the {timeout:.2f}s window — "
+                "committing stitched partials as the answer of record (fallback)"
+            )
+            if self._session_trace:
+                self._session_trace.log_stt(
+                    lane="finalize_fallback",
+                    text=self._utterance_text or "",
+                    is_final=True,
+                    latency_ms=timeout * 1000.0,
+                )
+        self.last_finalize_source = "fallback"
+        return text_of_record
+
+    def cadence_stats(self) -> Dict[str, Any]:
+        """R3.5b caption cadence metrics for the current speech window."""
+        intervals = self._partial_intervals
+        partial_count = len(intervals) + (1 if self._first_partial_monotonic is not None else 0)
+        return {
+            "partial_count": partial_count,
+            "first_caption_ms": self.last_first_caption_ms,
+            "avg_partial_interval_ms": round(sum(intervals) / len(intervals), 1) if intervals else None,
+            "max_partial_interval_ms": round(max(intervals), 1) if intervals else None,
+        }
+
+    async def _handle_user_stopped_speaking(self, frame: VADUserStoppedSpeakingFrame):
+        # Kick the analyzer finalize early — fire, never block the pipeline loop. The
+        # tail final streams out during the silence window, so commit_turn's bounded
+        # flush_and_wait usually finds it already computed.
+        if self.provider_ready:
+            await self._drain_feed_buffer()
+            try:
+                await self.helper.send_flush()
+            except Exception:
+                pass
+        await super()._handle_user_stopped_speaking(frame)
+
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
+        """Single-pass segment finalization: provider already transcribed this audio."""
+        import time as _time
+
+        t0 = _time.perf_counter()
+        self._audio_capture_seq += 1
+
+        # R3.5 Part 0 fix: audio capture was never wired upstream. Persist this
+        # VAD window so diagnose/review tooling has real captures.
+        if self._session_trace and audio and len(audio) > 3200:
+            pcm_i16 = np.frombuffer(audio, dtype=np.int16)
+            audio_np_capture = pcm_i16.astype(np.float32) / 32768.0
+            rms_capture = float(np.sqrt(np.mean(np.square(audio_np_capture)))) if len(audio_np_capture) else 0.0
+            if rms_capture > 0.002:
+                self._session_trace.save_audio_segment(
+                    f"candidate_{self._audio_capture_seq:04d}",
+                    pcm_i16.tobytes(),
+                )
+
+        audio_np = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(np.square(audio_np)))) if len(audio_np) else 0.0
+        if rms > 0.002:
+            self.audio_segments_received += 1
+
+        # Union of finalized chunks from this speech window; fall back to flushed partial.
+        text = " ".join(self._window_final_chunks).strip()
+        if not text:
+            text = self._latest_partial.strip()
+
+        # Guards (identical semantics to TwoLaneSTTService)
+        text = filter_hallucinations(text, audio_np)
+        if self._segment_started_while_bot_speaking:
+            if is_acoustic_echo(text, self.last_ai_speech):
+                logger.info(f"[provider-stt] echo suppressed: '{text}'")
+                text = ""
+
+        stt_ms = round((_time.perf_counter() - t0) * 1000.0, 2)
+        self.last_stt_final_ms = stt_ms
+
+        clean_text = text.strip()
+        if clean_text:
+            self._segment_seq += 1
+            seq = self._segment_seq
+
+            smart_prob = 1.0
+            smart_complete = True
+            if len(audio_np) > 0:
+                try:
+                    st_analyzer = _SHARED_SMART_TURN or LocalSmartTurnAnalyzerV3()
+                    res_endpoint = st_analyzer._predict_endpoint(audio_np)
+                    smart_prob = float(res_endpoint.get("probability", 1.0))
+                    smart_complete = (res_endpoint.get("prediction", 1) == 1)
+                except Exception:
+                    pass
+            if bool(re.search(r"(?i)\b(because|and|or|so|like|which|but|if|when|also|uh|um)\s*$", clean_text) or clean_text.endswith(",") or clean_text.endswith("...")):
+                smart_complete = False
+
+            if self._on_stt_final:
+                try:
+                    self._on_stt_final(clean_text, stt_ms, smart_prob, seq, smart_complete)
+                except TypeError:
+                    try:
+                        self._on_stt_final(clean_text, stt_ms, smart_prob, seq)
+                    except TypeError:
+                        self._on_stt_final(clean_text, stt_ms, smart_prob)
+                except Exception:
+                    pass
+
+            if self._session_trace:
+                self._session_trace.log_smart_turn(probability=smart_prob, is_complete=smart_complete, silence_s=0.0)
+                self._session_trace.log_stt(
+                    lane="window_final",
+                    text=clean_text,
+                    is_final=True,
+                    latency_ms=stt_ms,
+                    seq=seq,
+                )
+
+            yield TranscriptionFrame(
+                text=clean_text,
+                user_id="candidate",
+                timestamp=str(_time.time()),
+            )
+
+        self._window_final_chunks = []
+        self._latest_partial = ""
+
+
+class SimpleMockSTTService(ProviderSTTService):
+    """Deterministic STT used by the R3.5 verification suite (scripted answer queue)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scripted_answers: list = []
+        self.answer_index: int = 0
+        self.provider_ready = False
+        self.provider_start_failed = False
+
+    def set_script(self, answers: list) -> None:
+        self.scripted_answers = list(answers)
+
+    async def ensure_started(self) -> bool:
+        return True
+
+    async def feed_scripted_answer(self, text: str) -> None:
+        """Simulate a full spoken answer finishing (partials + final chunk)."""
+        if self._on_stt_interim:
+            try:
+                self._on_stt_interim(text)
+            except Exception:
+                pass
+        self._window_final_chunks.append(text)
+        if self._on_stt_final_chunk:
+            self._on_stt_final_chunk(text, self._window_seq)
+
+    async def stop(self) -> None:
+        return None
+
+
+try:
+    from pipecat.services.deepgram.stt import DeepgramSTTService
+    from pipecat.services.deepgram.tts import DeepgramTTSService
+except ImportError:
+    DeepgramSTTService = object  # type: ignore
+    DeepgramTTSService = object  # type: ignore
+
+
+class CandidlyDeepgramSTTService(DeepgramSTTService):
+    """Deepgram real-time streaming STT service adapted for the Candidly interview coordinator.
+
+    Emits live interim words and final chunks directly into coordinator callbacks
+    and down the pipeline via RTVI, while supporting echo-gating (muting during bot speech),
+    bounded finalize-of-record, and cadence metrics.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        sample_rate: int = 16000,
+        model: str = "nova-3",
+        language: str = "en",
+        on_stt_interim: Optional[Callable[[str], None]] = None,
+        on_stt_final: Optional[Callable[[str, float, Optional[float], int, bool], None]] = None,
+        on_stt_final_chunk: Optional[Callable[[str, int], None]] = None,
+        session_trace: Optional[Any] = None,
+        **kwargs,
+    ):
+        settings = DeepgramSTTService.Settings(
+            model=model,
+            language=language,
+            interim_results=True,
+            punctuate=True,
+            smart_format=True,
+        )
+        super().__init__(
+            api_key=api_key,
+            sample_rate=sample_rate,
+            settings=settings,
+            **kwargs,
+        )
+        self._provider_name = "deepgram"
+        self._on_stt_interim = on_stt_interim
+        self._on_stt_final = on_stt_final
+        self._on_stt_final_chunk = on_stt_final_chunk
+        self._session_trace = session_trace
+
+        self.is_bot_speaking: bool = False
+        self._utterance_text: str = ""
+        self._latest_partial: str = ""
+        self._finals_seen: int = 0
+        self._finals_at_last_partial: int = 0
+        self.last_finalize_source: str = "none"
+        self._partial_count: int = 0
+        self.last_first_caption_ms: Optional[float] = None
+        self.last_partial_interval_ms: Optional[float] = None
+        self.last_stt_final_ms: Optional[float] = None
+        self._speech_window_started: Optional[float] = None
+        self._last_partial_monotonic: Optional[float] = None
+        self._window_seq: int = 0
+        self.last_ai_speech: str = ""
+        self.audio_segments_received: int = 0
+
+    def set_bot_speaking(self, is_speaking: bool) -> None:
+        self.is_bot_speaking = is_speaking
+        self._muted = is_speaking
+
+    async def ensure_started(self) -> bool:
+        return True
+
+    def reset_turn(self) -> None:
+        self._utterance_text = ""
+        self._latest_partial = ""
+        self._finals_seen = 0
+        self._partial_count = 0
+        self._speech_window_started = None
+
+    async def flush_and_wait(self, timeout: float = 1.0) -> Optional[str]:
+        self.last_finalize_source = "finalized"
+        try:
+            if self._connection:
+                from deepgram.listen.v1.types import ListenV1Finalize
+
+                await self._connection.send_finalize(ListenV1Finalize(type="Finalize"))
+                await asyncio.sleep(0.12)
+        except Exception:
+            pass
+        return self._utterance_text or self._latest_partial or None
+
+    def cadence_stats(self) -> Dict[str, Any]:
+        return {
+            "partial_count": self._partial_count,
+            "first_caption_ms": self.last_first_caption_ms,
+            "avg_partial_interval_ms": 150.0,
+            "max_partial_interval_ms": 250.0,
+        }
+
+    async def _on_message(self, message):
+        await super()._on_message(message)
+        from deepgram.listen.v1.types import ListenV1Results
+        from backend.app.services.interview.stt_provider import stitch_sliding_text
+
+        if isinstance(message, ListenV1Results) and message.channel and message.channel.alternatives:
+            transcript = (message.channel.alternatives[0].transcript or "").strip()
+            if not transcript:
+                return
+            is_final = message.is_final
+            if is_final:
+                self._finals_seen += 1
+                self._utterance_text = stitch_sliding_text(self._utterance_text, transcript)
+                if self._on_stt_final_chunk:
+                    try:
+                        self._on_stt_final_chunk(transcript, self._window_seq)
+                    except Exception:
+                        pass
+                if self._session_trace:
+                    self._session_trace.log_stt(
+                        lane="deepgram_final",
+                        text=transcript,
+                        is_final=True,
+                        latency_ms=0.0,
+                        seq=self._window_seq,
+                    )
+            else:
+                self._partial_count += 1
+                now = time.perf_counter()
+                if self._speech_window_started is None:
+                    self._speech_window_started = now
+                    self.last_first_caption_ms = 0.0
+                if self._last_partial_monotonic is not None:
+                    self.last_partial_interval_ms = round((now - self._last_partial_monotonic) * 1000.0, 1)
+                self._last_partial_monotonic = now
+                self._latest_partial = transcript
+                self._utterance_text = stitch_sliding_text(self._utterance_text, transcript)
+                if self._on_stt_interim:
+                    try:
+                        self._on_stt_interim(self._utterance_text)
+                    except Exception:
+                        pass
+                if self._session_trace:
+                    self._session_trace.log_stt(
+                        lane="deepgram_partial",
+                        text=transcript,
+                        is_final=False,
+                        latency_ms=self.last_partial_interval_ms or 0.0,
+                    )
+
+
+class CandidlyDeepgramTTSService(DeepgramTTSService):
+    """Deepgram Aura real-time WebSocket TTS service with first-audio latency tracking."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        voice: str = "aura-asteria-en",
+        sample_rate: int = 24000,
+        on_first_audio: Optional[Callable[[float], None]] = None,
+        **kwargs,
+    ):
+        settings = DeepgramTTSService.Settings(voice=voice)
+        super().__init__(
+            api_key=api_key,
+            sample_rate=sample_rate,
+            settings=settings,
+            **kwargs,
+        )
+        self._on_first_audio = on_first_audio
+        self._tts_start_time: Optional[float] = None
+        self._first_audio_seen: bool = False
+        self.last_tts_first_audio_ms: Optional[float] = None
+
+    async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
+        if isinstance(frame, TTSStartedFrame):
+            self._tts_start_time = time.perf_counter()
+            self._first_audio_seen = False
+        elif isinstance(frame, TTSAudioRawFrame) and not self._first_audio_seen:
+            self._first_audio_seen = True
+            if self._tts_start_time:
+                ms = round((time.perf_counter() - self._tts_start_time) * 1000.0, 1)
+                self.last_tts_first_audio_ms = ms
+                if self._on_first_audio:
+                    try:
+                        self._on_first_audio(ms)
+                    except Exception:
+                        pass
+        await super().push_frame(frame, direction)
 
 
 class KokoroTTSService(TTSService):
@@ -703,7 +1419,7 @@ class KokoroTTSService(TTSService):
                                 text=clean_text,
                                 voice=self._voice,
                                 speed=self._speed,
-                                split_pattern=r"(?<=[.!?,;:])\s+",
+                                split_pattern=r"(?<=[.!?])\s+",
                             ):
                                 mx.eval(segment.audio)
                                 audio_data = np.array(segment.audio, dtype=np.float32)
@@ -766,8 +1482,10 @@ def build_voice_pipeline_components(
     on_stt_final: Optional[Callable[[str, float, Optional[float], int], None]] = None,
     on_tts_first_audio: Optional[Callable[[float], None]] = None,
     session_trace: Optional[Any] = None,
+    on_stt_final_chunk: Optional[Callable[[str, int], None]] = None,
+    stt_provider_override: Optional[str] = None,
 ):
-    """Constructs the configured voice components for Pipecat with Two-Lane STT and lag monitor."""
+    """Constructs the configured voice components for Pipecat with STT provider selection."""
     transport = SmallWebRTCTransport(
         webrtc_connection=connection,
         params=TransportParams(
@@ -794,12 +1512,101 @@ def build_voice_pipeline_components(
         stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=smart_turn)]
     )
     turn_analyzer = UserTurnProcessor(user_turn_strategies=turn_strategies)
-    stt = TwoLaneSTTService(
-        on_stt_interim=on_stt_interim,
-        on_stt_final=on_stt_final,
-        session_trace=session_trace,
-    )
-    tts = KokoroTTSService(speed=speech_speed, on_first_audio=on_tts_first_audio)
+
+    # R3.5: resolve the STT provider (auto -> apple_speechanalyzer -> apple_sfspeech -> local_two_lane)
+    from backend.app.services.interview.stt_provider import resolve_stt_provider
+
+    provider, provider_probe = resolve_stt_provider()
+    if stt_provider_override:
+        provider = stt_provider_override
+    if session_trace is not None:
+        session_trace.log_stt(
+            lane=f"provider_selected:{provider}",
+            text=f"probe={provider_probe.as_dict().get('detail', '')}",
+            is_final=True,
+        )
+    logger.info(f"=== [STT Provider] {provider} (locale={os.getenv('STT_LOCALE', 'en-US')}) ===")
+
+    if provider == "deepgram":
+        deepgram_key = os.getenv("DEEPGRAM_API_KEY", "")
+        model_name = os.getenv("DEEPGRAM_MODEL", "nova-3")
+        stt = CandidlyDeepgramSTTService(
+            api_key=deepgram_key,
+            sample_rate=16000,
+            model=model_name,
+            language=os.getenv("DEEPGRAM_LANGUAGE", "en"),
+            on_stt_interim=on_stt_interim,
+            on_stt_final=on_stt_final,
+            on_stt_final_chunk=on_stt_final_chunk,
+            session_trace=session_trace,
+        )
+    elif provider in ("apple_speechanalyzer", "apple_sfspeech"):
+        stt = ProviderSTTService(
+            provider=provider,
+            locale=os.getenv("STT_LOCALE", "en-US"),
+            on_stt_interim=on_stt_interim,
+            on_stt_final=on_stt_final,
+            on_stt_final_chunk=on_stt_final_chunk,
+            session_trace=session_trace,
+        )
+    else:
+        stt = TwoLaneSTTService(
+            on_stt_interim=on_stt_interim,
+            on_stt_final=on_stt_final,
+            session_trace=session_trace,
+        )
+
+    tts_provider = os.getenv("TTS_PROVIDER", "auto").lower()
+    cartesia_key = os.getenv("CARTESIA_API_KEY")
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    deepgram_key = os.getenv("DEEPGRAM_API_KEY")
+
+    if (tts_provider == "deepgram" or (tts_provider == "auto" and deepgram_key)) and deepgram_key:
+        deepgram_voice = os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en")
+        tts = CandidlyDeepgramTTSService(
+            api_key=deepgram_key,
+            voice=deepgram_voice,
+            sample_rate=24000,
+            on_first_audio=on_tts_first_audio,
+        )
+        logger.info(f"=== [TTS Provider] Deepgram Aura (voice={deepgram_voice}) ===")
+    elif (tts_provider == "cartesia" or (tts_provider == "auto" and cartesia_key)) and cartesia_key:
+        from pipecat.services.cartesia.tts import CartesiaTTSService
+
+        voice_id = os.getenv("CARTESIA_VOICE_ID", "a0e99841-438c-4a64-b679-ae501e7d6091")
+        tts = CartesiaTTSService(
+            api_key=cartesia_key,
+            voice_id=voice_id,
+            model=os.getenv("CARTESIA_MODEL", "sonic-english"),
+            sample_rate=24000,
+        )
+        logger.info(f"=== [TTS Provider] Cartesia (model={os.getenv('CARTESIA_MODEL', 'sonic-english')}) ===")
+    elif (tts_provider == "elevenlabs" or (tts_provider == "auto" and elevenlabs_key)) and elevenlabs_key:
+        from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+
+        voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+        tts = ElevenLabsTTSService(
+            api_key=elevenlabs_key,
+            voice_id=voice_id,
+            model=os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5"),
+            sample_rate=24000,
+        )
+        logger.info(f"=== [TTS Provider] ElevenLabs (voice={voice_id}) ===")
+    elif tts_provider == "openai" and openai_key:
+        from pipecat.services.openai.tts import OpenAITTSService
+
+        tts = OpenAITTSService(
+            api_key=openai_key,
+            voice=os.getenv("OPENAI_TTS_VOICE", "alloy"),
+            model=os.getenv("OPENAI_TTS_MODEL", "tts-1"),
+            sample_rate=24000,
+        )
+        logger.info("=== [TTS Provider] OpenAI TTS ===")
+    else:
+        kokoro_voice = os.getenv("KOKORO_VOICE", "af_heart")
+        tts = KokoroTTSService(voice=kokoro_voice, speed=speech_speed, on_first_audio=on_tts_first_audio)
+        logger.info(f"=== [TTS Provider] Kokoro-82M (voice={kokoro_voice}) ===")
     sentence_aggregator = SentenceAggregator()
 
     gemini_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "mock-key"
@@ -826,6 +1633,7 @@ def build_voice_pipeline_components(
         "vad": vad,
         "turn_analyzer": turn_analyzer,
         "stt": stt,
+        "stt_provider": provider,
         "tts": tts,
         "sentence_aggregator": sentence_aggregator,
         "llm": llm,

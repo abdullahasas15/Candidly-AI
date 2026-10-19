@@ -56,9 +56,9 @@ You will receive:
 3. The job interview blueprint sections, including skills and core expectations.
 
 Your task:
-1. Generate an `intro_hook`: A natural, conversational topic phrase describing something real from their background (recent project, thesis, notable stack) to follow up on (e.g. 'your work reducing event streaming latency using lock-free rings' or 'your migration of the messaging pipeline'). Do NOT state claims as facts, and do not include prefixes like 'I saw' or 'I noticed'. Keep it to a concise phrase.
+1. Generate an `intro_hook`: A complete, polite, conversational opening question inviting the candidate to introduce themselves and highlight their background (e.g. 'To kick things off, could you briefly introduce yourself, tell me about your background, and share some highlights from your recent work?'). Always formulate as a full, complete question ending with a question mark.
 2. Generate `per_skill_probes`: For each skill in the blueprint, examine the resume for concrete evidence (projects, accomplishments, responsibilities).
-   - If the candidate's resume has REAL EVIDENCE for that skill: write one spoken probe asking about that specific real-world work. Must be <= 35 words, scenario-grounded, and end with a single question mark.
+   - If the candidate's resume has REAL EVIDENCE for that skill: write one complete, scenario-grounded spoken technical question asking about that specific real-world work (e.g. 'Could you walk me through how you designed X?'). Must be <= 35 words and end with a single question mark. NEVER output a raw sentence fragment or topic phrase.
    - If the candidate has NO direct evidence on the resume for that skill: value MUST be null. Never invent or hallucinate experience.
 3. Generate `claims_to_verify`: List 1 to 3 notable metrics, claims, or achievements from the resume that the interviewer should fact-check.
 
@@ -66,19 +66,46 @@ Return valid JSON conforming to the schema.
 """
 
 
+def _sanitize_probe_text(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    # If the text is a fragment like "your work designing...", turn it into a question
+    lowered = cleaned.lower()
+    if lowered.startswith("your work") or lowered.startswith("the project") or lowered.startswith("designing") or lowered.startswith("reducing"):
+        cleaned = f"Could you walk me through {cleaned[0].lower() + cleaned[1:]}"
+    if not cleaned.endswith("?"):
+        cleaned = re.sub(r"[\.\s]+$", "", cleaned) + "?"
+    return cleaned
+
+
 class CandidatePersonalizationOutput(BaseModel):
     intro_hook: str = Field(
         ...,
-        description="Conversational topic phrase linking candidate's actual background/projects to follow up on. E.g. 'your work reducing event streaming latency'."
+        description="A complete, professional spoken question inviting the candidate to introduce themselves and share their background."
     )
     per_skill_probes: Dict[str, Optional[str]] = Field(
         default_factory=dict,
-        description="Map of skill_id to a targeted probe text ONLY where the resume shows genuine experience. If no evidence on the resume for that skill, value must be null."
+        description="Map of skill_id to a targeted probe question ONLY where the resume shows genuine experience. Must be a complete question ending with '?'."
     )
     claims_to_verify: List[str] = Field(
         default_factory=list,
         description="1 to 3 factual claims from the resume worth verifying (e.g. specific metrics, ownership, tools)."
     )
+
+    @field_validator("intro_hook", mode="before")
+    @classmethod
+    def normalize_intro(cls, v):
+        if isinstance(v, str):
+            cleaned = v.strip()
+            if cleaned and not cleaned.endswith("?"):
+                cleaned = re.sub(r"[\.\s]+$", "", cleaned) + "?"
+            if cleaned.lower().startswith("your work") or not any(cleaned.lower().startswith(w) for w in ["to ", "could you", "can you", "please", "walk me", "tell me"]):
+                return "To start off, could you please introduce yourself, tell me about your background, and share some highlights from your key projects and experiences?"
+            return cleaned
+        return "To start off, could you please introduce yourself, tell me about your background, and share some highlights from your key projects and experiences?"
 
     @field_validator("per_skill_probes", mode="before")
     @classmethod
@@ -96,8 +123,10 @@ class CandidatePersonalizationOutput(BaseModel):
                                 text = str(val) if val is not None else None
                                 break
                     if s_id:
-                        res[str(s_id)] = text
+                        res[str(s_id)] = _sanitize_probe_text(text)
             return res
+        if isinstance(v, dict):
+            return {k: _sanitize_probe_text(val) for k, val in v.items()}
         return v
 
 

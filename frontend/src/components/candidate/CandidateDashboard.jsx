@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Video, Mic, MicOff, Camera, CameraOff, Volume2, ShieldCheck, CheckCircle2, X,
   AlertCircle, ArrowLeft, Play, Sparkles, RefreshCw, Clock, Award,
@@ -37,10 +37,14 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     localStorage.getItem('candidly-auth-token-candidate') ||
     localStorage.getItem('candidly-auth-token');
 
-  // Fetch applications for candidate
-  const fetchApplications = async () => {
-    setLoading(true);
-    setError(null);
+  // Fetch applications for candidate.
+  // silent=true is for background polling: don't toggle the full-tab spinner
+  // (the applications tab renders from `loading` and would flicker every poll).
+  const fetchApplications = async (silent = false) => {
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const token = getCandidateToken();
       const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
@@ -57,9 +61,13 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         setActivePortalTab('browse');
       }
     } catch (err) {
-      setError(err.message);
+      if (!silent) {
+        setError(err.message);
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -67,9 +75,32 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     fetchApplications();
   }, [authUser]);
 
+  // Realtime "Preparing Interview..." -> "Start Interview" enablement.
+  // A freshly submitted application has NO generation-run row yet, so its
+  // interview_generation_status is null — the old running/queued-only poll
+  // condition never fired and the button stayed disabled until a manual
+  // refresh. Poll (silently) while anything is still preparing.
+  const pollStartRef = useRef(0);
   useEffect(() => {
-    if (!applications.some((app) => app.interview_generation_status === 'running' || app.interview_generation_status === 'queued')) return undefined;
-    const interval = setInterval(fetchApplications, 3000);
+    const needsPoll = applications.some((app) =>
+      app.interview_generation_status === 'running'
+      || app.interview_generation_status === 'queued'
+      || (app.status === 'submitted' && !app.interview_ready && !app.interview_completed)
+    );
+    if (!needsPoll) {
+      pollStartRef.current = 0;
+      return undefined;
+    }
+    if (!pollStartRef.current) {
+      pollStartRef.current = Date.now();
+    }
+    // Cap: blueprint generation can take minutes; stop polling long-stuck rows.
+    // The backend self-heals succeeded-but-session-less rows on any fetch, so a
+    // later refresh still turns the button on.
+    if (Date.now() - pollStartRef.current > 360000) {
+      return undefined;
+    }
+    const interval = setInterval(() => fetchApplications(true), 3000);
     return () => clearInterval(interval);
   }, [applications]);
 
@@ -105,15 +136,17 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
       if (!res.ok) {
         throw new Error(payload.detail || 'Could not start practice interview');
       }
-      const startRes = await fetch(`/api/interview-sessions/${payload.session_id}/start`, {
+      // The practice-interview endpoint returns the session under `id` (no `session_id`).
+      const sessionId = payload.session_id || payload.id;
+      const startRes = await fetch(`/api/interview-sessions/${sessionId}/start`, {
         method: 'POST',
         headers,
       });
-      const startedPayload = startRes.ok ? await startRes.json() : { id: payload.session_id };
+      const startedPayload = startRes.ok ? await startRes.json() : { id: sessionId };
       setIsPracticeMode(true);
       setInterviewSession({
         ...startedPayload,
-        id: payload.session_id,
+        id: sessionId,
         job_title: payload.job_title || 'Practice Interview (General Warm-Up)',
         duration_mins: payload.duration_mins || 5,
       });

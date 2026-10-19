@@ -20,10 +20,29 @@ Initializes:
 
 import json
 import logging
+import re
 from typing import Dict, Any, List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+
+
+def clean_role_title_for_speech(role: Optional[str]) -> str:
+    """Normalize role titles for spoken text so hyphens/dashes are never spoken as 'minus' (e.g. 'SDE -1' -> 'Software Development Engineer 1')."""
+    if not role:
+        return "Software Engineer"
+    cleaned = str(role)
+    cleaned = re.sub(r"\s*[\-–—_]+\s*", " ", cleaned).strip()
+    cleaned = re.sub(r"\bSDE\s*I\b", "Software Development Engineer 1", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*II\b", "Software Development Engineer 2", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*III\b", "Software Development Engineer 3", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*1\b", "Software Development Engineer 1", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*2\b", "Software Development Engineer 2", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*3\b", "Software Development Engineer 3", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\b", "Software Development Engineer", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSWE\b", "Software Engineer", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 from backend.app.models import (
     InterviewSession,
@@ -116,8 +135,9 @@ async def materialize_blueprint_session_plan(
     ]
     agenda_str = ", ".join(spoken_agenda[:-1]) + f", and {spoken_agenda[-1]}" if len(spoken_agenda) > 1 else (spoken_agenda[0] if spoken_agenda else "technical topics")
     job_role_title = getattr(job, "job_title", None) or getattr(job, "title", "the position")
+    clean_job_title = clean_role_title_for_speech(job_role_title)
     welcome_text = (
-        f"Hi there! Welcome to your interview for the {job_role_title} role. "
+        f"Hi there! Welcome to your interview for the {clean_job_title} role. "
         f"Today we will cover {agenda_str}, followed by time for any questions you have for us. "
         "Does that sound good to you?"
     )
@@ -138,8 +158,11 @@ async def materialize_blueprint_session_plan(
     )
     q_index += 1
 
-    # Intro Section
+    # Intro Section: Always static as explicitly requested by candidate/recruiter workflow
     intro_sec = next((s for s in sections if s.section_type == "intro"), None)
+    static_intro_question = (
+        "To start off, could you please introduce yourself, tell me about your background, and share some highlights from your key projects and experiences?"
+    )
     db.add(
         InterviewQuestion(
             session_id=session.id,
@@ -147,12 +170,12 @@ async def materialize_blueprint_session_plan(
             skill_name="Introduction",
             skill_category="Background",
             priority_tier="P0",
-            question_text=intro_hook_text,
+            question_text=static_intro_question,
             kind="intro_hook",
             section_id=intro_sec.id if intro_sec else None,
-            personalization_context={"source": "candidate_personalization" if personalization else "default"},
+            personalization_context={"source": "static_standard_intro"},
             question_state="queued",
-            expected_key_points=["Relevant project background", "Technical interests"],
+            expected_key_points=["Candidate self-introduction", "Relevant project background", "Technical experience highlights"],
         )
     )
     q_index += 1
@@ -301,7 +324,7 @@ async def materialize_blueprint_session_plan(
             skill_name="Candidate Q&A",
             skill_category="Wrap-Up",
             priority_tier="P0",
-            question_text="Now I would love to open up the floor to you. What questions do you have about the team, our technical stack, or this role?",
+            question_text="Now I would love to open up the floor to you. What questions or suggestions do you have for us regarding the team, our technical stack, or this role?",
             kind="candidate_qa",
             section_id=qa_sec.id if qa_sec else None,
             question_state="queued",

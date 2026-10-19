@@ -125,13 +125,38 @@ class SessionTrace:
             "silence_s": round(silence_s, 3),
         })
 
-    def log_commit(self, turn_id: str, reason: str, full_answer: str, word_count: int, speech_duration_s: float) -> None:
+    def log_commit(
+        self,
+        turn_id: str,
+        reason: str,
+        full_answer: str,
+        word_count: int,
+        speech_duration_s: float,
+        partials_text: Optional[str] = None,
+        finalized_text: Optional[str] = None,
+        finalize_source: Optional[str] = None,
+        finalize_ms: Optional[float] = None,
+        partial_count: Optional[int] = None,
+        first_caption_ms: Optional[float] = None,
+        avg_partial_interval_ms: Optional[float] = None,
+        max_partial_interval_ms: Optional[float] = None,
+    ) -> None:
+        """R3.5b: COMMIT carries the text-of-record chain — live partials vs the
+        analyzer's finalized text vs what was persisted — plus commit timings."""
         self._append_event("COMMIT", {
             "turn_id": turn_id,
             "reason": reason,
             "word_count": word_count,
             "speech_duration_s": round(speech_duration_s, 3),
             "full_answer": full_answer,
+            "partials_text": partials_text,
+            "finalized_text": finalized_text,
+            "finalize_source": finalize_source,
+            "finalize_ms": finalize_ms,
+            "partial_count": partial_count,
+            "first_caption_ms": first_caption_ms,
+            "avg_partial_interval_ms": avg_partial_interval_ms,
+            "max_partial_interval_ms": max_partial_interval_ms,
         })
 
     def log_decision(

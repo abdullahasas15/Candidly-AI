@@ -6,8 +6,8 @@ resilience, latency instrumentation, and post-interview Judge triggering.
 """
 
 import asyncio
-from datetime import datetime, timezone
 import os
+from datetime import datetime, timezone
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -52,6 +52,7 @@ from backend.app.models import (
 )
 from backend.app.services.interview.followup_policy import (
     answer_candidate_closing_question,
+    detect_fast_intent,
     pick_varied_ack,
     stream_turn_decision,
     stream_section_turn_decision,
@@ -70,10 +71,15 @@ from backend.app.services.interview.turn_evaluator import evaluate_interview_ses
 from backend.app.services.interview.voice_pipeline import (
     build_voice_pipeline_components,
     pre_synthesize_phrase,
+    is_acoustic_echo,
 )
 
 MAX_PAUSE_WINDOW_SECONDS = 15 * 60  # 15 minutes max pause window for reconnect
-MIN_INTERRUPTION_SPEECH_DURATION_SECS = 0.35  # 350ms minimum sustained speech before barge-in triggers
+MIN_INTERRUPTION_SPEECH_DURATION_SECS = 0.45  # 450ms (~400-500ms) minimum sustained speech before barge-in triggers (R3.4c)
+T_MIN_SILENCE_SECS = 1.5           # 1.5s silence required before turn ends if Smart Turn says complete (R3.4c)
+T_MAX_SILENCE_SECS = 3.0           # 3.0s turn ends if Smart Turn says incomplete (R3.4c)
+T_CONJUNCTION_SILENCE_SECS = 4.0   # Trailing conjunction/filler extends wait to 4.0s (R3.4c)
+MERGE_WINDOW_SECS = 2.0            # 2.0s merge window after commit to cancel running decision & merge (R3.4c)
 
 _BACKCHANNEL_PHRASES = {
     "yeah", "yes", "yep", "uh-huh", "uh huh", "mhm", "mm-hmm", "mm hmm",
@@ -196,8 +202,13 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         self._silence_task: Optional[asyncio.Task] = None
         self._last_activity_monotonic: float = time.monotonic()
         self._silence_nudge_count: int = 0
+        self._consecutive_fragment_count: int = 0
         self._hold_extension_secs: float = 0.0
         self._audio_segments_received_fn = lambda: 1
+        self._stt_service: Optional[Any] = None
+        self._last_commit_monotonic: float = 0.0
+        self._is_ducked: bool = False
+        self._last_stt_is_complete: bool = True
 
     def record_stt_interim(self, interim_text: str) -> None:
         """Lane 1 interim caption: update UI live as words are spoken."""
@@ -210,13 +221,21 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             self.emit_ui_state("candidate-speech-transcript", {"text": live_text, "is_interim": True})
         )
 
-    def record_stt_metrics(self, text: str, stt_ms: float, confidence: Optional[float] = None, seq: int = 0) -> None:
+    def record_stt_metrics(
+        self,
+        text: str,
+        stt_ms: float,
+        confidence: Optional[float] = None,
+        seq: int = 0,
+        is_complete: bool = True,
+    ) -> None:
         """Lane 2 accuracy segment: append to accumulated speech and update UI."""
         clean = (text or "").strip()
         if not clean:
             return
         self._last_stt_final_ms = stt_ms
         self._last_stt_confidence = confidence
+        self._last_stt_is_complete = is_complete
         self._last_activity_monotonic = time.monotonic()
         self._accumulated_speech_segments.append(clean)
         self._accumulated_full_text = " ".join(self._accumulated_speech_segments).strip()
@@ -230,7 +249,11 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         self._schedule_turn_commit()
 
     def _schedule_turn_commit(self) -> None:
-        """Schedule turn commit with merge window (1.5s) and trailing-thought detection (up to 2.5s)."""
+        """Schedule turn commit with Smart Turn gating (R3.4c):
+        - Silence required before a turn may end: T_MIN 1.5s, ends only if Smart Turn says complete.
+        - Otherwise waits until T_MAX 3.0s for incomplete utterances/mid-answer pauses.
+        - Trailing conjunction/filler (and, or, but, because, so, like, uh, um) extends wait to 4.0s.
+        """
         if self._commit_timer_task and not self._commit_timer_task.done():
             self._commit_timer_task.cancel()
 
@@ -238,12 +261,23 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         if not text:
             return
 
-        trailing_thought = bool(
-            re.search(r"(?i)\b(because|and|or|so|like|which|but|if|when|also)\s*$", text)
+        trailing_conjunction = bool(
+            re.search(r"(?i)\b(because|and|or|so|like|which|but|if|when|also|uh|um)\s*$", text)
             or text.endswith(",")
         )
-        # Wait up to 2.5s if trailing thought, else 1.2s silence
-        timeout = 2.5 if trailing_thought else 1.2
+
+        is_complete = getattr(self, "_last_stt_is_complete", True)
+        if trailing_conjunction:
+            timeout = T_CONJUNCTION_SILENCE_SECS  # 4.0s
+            reason = "trailing_conjunction_4s"
+        elif is_complete:
+            timeout = T_MIN_SILENCE_SECS  # 1.5s
+            reason = "smart_turn_complete_1.5s"
+        else:
+            timeout = T_MAX_SILENCE_SECS + 0.05  # 3.05s so 3.0s pause cancels before commit
+            reason = "incomplete_wait_tmax_3s"
+
+        logger.info(f"Scheduled turn commit in {timeout:.2f}s ({reason}) for '{text[:40]}...'")
         self._commit_timer_task = asyncio.create_task(self._commit_turn_after_delay(timeout))
 
     async def _commit_turn_after_delay(self, delay: float) -> None:
@@ -270,26 +304,47 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             re.match(r"^(yes|yep|yeah|sure|ready|sounds good|i am|ok|okay|let's go|let's do it)[.!]?$", candidate_text.lower().strip())
         ) or (self.current_phase in (InterviewPhase.GREETING, InterviewPhase.READY_CHECK))
 
-        if len(words) < 6 and not is_affirmative and self.current_phase == InterviewPhase.DEEP_DIVE:
-            logger.info(f"Fragment Guard triggered on short answer ({len(words)} words): '{candidate_text}'")
-            hold_reply = "Please go on, I'm listening."
-            self.last_ai_speech = hold_reply
-            self.session_trace.log_commit(
-                turn_id=str(curr_turn_id),
-                reason="fragment_guard_hold",
-                full_answer=candidate_text,
-                word_count=len(words),
-                speech_duration_s=self._candidate_speech_duration,
-            )
-            await self.persist_turn(
-                turn_type=TurnType.CLARIFICATION.value,
-                speaker="ai",
-                text=hold_reply,
-            )
-            await self.emit_ui_state("ai-speech-transcript", {"text": hold_reply, "phase": self.current_phase.value})
-            await self.emit_ui_state("interview-bot-state", {"state": "listening"})
-            await self.push_frame(TTSSpeakFrame(hold_reply))
-            return
+        # R3.4b: Fast intents ("I don't know", "no", "not sure", "pass", "haven't done that", hold, clarify, repeat)
+        # are conversational intents, NOT fragments!
+        fast_intent = detect_fast_intent(
+            candidate_text,
+            follow_up_count=len(self.section_state.get("asked_probe_ids", set())) if isinstance(self.section_state, dict) else 0,
+            question_text=getattr(self, "current_question_text", ""),
+        )
+
+        if fast_intent is not None:
+            self._consecutive_fragment_count = 0
+        elif len(words) < 6 and not is_affirmative and self.current_phase == InterviewPhase.DEEP_DIVE:
+            self._consecutive_fragment_count += 1
+            if self._consecutive_fragment_count >= 2:
+                logger.info(
+                    f"Fragment Guard: 2 consecutive 'please go on' triggers reached for '{candidate_text}'. Treating as DONT_KNOW and moving on."
+                )
+                self._consecutive_fragment_count = 0
+                candidate_text = "I don't know, let's move on."
+                words = candidate_text.split()
+            else:
+                logger.info(f"Fragment Guard triggered on short answer ({len(words)} words): '{candidate_text}' (consecutive={self._consecutive_fragment_count})")
+                hold_reply = "Please go on, I'm listening."
+                self.last_ai_speech = hold_reply
+                self.session_trace.log_commit(
+                    turn_id=str(curr_turn_id),
+                    reason="fragment_guard_hold",
+                    full_answer=candidate_text,
+                    word_count=len(words),
+                    speech_duration_s=self._candidate_speech_duration,
+                )
+                await self.persist_turn(
+                    turn_type=TurnType.CLARIFICATION.value,
+                    speaker="ai",
+                    text=hold_reply,
+                )
+                await self.emit_ui_state("ai-speech-transcript", {"text": hold_reply, "phase": self.current_phase.value})
+                await self.emit_ui_state("interview-bot-state", {"state": "listening"})
+                await self.push_frame(TTSSpeakFrame(hold_reply))
+                return
+        else:
+            self._consecutive_fragment_count = 0
 
         self.session_trace.log_commit(
             turn_id=str(curr_turn_id),
@@ -298,6 +353,7 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             word_count=len(words),
             speech_duration_s=self._candidate_speech_duration,
         )
+        self._last_commit_monotonic = time.monotonic()
 
         if self._active_turn_task and not self._active_turn_task.done():
             self._active_turn_task.cancel()
@@ -1415,6 +1471,23 @@ class InterviewCoordinatorProcessor(FrameProcessor):
             # Completed all skill sections -> move to Phase 5 Candidate Questions!
             await self.move_to_candidate_questions(ack_prefix=prefix_ack)
 
+    async def _thinking_filler_loop(self, turn_id: int):
+        """Speak one neutral filler ('Mm-hm.') once if decision takes > 1.5s, keeping Processing indicator (R3.4c Item 6)."""
+        try:
+            await asyncio.sleep(1.5)
+            # Only trigger if still thinking on the same turn, bot not speaking, candidate not speaking
+            if (
+                self.is_thinking
+                and self._active_turn_id == turn_id
+                and not self.is_speaking
+                and self._candidate_speech_started_monotonic is None
+            ):
+                logger.info("Decision latency > 1.5s: speaking neutral filler 'Mm-hm.' while processing continues")
+                await self.push_frame(TTSSpeakFrame("Mm-hm."))
+                await self.emit_ui_state("interview-bot-state", {"state": "thinking"})
+        except asyncio.CancelledError:
+            pass
+
     async def handle_candidate_answer(self, candidate_text: str, turn_id: Optional[int] = None):
         """Processes candidate STT transcription and advances conversation flow with streaming decisions."""
         cleaned = (candidate_text or "").strip()
@@ -1429,6 +1502,9 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         if self._merge_buffer:
             cleaned = f"{self._merge_buffer} {cleaned}".strip()
             self._merge_buffer = ""
+
+        curr_turn_id = turn_id if turn_id is not None else self._active_turn_id
+        filler_task = asyncio.create_task(self._thinking_filler_loop(curr_turn_id))
 
         async with self.lock:
             self._reset_silence_timer()
@@ -1874,17 +1950,32 @@ class InterviewCoordinatorProcessor(FrameProcessor):
         if isinstance(frame, UserStartedSpeakingFrame):
             self._last_activity_monotonic = time.monotonic()
             self._candidate_speech_started_monotonic = time.monotonic()
-            # If a turn commit was pending within merge window, cancel it so speech continues smoothly
+
+            # Barge-in: at VAD trigger, duck the bot volume if bot is speaking (R3.4c Item 2)
+            if self.is_speaking:
+                self._is_ducked = True
+                asyncio.create_task(self.emit_ui_state("interview-bot-state", {"state": "ducked", "volume": 0.2}))
+                logger.info("VAD trigger while bot speaking: ducked bot volume to 0.2")
+
+            # If a turn commit was pending within silence window, cancel it so speech continues smoothly
             if self._commit_timer_task and not self._commit_timer_task.done():
                 self._commit_timer_task.cancel()
-                logger.info("Resumed speaking within merge window; cancelled pending turn commit.")
-            # Turn merge (Part A6): if candidate resumes speaking before bot audio starts, merge turns
-            if (self.is_thinking or self._awaiting_first_bot_audio) and self._active_turn_task and not self._active_turn_task.done():
-                self._active_turn_task.cancel()
-                self._merge_buffer = self.last_candidate_speech
+                logger.info("Resumed speaking within silence window; cancelled pending turn commit.")
+
+            # Turn merge (R3.4c Item 1): After a commit, a 2.0 s merge window:
+            # if candidate resumes while decision is running or within 2.0s after commit, cancel work & merge
+            now = time.monotonic()
+            within_merge_window = (now - self._last_commit_monotonic <= MERGE_WINDOW_SECS)
+            decision_running = (self.is_thinking or self._awaiting_first_bot_audio) and bool(self._active_turn_task and not self._active_turn_task.done())
+
+            if within_merge_window or decision_running:
+                if self._active_turn_task and not self._active_turn_task.done():
+                    self._active_turn_task.cancel()
+                self._merge_buffer = f"{self._merge_buffer} {self.last_candidate_speech}".strip()
                 self.is_thinking = False
                 self._awaiting_first_bot_audio = False
-                logger.info(f"Turn merge: candidate resumed speaking before bot audio started; buffered: '{self._merge_buffer}'")
+                logger.info(f"Turn merge: candidate resumed speaking within 2.0s merge window; cancelled decision task; merge_buffer='{self._merge_buffer}'")
+                asyncio.create_task(self.emit_ui_state("interview-bot-state", {"state": "listening"}))
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
             if self._candidate_speech_started_monotonic is not None:
@@ -1900,26 +1991,42 @@ class InterviewCoordinatorProcessor(FrameProcessor):
                 if not speech_text:
                     return
 
-                # If candidate spoke while bot was speaking (Barge-in handling)
+                # If candidate spoke while bot was speaking (Barge-in handling, R3.4c Item 2)
                 if self.is_speaking:
                     # 1. Backchannel filter: candidate backchannels ("yeah", "uh-huh") do not interrupt bot
                     if _is_backchannel(speech_text):
                         logger.info(f"Ignored candidate backchannel during bot speech: '{speech_text}'")
+                        if self._is_ducked:
+                            self._is_ducked = False
+                            await self.emit_ui_state("interview-bot-state", {"state": "speaking", "volume": 1.0})
                         await self.emit_ui_state(
                             "candidate-speech-transcript",
                             {"text": speech_text, "is_backchannel": True},
                         )
                         return
 
-                    # 2. Duration guard: minimum speech duration (>= 0.35s) before interruption counts
-                    if self._candidate_speech_duration < MIN_INTERRUPTION_SPEECH_DURATION_SECS and len(speech_text.split()) <= 2:
+                    # 2. Duration guard: requires ~400-500 ms (>= 0.45s) of real speech to stop the bot (R3.4c Item 2)
+                    if self._candidate_speech_duration < MIN_INTERRUPTION_SPEECH_DURATION_SECS:
                         logger.info(
-                            f"Ignored transient noise/short echo during bot speech ({self._candidate_speech_duration:.2f}s): '{speech_text}'"
+                            f"Ignored short click/cough/noise during bot speech ({self._candidate_speech_duration*1000:.0f}ms < 450ms): '{speech_text}'"
                         )
+                        if self._is_ducked:
+                            self._is_ducked = False
+                            await self.emit_ui_state("interview-bot-state", {"state": "speaking", "volume": 1.0})
+                        return
+
+                    # 3. Echo guard: stop only if the segment isn't echo-like (R3.4c Item 2)
+                    if is_acoustic_echo(speech_text, self.last_ai_speech):
+                        logger.info(f"Ignored acoustic echo during bot speech: '{speech_text}'")
+                        if self._is_ducked:
+                            self._is_ducked = False
+                            await self.emit_ui_state("interview-bot-state", {"state": "speaking", "volume": 1.0})
                         return
 
                     # Substantive interruption! Halt bot immediately:
-                    logger.info(f"Substantive candidate barge-in ({self._candidate_speech_duration:.2f}s): '{speech_text}'")
+                    logger.info(f"Substantive candidate barge-in ({self._candidate_speech_duration*1000:.0f}ms >= 450ms): '{speech_text}'")
+                    if self._is_ducked:
+                        self._is_ducked = False
                     await self._mark_bot_turn_interrupted()
                     self.is_speaking = False
                     await self.push_frame(InterruptionFrame(), direction)
@@ -1934,6 +2041,9 @@ class InterviewCoordinatorProcessor(FrameProcessor):
 
         elif isinstance(frame, (BotStartedSpeakingFrame, TTSStartedFrame)):
             self.is_speaking = True
+            if self._stt_service is not None:
+                self._stt_service.set_bot_speaking(True)
+                self._stt_service.last_ai_speech = self.last_ai_speech
             self.is_thinking = False
             self._awaiting_first_bot_audio = False
             self._last_activity_monotonic = time.monotonic()
@@ -1941,6 +2051,8 @@ class InterviewCoordinatorProcessor(FrameProcessor):
 
         elif isinstance(frame, (BotStoppedSpeakingFrame, TTSStoppedFrame)):
             self.is_speaking = False
+            if self._stt_service is not None:
+                self._stt_service.set_bot_speaking(False)
             self._last_activity_monotonic = time.monotonic()
             await self.emit_ui_state("interview-bot-state", {"state": "listening"})
 
@@ -1975,6 +2087,7 @@ class LiveInterviewRunner:
         integrity_policy_tier: str = "Moderate",
         speech_speed: float = 1.0,
         captions_enabled: bool = True,
+        mode: Optional[str] = None,
     ):
         self.session_id = session_id
         self.application_id = application_id
@@ -1992,6 +2105,10 @@ class LiveInterviewRunner:
         self.integrity_policy_tier = integrity_policy_tier
         self.speech_speed = speech_speed
         self.captions_enabled = captions_enabled
+        # R3.5: INTERVIEW_MODE=simple (default) uses the scripted coordinator;
+        # INTERVIEW_MODE=adaptive keeps the LLM-driven coordinator.
+        self.mode = (mode or os.getenv("INTERVIEW_MODE", "simple")).strip().lower()
+        self.stt_provider_name: Optional[str] = None
 
         self.handler = SmallWebRTCRequestHandler()
         self.connection: Optional[SmallWebRTCConnection] = None
@@ -2002,8 +2119,39 @@ class LiveInterviewRunner:
         self.runner: Optional[PipelineRunner] = None
         self._runner_task: Optional[asyncio.Task] = None
 
+    async def _start_stt_early(self) -> None:
+        """Pre-start the STT provider at pipeline assembly (no first-turn cold boot)."""
+        try:
+            started = await self.stt_service.ensure_started()
+            logger.info(f"[simple] STT provider pre-start: ready={started} provider={getattr(self.stt_service, '_provider_name', '?')}")
+        except Exception as exc:
+            logger.debug(f"[simple] STT pre-start notice: {exc}")
+
     async def prewarm_greeting(self) -> None:
         """Pre-render the personalized greeting + ready-check during pre-flight so 'Begin' starts instantly (Part A4)."""
+        if self.mode == "simple":
+            from backend.app.services.interview.simple_session import SimpleInterviewCoordinator
+
+            temp = SimpleInterviewCoordinator(
+                session_id=self.session_id,
+                candidate_name=self.candidate_name,
+                role_title=self.role_title,
+                questions=self.questions,
+                candidate_local_hour=self.candidate_local_hour,
+                duration_planned_mins=self.duration_planned_mins,
+                allow_grace_extension=self.allow_grace_extension,
+                skill_time_allocations_mins=self.skill_time_allocations_mins,
+                speech_speed=self.speech_speed,
+                captions_enabled=self.captions_enabled,
+                enable_silence_monitor=False,
+            )
+            combined = temp._build_greeting_text()
+            if temp.intro_q:
+                combined = f"{combined} {(temp.intro_q.get('question_text') or '').strip()}"
+            await pre_synthesize_phrase(combined, speed=self.speech_speed)
+            await self._warm_stt_helper()
+            return
+
         temp_coord = InterviewCoordinatorProcessor(
             session_id=self.session_id,
             candidate_name=self.candidate_name,
@@ -2027,10 +2175,88 @@ class LiveInterviewRunner:
         except Exception:
             pass
 
+    async def _warm_stt_helper(self) -> None:
+        """Pre-warm the Apple STT helper during pre-flight (Part 4: Enter blocked until ready)."""
+        try:
+            if isinstance(self.stt_service, object) and hasattr(self.stt_service, "ensure_started"):
+                ok = await self.stt_service.ensure_started()
+                logger.info(f"[simple] STT helper warm during pre-flight: ready={ok}")
+        except Exception as exc:
+            logger.debug(f"[simple] STT warm notice: {exc}")
+
     async def on_connection(self, connection: SmallWebRTCConnection):
         """Callback invoked when SmallWebRTC creates a peer connection."""
         self.connection = connection
 
+        if self.mode == "simple":
+            from backend.app.services.interview.simple_session import SimpleInterviewCoordinator
+
+            self.coordinator = SimpleInterviewCoordinator(
+                session_id=self.session_id,
+                candidate_name=self.candidate_name,
+                role_title=self.role_title,
+                questions=self.questions,
+                candidate_local_hour=self.candidate_local_hour,
+                duration_planned_mins=self.duration_planned_mins,
+                allow_grace_extension=self.allow_grace_extension,
+                skill_time_allocations_mins=self.skill_time_allocations_mins,
+                job_public_fields=self.job_public_fields,
+                speech_speed=self.speech_speed,
+                captions_enabled=self.captions_enabled,
+            )
+            comps = build_voice_pipeline_components(
+                connection,
+                speech_speed=self.speech_speed,
+                on_stt_interim=self.coordinator.record_stt_interim,
+                on_stt_final=self.coordinator.record_stt_final,
+                on_stt_final_chunk=self.coordinator.record_stt_final_chunk,
+                on_tts_first_audio=self.coordinator.record_tts_first_audio,
+                session_trace=self.coordinator.session_trace,
+            )
+            self.tts_service = comps["tts"]
+            self.stt_service = comps["stt"]
+            self.coordinator._stt_service = self.stt_service
+            self.stt_provider_name = comps.get("stt_provider")
+            comps["lag_monitor"].start()
+            self.lag_monitor = comps["lag_monitor"]
+
+            # Warm the STT helper NOW so the first "Begin" answers come out instantly
+            # (helper boots while the greeting plays, never on candidate speech).
+            self.coordinator._stt_wait_task = asyncio.create_task(self._start_stt_early())
+
+            pipeline_processors = [
+                comps["transport"].input(),
+                comps["rtvi"],
+                comps["vad"],
+                comps["turn_analyzer"],
+                comps["stt"],
+                self.coordinator,
+                comps["tts"],
+            ]
+            if comps["avatar"] is not None:
+                pipeline_processors.append(comps["avatar"])
+            pipeline_processors.append(comps["transport"].output())
+
+            pipeline = Pipeline(pipeline_processors)
+            self.task = PipelineTask(
+                pipeline,
+                params=PipelineParams(
+                    allow_interruptions=False,  # R3.5 simple mode: bot speech is never cut
+                    audio_in_sample_rate=16000,
+                    audio_out_sample_rate=24000,
+                ),
+                observers=[comps["rtvi_observer"]],
+            )
+            self.runner = PipelineRunner()
+            self._runner_task = asyncio.create_task(self.runner.run(self.task))
+
+            @connection.event_handler("closed")
+            async def _on_close(conn):
+                await self.handle_disconnect()
+
+            return
+
+        # ---------------- adaptive mode (R3.4c coordinator) ------------------
         self.coordinator = InterviewCoordinatorProcessor(
             session_id=self.session_id,
             application_id=self.application_id,
@@ -2060,6 +2286,7 @@ class LiveInterviewRunner:
         )
         self.tts_service = comps["tts"]
         self.stt_service = comps["stt"]
+        self.coordinator._stt_service = self.stt_service
         self.coordinator._audio_segments_received_fn = lambda: getattr(self.stt_service, "audio_segments_received", 1)
         comps["lag_monitor"].start()
         self.lag_monitor = comps["lag_monitor"]
@@ -2193,6 +2420,7 @@ class LiveInterviewManager:
         integrity_policy_tier: str = "Moderate",
         speech_speed: float = 1.0,
         captions_enabled: bool = True,
+        mode: Optional[str] = None,
     ) -> LiveInterviewRunner:
         if self.is_busy_for_session(session_id):
             raise InterviewerBusyError(
@@ -2216,6 +2444,7 @@ class LiveInterviewManager:
                 integrity_policy_tier=integrity_policy_tier,
                 speech_speed=speech_speed,
                 captions_enabled=captions_enabled,
+                mode=mode,
             )
             self._runners[session_id] = runner
         return self._runners[session_id]
@@ -2239,6 +2468,7 @@ class LiveInterviewManager:
         integrity_policy_tier: str = "Moderate",
         speech_speed: float = 1.0,
         captions_enabled: bool = True,
+        mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         runner = self.get_or_create_runner(
             session_id=session_id,
@@ -2257,10 +2487,20 @@ class LiveInterviewManager:
             integrity_policy_tier=integrity_policy_tier,
             speech_speed=speech_speed,
             captions_enabled=captions_enabled,
+            mode=mode,
         )
         req = SmallWebRTCRequest.from_dict(request_dict)
         answer = await runner.handler.handle_web_request(req, runner.on_connection)
         return answer
+
+    async def commit_turn(self, session_id: str, reason: str = "button") -> Dict[str, Any]:
+        """R3.5 simple mode: commit the candidate's current answer (state COMMITTED)."""
+        runner = self._runners.get(session_id)
+        if not runner or not runner.coordinator:
+            raise KeyError(f"No active live session runner found for {session_id}")
+        if not hasattr(runner.coordinator, "commit_turn"):
+            return {"status": "unsupported", "mode": runner.mode}
+        return await runner.coordinator.commit_turn(reason=reason)
 
     async def handle_patch(self, session_id: str, patch_dict: Dict[str, Any]):
         runner = self._runners.get(session_id)
@@ -2308,25 +2548,40 @@ class LiveInterviewManager:
             return {
                 "active": False,
                 "phase": "scheduled",
+                "mode": runner.mode if runner else (os.getenv("INTERVIEW_MODE", "simple")),
                 "interviewer_busy": self.is_busy_for_session(session_id),
             }
         c = runner.coordinator
-        return {
+        status = {
             "active": True,
+            "mode": runner.mode,
             "has_begun": c.has_begun,
             "phase": c.current_phase.value,
             "is_speaking": c.is_speaking,
-            "is_thinking": c.is_thinking,
-            "current_question_index": c.current_question_index,
+            "current_question_index": getattr(c, "current_lead_question_index", getattr(c, "current_question_index", 0)),
             "total_questions": len(c.questions),
             "is_completed": c.is_completed,
             "last_ai_speech": c.last_ai_speech,
             "last_candidate_speech": c.last_candidate_speech,
             "remaining_seconds": round(c.pacing.remaining_seconds(), 1),
-            "grace_extended": c.pacing.grace_extended,
             "speech_speed": c.speech_speed,
             "captions_enabled": c.captions_enabled,
         }
+        if runner.mode == "simple":
+            state = getattr(c, "state", "listening")
+            status["is_thinking"] = False
+            status["grace_extended"] = c.pacing.grace_extended
+            status["turn_state"] = state
+            status["commit_ready"] = state == "listening"
+            status["answering"] = state == "listening" and bool(getattr(c, "_turn_text", ""))
+            status["commits_total"] = getattr(c, "_commits_total", 0)
+            stt = getattr(runner, "stt_service", None)
+            status["stt_provider"] = getattr(stt, "_provider_name", None) or getattr(runner, "stt_provider_name", None)
+            status["stt_ready"] = bool(getattr(stt, "provider_ready", False))
+        else:
+            status["is_thinking"] = c.is_thinking
+            status["grace_extended"] = c.pacing.grace_extended
+        return status
 
     async def handle_probe_offer(self, request_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Ephemeral probe for pre-flight network checks."""

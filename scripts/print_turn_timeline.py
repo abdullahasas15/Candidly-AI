@@ -54,6 +54,12 @@ def print_timeline(session_id: str):
     print(f"{'TIME':<10} | {'EVENT':<16} | {'DETAILS'}")
     print("-" * 80)
 
+    # R3.5b per-turn tracking: live partials seen since the last commit.
+    turn_partials: list = []
+
+    def _norm(s: str) -> str:
+        return " ".join("".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (s or "").lower()).split())
+
     for r in records:
         t_str = f"+{format_rel_time(r['timestamp'], start_time)}"
         etype = r.get("event_type", "UNKNOWN")
@@ -70,6 +76,9 @@ def print_timeline(session_id: str):
             text = r.get("text", "")
             seq = r.get("seq", 0)
             lat = r.get("latency_ms", 0)
+            if not is_final and lane.endswith("_partial"):
+                meta = r.get("meta") or {}
+                turn_partials.append((r["timestamp"], text, meta))
             tag = "FINAL" if is_final else "INTERIM"
             color = "\033[92m" if is_final else "\033[90m"
             print(f"{t_str:<10} | {color}{f'STT [{lane}]':<16}\033[0m | [{tag} #{seq} {lat}ms] \"{text}\"")
@@ -87,10 +96,36 @@ def print_timeline(session_id: str):
             wc = r.get("word_count", 0)
             dur = r.get("speech_duration_s", 0)
             ans = r.get("full_answer", "")
+            fin = r.get("finalized_text")
+            fsrc = r.get("finalize_source")
+            fms = r.get("finalize_ms")
             print("-" * 80)
             print(f"{t_str:<10} | \033[1;93mCOMMIT_TURN\033[0m    | Turn {turn_id} committed ({reason})")
-            print(f"{' ':<10} | {' ':<16} | Words: {wc} | Speech: {dur:.2f}s | Full Answer: \"{ans}\"")
+            print(f"{' ':<10} | {' ':<16} | Words: {wc} | Speech: {dur:.2f}s | Persisted Answer: \"{ans}\"")
+            # R3.5b per-turn summary: live partials vs finalized vs persisted.
+            print(f"{' ':<10} | {' ':<16} | Live partials: {len(turn_partials)}", end="")
+            if turn_partials:
+                last_ts, last_text, last_meta = turn_partials[-1]
+                print(f" | last: \"{last_text}\"", end="")
+                first_meta = turn_partials[0][2] or {}
+                first_delay = first_meta.get("first_delay_ms")
+                if first_delay is not None:
+                    print(f" | first caption: {first_delay}ms", end="")
+            print()
+            intervals = [float((p[2] or {}).get("interval_ms") or 0) for p in turn_partials if (p[2] or {}).get("interval_ms")]
+            if intervals:
+                print(f"{' ':<10} | {' ':<16} | Partial interval: avg {sum(intervals)/len(intervals):.0f}ms, max {max(intervals):.0f}ms over {len(intervals)} updates")
+            print(f"{' ':<10} | {' ':<16} | Finalize: {fsrc or '(no provider)'} ({fms if fms is not None else '-'}ms) | Finalized text: \"{fin or '(none)'}\"")
+            if fin is not None:
+                if _norm(fin) == _norm(ans):
+                    print(f"{' ':<10} | {' ':<16} | Finalized vs persisted: \033[92mMATCH\033[0m")
+                else:
+                    import difflib
+
+                    diff = list(difflib.unified_diff(_norm(fin).split(), _norm(ans).split(), lineterm="", n=1))
+                    print(f"{' ':<10} | {' ':<16} | Finalized vs persisted: \033[1;91mDIFF\033[0m {' '.join(diff[2:]) if len(diff) > 2 else diff}")
             print("-" * 80)
+            turn_partials = []
 
         elif etype == "DECISION":
             turn_id = r.get("turn_id", "")
@@ -148,8 +183,30 @@ def print_timeline(session_id: str):
     print("=" * 80)
 
 
+def get_latest_session_id() -> str:
+    sessions_dir = Path("debug/sessions")
+    if not sessions_dir.exists():
+        print("Error: debug/sessions does not exist.")
+        sys.exit(1)
+    session_dirs = [
+        d for d in sessions_dir.iterdir()
+        if d.is_dir() and (d / "timeline.jsonl").exists()
+    ]
+    if not session_dirs:
+        print("Error: No sessions with timeline.jsonl found in debug/sessions.")
+        sys.exit(1)
+    latest = max(session_dirs, key=lambda d: (d / "timeline.jsonl").stat().st_mtime)
+    return latest.name
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python scripts/print_turn_timeline.py <session_id>")
+        print("Usage: python scripts/print_turn_timeline.py <session_id | --last>")
         sys.exit(1)
-    print_timeline(sys.argv[1])
+
+    target_id = sys.argv[1]
+    if target_id == "--last":
+        target_id = get_latest_session_id()
+        print(f"Targeting latest session: {target_id}")
+
+    print_timeline(target_id)

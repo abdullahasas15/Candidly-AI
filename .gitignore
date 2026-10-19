@@ -66,6 +66,7 @@ uploads/
 tmp/
 temp/
 debug/
+data/
 *.log
 logs/
 
@@ -76,6 +77,9 @@ graphify-out/
 CLAUDE.md
 .gemini/
 DATABASE_TABLES_AND_LLM_PIPELINE.md
+
+# Review outputs (generated reports + captured-audio analysis; regenerable)
+review/
 
 # Operating System & IDE Artifacts
 .DS_Store
@@ -91,3 +95,6 @@ DATABASE_TABLES_AND_LLM_PIPELINE.md
 /*.png
 /*.jpg
 /*.jpeg
+
+# SwiftPM build artifacts (Apple STT helper) — regenerable via scripts/build_apple_stt.sh
+native/apple_stt/.build/
