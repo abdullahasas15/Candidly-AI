@@ -43,6 +43,7 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     Frame,
+    InterimTranscriptionFrame,
     InterruptionFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
@@ -102,7 +103,31 @@ _READY_ACK_RE = re.compile(
 )
 _WELCOME_GATE_SILENCE_SECS = float(os.getenv("WELCOME_GATE_SILENCE_SECS", "8.0"))
 
+_REPEAT_RE = re.compile(
+    r"\b(repeat|clarify|come again|didn'?t (?:hear|catch|understand)|one more time|say (?:that )?again|"
+    r"what (?:are you|did you) (?:say|ask|asking)|what is the question|can you (?:say|repeat)|could you (?:say|repeat)|pardon)\b",
+    re.IGNORECASE,
+)
+
 _EMPTY_ANSWER_SEQUENCE_SENTINEL = "__empty__"
+
+
+def clean_role_title_for_speech(role: Optional[str]) -> str:
+    """Normalize role titles for spoken TTS so hyphens/dashes are never spoken as 'minus' (e.g. 'SDE -1' -> 'Software Development Engineer 1')."""
+    if not role:
+        return "Software Engineer"
+    cleaned = str(role)
+    cleaned = re.sub(r"\s*[\-–—_]+\s*", " ", cleaned).strip()
+    cleaned = re.sub(r"\bSDE\s*I\b", "Software Development Engineer 1", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*II\b", "Software Development Engineer 2", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*III\b", "Software Development Engineer 3", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*1\b", "Software Development Engineer 1", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*2\b", "Software Development Engineer 2", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\s*3\b", "Software Development Engineer 3", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSDE\b", "Software Development Engineer", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSWE\b", "Software Engineer", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def _normalize_for_phrase_match(text: str) -> str:
@@ -193,6 +218,8 @@ class SimpleInterviewCoordinator(FrameProcessor):
         self.current_lead_question_index = 0  # leading question index for progress payloads
         self.lock = asyncio.Lock()
         self._speak_lock = asyncio.Lock()
+        self._commit_lock = asyncio.Lock()
+        self._is_committing: bool = False
 
         # --- question ledger / reply state ------------------------------------
         self.asked_ledger: List[Dict[str, Any]] = []
@@ -244,6 +271,20 @@ class SimpleInterviewCoordinator(FrameProcessor):
         self.candidate_qa_q = qa[0] if qa else None
         closings = by_kind("closing")
         self.closing_q = closings[0] if closings else None
+
+        # Guard: sanitize intro_hook and any fragment questions into full, scenario-grounded questions
+        if self.intro_q:
+            itxt = (self.intro_q.get("question_text") or "").strip()
+            if not itxt or not itxt.endswith("?") or itxt.lower().startswith("your work") or itxt.lower().startswith("the project") or not any(itxt.lower().startswith(w) for w in ["to ", "could you", "can you", "please", "walk me", "tell me"]):
+                self.intro_q["question_text"] = "To start off, could you please introduce yourself, tell me about your background, and share some highlights from your key projects and experiences?"
+
+        for q in self.questions:
+            t = (q.get("question_text") or "").strip()
+            if t and (not t.endswith("?") or t.lower().startswith("your work") or t.lower().startswith("the project") or t.lower().startswith("designing") or t.lower().startswith("reducing")):
+                if t.lower().startswith("your work") or t.lower().startswith("the project") or t.lower().startswith("designing") or t.lower().startswith("reducing"):
+                    q["question_text"] = f"Could you walk me through {t[0].lower() + t[1:].rstrip('?.')}?"
+                elif not t.endswith("?"):
+                    q["question_text"] = t + "?"
 
         ordered = sorted(self.questions, key=lambda q: q.get("question_index", 0))
         group_map: Dict[str, Dict[str, Any]] = {}
@@ -393,6 +434,7 @@ class SimpleInterviewCoordinator(FrameProcessor):
 
     def _build_greeting_text(self) -> str:
         first_name = self.candidate_name.split()[0] if self.candidate_name else "Candidate"
+        clean_role = clean_role_title_for_speech(self.role_title)
         labels = [g.get("label") or g["name"] for g in self.skill_groups]
         if labels:
             agenda = ", ".join(labels[:-1]) + (f", and {labels[-1]}" if len(labels) > 1 else labels[0])
@@ -402,7 +444,7 @@ class SimpleInterviewCoordinator(FrameProcessor):
         # R3.5b one-utterance welcome: AI disclosure, duration, monitoring notice,
         # agenda — ending in the "Ready to begin?" gate question.
         return (
-            f"Hi {first_name}, I'm your AI interviewer for the {self.role_title} role. "
+            f"Hi {first_name}, I'm your AI interviewer for the {clean_role} role. "
             f"You're speaking with an AI, not a human, and this session is recorded and monitored for interview integrity. "
             f"Our conversation will take about {duration_mins} minutes. "
             f"We'll cover {agenda}, and I'll leave time at the end for your questions. "
@@ -479,13 +521,12 @@ class SimpleInterviewCoordinator(FrameProcessor):
             self._prewarm_task = asyncio.create_task(self._prewarm_next_speech())
 
     async def _ask_step(self, step_idx: int) -> None:
-        if step_idx != self._step and 0 <= self._step < len(self.steps):
-            # New scripted step: chatter between the previous answer and this
-            # question ("testing, testing", acknowledgments) is not this turn's
-            # answer — start the accumulation fresh at the question's mouth.
-            # (Re-ask of the SAME step, e.g. "repeat the question", keeps the turn.)
-            self._turn_text = ""
-            self._turn_chunks = []
+        self._is_committing = False
+        self._turn_text = ""
+        self._turn_chunks = []
+        if self._stt_service is not None and hasattr(self._stt_service, "reset_turn"):
+            self._stt_service.reset_turn()
+        asyncio.create_task(self._emit("candidate-speech-transcript", {"text": "", "is_final": True}))
         self._step = step_idx
         if self._step >= len(self.steps):
             await self._finish_flow()
@@ -632,9 +673,19 @@ class SimpleInterviewCoordinator(FrameProcessor):
         if not text:
             return
 
-        # Welcome ready-gate: listen for the acknowledgment (yes / ready / ok ...).
-        # The ack is not an interview answer — it just opens the intro question.
+        # Welcome ready-gate: listen for acknowledgment (yes / ready / ok ...) or repeat request.
         if self._awaiting_ready:
+            if _REPEAT_RE.search(text):
+                self.session_trace.log_stt(lane="ready_gate", text=f"<repeat: {text}>", is_final=True, latency_ms=0.0)
+                asyncio.create_task(
+                    self.speak(
+                        self._build_greeting_text(),
+                        TurnType.GREETING.value,
+                        question_id=self.welcome_q.get("id") if self.welcome_q else None,
+                        phase=InterviewPhase.GREETING,
+                    )
+                )
+                return
             if _READY_ACK_RE.search(text):
                 self._awaiting_ready = False
                 self.session_trace.log_stt(
@@ -653,11 +704,20 @@ class SimpleInterviewCoordinator(FrameProcessor):
         self._last_activity_monotonic = time.monotonic()
 
         remaining, phrase = _strip_commit_phrases(self._turn_text)
-        if phrase:
+        if phrase and not getattr(self, "_is_committing", False) and self.state == self.ST_LISTENING:
+            self._is_committing = True
+            self.state = self.ST_COMMITTED
+            self._turn_text = remaining
+            self._commit_reason = "phrase"
+            asyncio.create_task(self.commit_turn(reason="phrase"))
+        elif _REPEAT_RE.search(text) and len(text.split()) <= 8 and not getattr(self, "_is_committing", False) and self.state == self.ST_LISTENING:
+            self._is_committing = True
+            self.state = self.ST_COMMITTED
             self._commit_reason = "phrase"
             asyncio.create_task(self.commit_turn(reason="phrase"))
 
-        asyncio.create_task(self._emit("candidate-speech-transcript", {"text": text, "is_final": False}))
+        # Emit the FULL cumulative transcript for this question so user sees their words live without disappearance
+        asyncio.create_task(self._emit("candidate-speech-transcript", {"text": self._turn_text, "is_final": False}))
 
     def record_stt_final_chunk(self, chunk_text: str, seq: int) -> None:
         """Provider segment final (verbatim, punctuated) -> durable chunk."""
@@ -666,6 +726,9 @@ class SimpleInterviewCoordinator(FrameProcessor):
             return
         self._turn_chunks.append(text)
         self._turn_text = stitch_sliding_text(self._turn_text, text)
+        asyncio.create_task(
+            self._emit("candidate-speech-transcript", {"text": self._turn_text, "is_final": True, "seq": seq})
+        )
         self.session_trace.log_stt(
             lane="provider_final_chunk",
             text=text,
@@ -682,6 +745,9 @@ class SimpleInterviewCoordinator(FrameProcessor):
         if clean not in self._turn_chunks:
             self._turn_chunks.append(clean)
             self._turn_text = stitch_sliding_text(self._turn_text, clean)
+        asyncio.create_task(
+            self._emit("candidate-speech-transcript", {"text": self._turn_text, "is_final": True, "seq": seq or 0})
+        )
         self.session_trace.log_stt(lane="window_final_cb", text=clean, is_final=True, latency_ms=stt_ms, seq=seq or 0)
 
     def record_tts_first_audio(self, tts_ms: float) -> None:
@@ -693,6 +759,10 @@ class SimpleInterviewCoordinator(FrameProcessor):
         """Ready acknowledged -> cancel the silence monitor nudge path and ask the intro."""
         self._awaiting_ready = False
         self.state = self.ST_COMMITTED
+        self._turn_text = ""
+        self._turn_chunks = []
+        if self._stt_service is not None and hasattr(self._stt_service, "reset_turn"):
+            self._stt_service.reset_turn()
         self._last_activity_monotonic = time.monotonic()
         self._welcome_gate_reprompted = False
         intro_idx = next((i for i, s in enumerate(self.steps) if s["kind"] == "intro"), None)
@@ -708,129 +778,143 @@ class SimpleInterviewCoordinator(FrameProcessor):
             return {"status": "ignored", "detail": "not-active"}
         if self.state == self.ST_ASKING and self.is_speaking and not ALLOW_BARGE_IN:
             return {"status": "ignored", "detail": "ai_speaking"}
+        if getattr(self, "_is_committing", False):
+            return {"status": "ignored", "detail": "already-committing"}
         if self.state == self.ST_COMMITTED and time.monotonic() - self._last_commit_monotonic < 6.0:
             return {"status": "ignored", "detail": "already-committed"}
         if time.monotonic() - self._last_commit_monotonic < 0.6:
             return {"status": "ignored", "detail": "debounce"}
 
-        # Welcome ready-gate: the button (or any commit trigger) counts as "yes".
-        if self._awaiting_ready:
-            self.session_trace.log_stt(lane="ready_gate", text=f"<{reason}>", is_final=True, latency_ms=0.0)
-            await self._ready_gate_satisfied()
-            return {"status": "committed", "detail": "ready-gate"}
+        async with self._commit_lock:
+            if getattr(self, "_is_committing", False) and self.state == self.ST_COMMITTED:
+                return {"status": "ignored", "detail": "already-committing"}
+            self._is_committing = True
+            self.state = self.ST_COMMITTED
+            self._last_commit_monotonic = time.monotonic()
 
-        t0 = time.perf_counter()
-        # A pending silence-commit timer is now obsolete: the commit already happened.
-        if self._auto_commit_task and not self._auto_commit_task.done():
-            self._auto_commit_task.cancel()
-            self._auto_commit_task = None
-        # UI: "finishing..." ring immediately.
-        await self._emit("interview-bot-state", {"state": "finishing", "commit_reason": reason})
-
-        # R3.5b: the answer of record is the analyzer's FINALIZED text — volatile
-        # partials are display-only. Finalize through the last audio and give the
-        # final <= 1s to land; stitched partials remain only as the logged fallback.
-        partials_text = self._turn_text
-        finalize_ms = 0.0
-        finalize_source = "none"
-        finalized_text = None
-        if self._stt_service is not None:
             try:
-                t_fin = time.perf_counter()
-                flushed = await self._stt_service.flush_and_wait(timeout=1.0)
-                finalize_ms = round((time.perf_counter() - t_fin) * 1000.0, 1)
-                finalize_source = getattr(self._stt_service, "last_finalize_source", "none")
-                if flushed:
-                    finalized_text = flushed
-                    self._turn_text = stitch_sliding_text(self._turn_text, flushed)
-            except Exception:
-                finalize_source = "error"
+                # Welcome ready-gate: the button (or any commit trigger) counts as "yes".
+                if self._awaiting_ready:
+                    self.session_trace.log_stt(lane="ready_gate", text=f"<{reason}>", is_final=True, latency_ms=0.0)
+                    await self._ready_gate_satisfied()
+                    return {"status": "committed", "detail": "ready-gate"}
 
-        assembled = self._turn_text.strip()
-        phrase_spoken = False
-        if self._commit_reason == "phrase":
-            assembled = _remove_commit_phrase(assembled)
-            phrase_spoken = True
-        self._commit_reason = None
+                t0 = time.perf_counter()
+                # A pending silence-commit timer is now obsolete: the commit already happened.
+                if self._auto_commit_task and not self._auto_commit_task.done():
+                    self._auto_commit_task.cancel()
+                    self._auto_commit_task = None
+                # UI: "finishing..." ring immediately.
+                await self._emit("interview-bot-state", {"state": "finishing", "commit_reason": reason})
 
-        words = _word_count(assembled)
-        cur = self.steps[self._step] if 0 <= self._step < len(self.steps) else None
-        question_id = (cur or {}).get("q", {}).get("id")
-        provider = getattr(self._stt_service, "_provider_name", None) or "legacy"
+                # R3.5b: the answer of record is the analyzer's FINALIZED text — volatile
+                # partials are display-only. Finalize through the last audio and give the
+                # final <= 1s to land; stitched partials remain only as the logged fallback.
+                partials_text = self._turn_text
+                finalize_ms = 0.0
+                finalize_source = "none"
+                finalized_text = None
+                if self._stt_service is not None and hasattr(self._stt_service, "flush_and_wait"):
+                    try:
+                        t_fin = time.perf_counter()
+                        flushed = await self._stt_service.flush_and_wait(timeout=1.0)
+                        finalize_ms = round((time.perf_counter() - t_fin) * 1000.0, 1)
+                        finalize_source = getattr(self._stt_service, "last_finalize_source", "none")
+                        if flushed:
+                            finalized_text = flushed
+                            self._turn_text = stitch_sliding_text(self._turn_text, flushed)
+                    except Exception:
+                        finalize_source = "error"
 
-        speech_ms = (
-            round((time.monotonic() - self._speech_started_monotonic) * 1000.0, 1)
-            if self._speech_started_monotonic
-            else 0.0
-        )
-        stt_ms = getattr(self._stt_service, "last_stt_final_ms", None)
-        await self.persist_turn(
-            turn_type=TurnType.CANDIDATE_ANSWER.value,
-            speaker="candidate",
-            text=assembled or _EMPTY_ANSWER_SEQUENCE_SENTINEL,
-            question_id=question_id,
-            stt_final_ms=stt_ms,
-            provider=provider,
-            commit_reason=reason,
-            speech_duration_ms=speech_ms,
-        )
-        if (assembled or "").strip() == _EMPTY_ANSWER_SEQUENCE_SENTINEL:
-            await self.persist_turn(
-                turn_type=TurnType.CANDIDATE_ANSWER.value,
-                speaker="candidate",
-                text="",
-                question_id=question_id,
-                provider=provider,
-                commit_reason=f"{reason}:empty",
-            )
+                assembled = self._turn_text.strip()
+                phrase_spoken = False
+                if self._commit_reason == "phrase":
+                    assembled = _remove_commit_phrase(assembled)
+                    phrase_spoken = True
+                self._commit_reason = None
 
-        # Reset accumulation for the next turn.
-        self._turn_text = ""
-        self._turn_chunks = []
-        self._speech_started_monotonic = None
-        self._speech_active = False
-        self._last_commit_monotonic = time.monotonic()
-        self._commits_total += 1
-        self.state = self.ST_COMMITTED
-        commit_ms = round((time.perf_counter() - t0) * 1000.0, 1)
-        cadence: Dict[str, Any] = {}
-        if self._stt_service is not None and hasattr(self._stt_service, "cadence_stats"):
-            try:
-                cadence = self._stt_service.cadence_stats() or {}
-            except Exception:
-                cadence = {}
-        await self._emit(
-            "interview-committed",
-            {
-                "words": words,
-                "commit_ms": commit_ms,
-                "reason": reason,
-                "provider": provider,
-                "question_id": question_id,
-                "finalize_source": finalize_source,
-                "finalize_ms": finalize_ms,
-                **cadence,
-            },
-        )
-        self.session_trace.log_commit(
-            turn_id="",
-            reason=reason,
-            full_answer=assembled,
-            word_count=words,
-            speech_duration_s=max(0.0, speech_ms / 1000.0),
-            partials_text=partials_text,
-            finalized_text=finalized_text,
-            finalize_source=finalize_source,
-            finalize_ms=finalize_ms,
-            partial_count=cadence.get("partial_count"),
-            first_caption_ms=cadence.get("first_caption_ms"),
-            avg_partial_interval_ms=cadence.get("avg_partial_interval_ms"),
-            max_partial_interval_ms=cadence.get("max_partial_interval_ms"),
-        )
+                words = _word_count(assembled)
+                cur = self.steps[self._step] if 0 <= self._step < len(self.steps) else None
+                question_id = (cur or {}).get("q", {}).get("id")
+                provider = getattr(self._stt_service, "_provider_name", None) or "legacy"
 
-        # Empty/ultra-short handling and next-step routing (rule based, no LLM).
-        await self._route_after_answer(reason, words, assembled, question_id)
-        return {"status": "committed", "commit_ms": commit_ms, "words": words, "provider": provider}
+                speech_ms = (
+                    round((time.monotonic() - self._speech_started_monotonic) * 1000.0, 1)
+                    if self._speech_started_monotonic
+                    else 0.0
+                )
+                stt_ms = getattr(self._stt_service, "last_stt_final_ms", None)
+                await self.persist_turn(
+                    turn_type=TurnType.CANDIDATE_ANSWER.value,
+                    speaker="candidate",
+                    text=assembled or _EMPTY_ANSWER_SEQUENCE_SENTINEL,
+                    question_id=question_id,
+                    stt_final_ms=stt_ms,
+                    provider=provider,
+                    commit_reason=reason,
+                    speech_duration_ms=speech_ms,
+                )
+                if (assembled or "").strip() == _EMPTY_ANSWER_SEQUENCE_SENTINEL:
+                    await self.persist_turn(
+                        turn_type=TurnType.CANDIDATE_ANSWER.value,
+                        speaker="candidate",
+                        text="",
+                        question_id=question_id,
+                        provider=provider,
+                        commit_reason=f"{reason}:empty",
+                    )
+
+                # Reset accumulation for the next turn.
+                self._turn_text = ""
+                self._turn_chunks = []
+                if self._stt_service is not None and hasattr(self._stt_service, "reset_turn"):
+                    self._stt_service.reset_turn()
+                self._speech_started_monotonic = None
+                self._speech_active = False
+                self._last_commit_monotonic = time.monotonic()
+                self._commits_total += 1
+                self.state = self.ST_COMMITTED
+                commit_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+                cadence: Dict[str, Any] = {}
+                if self._stt_service is not None and hasattr(self._stt_service, "cadence_stats"):
+                    try:
+                        cadence = self._stt_service.cadence_stats() or {}
+                    except Exception:
+                        cadence = {}
+                await self._emit(
+                    "interview-committed",
+                    {
+                        "words": words,
+                        "commit_ms": commit_ms,
+                        "reason": reason,
+                        "provider": provider,
+                        "question_id": question_id,
+                        "finalize_source": finalize_source,
+                        "finalize_ms": finalize_ms,
+                        **cadence,
+                    },
+                )
+                self.session_trace.log_commit(
+                    turn_id="",
+                    reason=reason,
+                    full_answer=assembled,
+                    word_count=words,
+                    speech_duration_s=max(0.0, speech_ms / 1000.0),
+                    partials_text=partials_text,
+                    finalized_text=finalized_text,
+                    finalize_source=finalize_source,
+                    finalize_ms=finalize_ms,
+                    partial_count=cadence.get("partial_count"),
+                    first_caption_ms=cadence.get("first_caption_ms"),
+                    avg_partial_interval_ms=cadence.get("avg_partial_interval_ms"),
+                    max_partial_interval_ms=cadence.get("max_partial_interval_ms"),
+                )
+
+                # Empty/ultra-short handling and next-step routing (rule based, no LLM).
+                await self._route_after_answer(reason, words, assembled, question_id)
+                return {"status": "committed", "commit_ms": commit_ms, "words": words, "provider": provider}
+            finally:
+                self._is_committing = False
 
     async def _route_after_answer(self, reason: str, words: int, assembled: str, question_id: Optional[str]) -> None:
         step = self.steps[self._step] if 0 <= self._step < len(self.steps) else None
@@ -841,8 +925,25 @@ class SimpleInterviewCoordinator(FrameProcessor):
         gi = step.get("skill_idx", -1)
         sstate = self.skill_state.setdefault(gi, {"used_anchor_alt": False, "short_prompt_used": False, "answered": 0, "kinds": []})
 
-        # Closing/candidate-qa steps just advance.
-        if step["kind"] in ("candidate_qa", "closing", "welcome", "intro"):
+        # Priority 1: Check if candidate asked to repeat or clarify question.
+        # MUST happen before kind checks so candidates can ask to repeat intro, anchors, candidate_qa, etc.!
+        if _REPEAT_RE.search(assembled):
+            logger.info(f"[simple] repeat requested by candidate: '{assembled}'")
+            await self.repeat_current_question()
+            return
+
+        # Candidate Q&A step: candidate asked questions or gave suggestions
+        if step["kind"] == "candidate_qa":
+            await self.speak(
+                "Thank you for sharing your thoughts and questions! Our engineering team will be excited to discuss those in detail with you.",
+                TurnType.CLOSING.value,
+                phase=InterviewPhase.CLOSING,
+            )
+            await self._ask_step(self._step + 1)
+            return
+
+        # Closing/welcome/intro steps just advance.
+        if step["kind"] in ("closing", "welcome", "intro"):
             await self._advance_after_bridge(step, gi)
             return
 
@@ -874,11 +975,6 @@ class SimpleInterviewCoordinator(FrameProcessor):
                     # skill: anchor -> anchor_alt is the whole noscript path.
                     sstate["answered"] = QUESTIONS_PER_SKILL
                     return
-
-        # Rule: repeated "repeat/clarify" request -> repeat verbatim.
-        if re.search(r"\b(repeat|clarify|come again|didn'?t hear|one more time)\b", assembled, re.IGNORECASE):
-            await self.repeat_current_question()
-            return
 
         # Rule 3: short answer -> one gentle prompt.
         if very_short and not sstate["short_prompt_used"]:
@@ -951,9 +1047,17 @@ class SimpleInterviewCoordinator(FrameProcessor):
         text = (q.get("question_text") or "").strip()
         if not text:
             return ""
-        logger.info("[simple] repeating current question verbatim")
-        await self.speak(text, TurnType.CLARIFICATION.value, question_id=q.get("id"), phase=self.current_phase)
-        return text
+        logger.info(f"[simple] repeating current question for step {self._step}: {text}")
+        self._turn_text = ""
+        self._turn_chunks = []
+        if self._stt_service is not None and hasattr(self._stt_service, "reset_turn"):
+            self._stt_service.reset_turn()
+        await self._emit("candidate-speech-transcript", {"text": "", "is_final": True})
+        repeat_phrase = f"Sure! Let me repeat the question: {text}"
+        if self._stt_service is not None:
+            self._stt_service.last_ai_speech = repeat_phrase
+        await self.speak(repeat_phrase, TurnType.CLARIFICATION.value, question_id=q.get("id"), phase=self.current_phase)
+        return repeat_phrase
 
     async def _finish_flow(self) -> None:
         """Closing speech done -> mark completed; post-interview evaluation runs after the loop."""
@@ -1102,26 +1206,36 @@ class SimpleInterviewCoordinator(FrameProcessor):
                     logger.info(f"[simple] speech ended; auto-commit in {idle_wait}s (button/phrase can commit sooner)")
                     self._schedule_auto_commit()
 
+        elif isinstance(frame, InterimTranscriptionFrame):
+            text = (getattr(frame, "text", "") or "").strip()
+            if text:
+                self.record_stt_interim(text)
+
         elif isinstance(frame, TranscriptionFrame):
-            if getattr(frame, "user_id", "") == "candidate" and getattr(frame, "text", ""):
+            text = (getattr(frame, "text", "") or "").strip()
+            if text:
                 self._last_activity_monotonic = time.monotonic()
+                if self._stt_service is None or not hasattr(self._stt_service, "on_final_chunk"):
+                    self.record_stt_final_chunk(text, seq=getattr(self, "_commits_total", 0))
 
         elif isinstance(frame, (BotStartedSpeakingFrame, TTSStartedFrame)):
             self.is_speaking = True
             self.state = self.ST_ASKING
-            if self._stt_service is not None:
+            if self._stt_service is not None and hasattr(self._stt_service, "set_bot_speaking"):
                 self._stt_service.set_bot_speaking(True)
+            if self._stt_service is not None and hasattr(self._stt_service, "last_ai_speech"):
                 self._stt_service.last_ai_speech = self.last_ai_speech
             self._last_activity_monotonic = time.monotonic()
             await self._emit("interview-bot-state", {"state": "speaking"})
 
         elif isinstance(frame, (BotStoppedSpeakingFrame, TTSStoppedFrame)):
             self.is_speaking = False
-            if self._stt_service is not None:
+            if self._stt_service is not None and hasattr(self._stt_service, "set_bot_speaking"):
                 self._stt_service.set_bot_speaking(False)
             self._last_activity_monotonic = time.monotonic()
             if self.state == self.ST_ASKING:
                 self.state = self.ST_LISTENING
+                self._is_committing = False
             await self._emit("interview-bot-state", {"state": "listening"})
 
         elif isinstance(frame, InterruptionFrame):

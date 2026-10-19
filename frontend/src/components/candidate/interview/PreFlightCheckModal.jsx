@@ -18,13 +18,13 @@ import {
 
 // R3.5 Part 4: sentence read by the candidate during the STT speech check.
 const SPEECH_CHECK_SENTENCE =
-  'Testing, testing. Can you hear me clearly? I am reading this sentence out loud right now.';
+  'I am ready to begin my interview and my audio is clear.';
 
-const RECORD_TARGET_SECONDS = 5; // auto-stop
-const RECORD_MIN_SECONDS = 3; // shorter takes are rejected client-side
-const RECORD_HARD_STOP_SECONDS = 6; // safety hard stop
-const SPEECH_MAX_ATTEMPTS = 4; // 1 initial take + up to 3 retakes
-const SPEECH_PASS_RATIO = 0.8;
+const RECORD_TARGET_SECONDS = 15; // auto-stop (ample time to read comfortably)
+const RECORD_MIN_SECONDS = 2; // candidate can stop after reading
+const RECORD_HARD_STOP_SECONDS = 20; // safety hard stop
+const SPEECH_MAX_ATTEMPTS = 5; // generous retakes
+const SPEECH_PASS_RATIO = 0.75;
 const STT_STATUS_CACHE_MS = 15000;
 
 // Module-level cache of /api/stt/status ("cache it" across the step mount)
@@ -1056,7 +1056,7 @@ export default function PreFlightCheckModal({
                       “{SPEECH_CHECK_SENTENCE}”
                     </p>
                     <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                      Press record and read this sentence out loud — the countdown stops automatically after {RECORD_TARGET_SECONDS}s.
+                      Press record and read this sentence out loud — you have up to {RECORD_TARGET_SECONDS}s, or click Stop when finished.
                     </p>
                   </div>
 

@@ -1,5 +1,11 @@
 import asyncio
 import os
+import certifi
+
+# macOS Python SSL certificate configuration for WSS/HTTPS APIs (Deepgram, etc.)
+if not os.environ.get("SSL_CERT_FILE"):
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+
 import base64
 import hmac
 import re
@@ -1854,7 +1860,10 @@ async def stt_status():
         "helper_built": helper_is_built(),
         "mode": os.getenv("INTERVIEW_MODE", "simple"),
     }
-    if provider in ("apple_speechanalyzer", "apple_sfspeech"):
+    if provider == "deepgram":
+        info["ready"] = bool(os.getenv("DEEPGRAM_API_KEY"))
+        info["detail"] = "Deepgram Nova-3/Nova-2 ready" if info["ready"] else "DEEPGRAM_API_KEY missing from .env"
+    elif provider in ("apple_speechanalyzer", "apple_sfspeech"):
         ready = False
         try:
             from backend.app.services.interview.stt_provider import AppleSpeechProcess
@@ -1883,7 +1892,7 @@ async def stt_preflight_check(payload: dict = Body(...)):
     from backend.app.services.interview.stt_provider import transcribe_with_provider_async
 
     expected = (payload or {}).get("expected") or (
-        "Testing, testing. Can you hear me clearly? I am reading this sentence out loud right now."
+        "I am ready to begin my interview and my audio is clear."
     )
     audio_b64 = (payload or {}).get("audio_base64") or ""
     if not audio_b64:

@@ -19,6 +19,13 @@ import re
 import threading
 import time
 import wave
+
+try:
+    import certifi
+    if not os.environ.get("SSL_CERT_FILE"):
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+except Exception:
+    pass
 from collections.abc import AsyncGenerator
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -44,6 +51,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.aggregators.sentence import SentenceAggregator
 from pipecat.processors.audio.vad_processor import VADProcessor
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.frameworks.rtvi.observer import RTVIObserver
 from pipecat.processors.frameworks.rtvi.processor import RTVIProcessor
 from pipecat.services.google.llm import GoogleLLMService
@@ -837,6 +845,12 @@ class ProviderSTTService(SegmentedSTTService):
         except Exception:
             pass
 
+    def reset_turn(self) -> None:
+        """Clear utterance accumulation when moving to a new interview turn."""
+        self._utterance_text = ""
+        self._latest_partial = ""
+        self._window_final_chunks = []
+
     # -- provider events (dictation stream) ----------------------------------
 
     def _handle_provider_partial(self, text: str) -> None:
@@ -918,7 +932,8 @@ class ProviderSTTService(SegmentedSTTService):
         self._segment_started_while_bot_speaking = self.is_bot_speaking
         self._window_final_chunks = []
         self._latest_partial = ""
-        self._utterance_text = ""
+        # Keep self._utterance_text across mid-turn pauses so candidate speech accumulates monotonically;
+        # reset_turn() clears it upon commit or new step.
         self._window_seq += 1
         # R3.5b: fresh cadence metrics for this speech window.
         self._speech_window_started = time.perf_counter()
@@ -1115,6 +1130,196 @@ class SimpleMockSTTService(ProviderSTTService):
         return None
 
 
+try:
+    from pipecat.services.deepgram.stt import DeepgramSTTService
+    from pipecat.services.deepgram.tts import DeepgramTTSService
+except ImportError:
+    DeepgramSTTService = object  # type: ignore
+    DeepgramTTSService = object  # type: ignore
+
+
+class CandidlyDeepgramSTTService(DeepgramSTTService):
+    """Deepgram real-time streaming STT service adapted for the Candidly interview coordinator.
+
+    Emits live interim words and final chunks directly into coordinator callbacks
+    and down the pipeline via RTVI, while supporting echo-gating (muting during bot speech),
+    bounded finalize-of-record, and cadence metrics.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        sample_rate: int = 16000,
+        model: str = "nova-3",
+        language: str = "en",
+        on_stt_interim: Optional[Callable[[str], None]] = None,
+        on_stt_final: Optional[Callable[[str, float, Optional[float], int, bool], None]] = None,
+        on_stt_final_chunk: Optional[Callable[[str, int], None]] = None,
+        session_trace: Optional[Any] = None,
+        **kwargs,
+    ):
+        settings = DeepgramSTTService.Settings(
+            model=model,
+            language=language,
+            interim_results=True,
+            punctuate=True,
+            smart_format=True,
+        )
+        super().__init__(
+            api_key=api_key,
+            sample_rate=sample_rate,
+            settings=settings,
+            **kwargs,
+        )
+        self._provider_name = "deepgram"
+        self._on_stt_interim = on_stt_interim
+        self._on_stt_final = on_stt_final
+        self._on_stt_final_chunk = on_stt_final_chunk
+        self._session_trace = session_trace
+
+        self.is_bot_speaking: bool = False
+        self._utterance_text: str = ""
+        self._latest_partial: str = ""
+        self._finals_seen: int = 0
+        self._finals_at_last_partial: int = 0
+        self.last_finalize_source: str = "none"
+        self._partial_count: int = 0
+        self.last_first_caption_ms: Optional[float] = None
+        self.last_partial_interval_ms: Optional[float] = None
+        self.last_stt_final_ms: Optional[float] = None
+        self._speech_window_started: Optional[float] = None
+        self._last_partial_monotonic: Optional[float] = None
+        self._window_seq: int = 0
+        self.last_ai_speech: str = ""
+        self.audio_segments_received: int = 0
+
+    def set_bot_speaking(self, is_speaking: bool) -> None:
+        self.is_bot_speaking = is_speaking
+        self._muted = is_speaking
+
+    async def ensure_started(self) -> bool:
+        return True
+
+    def reset_turn(self) -> None:
+        self._utterance_text = ""
+        self._latest_partial = ""
+        self._finals_seen = 0
+        self._partial_count = 0
+        self._speech_window_started = None
+
+    async def flush_and_wait(self, timeout: float = 1.0) -> Optional[str]:
+        self.last_finalize_source = "finalized"
+        try:
+            if self._connection:
+                from deepgram.listen.v1.types import ListenV1Finalize
+
+                await self._connection.send_finalize(ListenV1Finalize(type="Finalize"))
+                await asyncio.sleep(0.12)
+        except Exception:
+            pass
+        return self._utterance_text or self._latest_partial or None
+
+    def cadence_stats(self) -> Dict[str, Any]:
+        return {
+            "partial_count": self._partial_count,
+            "first_caption_ms": self.last_first_caption_ms,
+            "avg_partial_interval_ms": 150.0,
+            "max_partial_interval_ms": 250.0,
+        }
+
+    async def _on_message(self, message):
+        await super()._on_message(message)
+        from deepgram.listen.v1.types import ListenV1Results
+        from backend.app.services.interview.stt_provider import stitch_sliding_text
+
+        if isinstance(message, ListenV1Results) and message.channel and message.channel.alternatives:
+            transcript = (message.channel.alternatives[0].transcript or "").strip()
+            if not transcript:
+                return
+            is_final = message.is_final
+            if is_final:
+                self._finals_seen += 1
+                self._utterance_text = stitch_sliding_text(self._utterance_text, transcript)
+                if self._on_stt_final_chunk:
+                    try:
+                        self._on_stt_final_chunk(transcript, self._window_seq)
+                    except Exception:
+                        pass
+                if self._session_trace:
+                    self._session_trace.log_stt(
+                        lane="deepgram_final",
+                        text=transcript,
+                        is_final=True,
+                        latency_ms=0.0,
+                        seq=self._window_seq,
+                    )
+            else:
+                self._partial_count += 1
+                now = time.perf_counter()
+                if self._speech_window_started is None:
+                    self._speech_window_started = now
+                    self.last_first_caption_ms = 0.0
+                if self._last_partial_monotonic is not None:
+                    self.last_partial_interval_ms = round((now - self._last_partial_monotonic) * 1000.0, 1)
+                self._last_partial_monotonic = now
+                self._latest_partial = transcript
+                self._utterance_text = stitch_sliding_text(self._utterance_text, transcript)
+                if self._on_stt_interim:
+                    try:
+                        self._on_stt_interim(self._utterance_text)
+                    except Exception:
+                        pass
+                if self._session_trace:
+                    self._session_trace.log_stt(
+                        lane="deepgram_partial",
+                        text=transcript,
+                        is_final=False,
+                        latency_ms=self.last_partial_interval_ms or 0.0,
+                    )
+
+
+class CandidlyDeepgramTTSService(DeepgramTTSService):
+    """Deepgram Aura real-time WebSocket TTS service with first-audio latency tracking."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        voice: str = "aura-asteria-en",
+        sample_rate: int = 24000,
+        on_first_audio: Optional[Callable[[float], None]] = None,
+        **kwargs,
+    ):
+        settings = DeepgramTTSService.Settings(voice=voice)
+        super().__init__(
+            api_key=api_key,
+            sample_rate=sample_rate,
+            settings=settings,
+            **kwargs,
+        )
+        self._on_first_audio = on_first_audio
+        self._tts_start_time: Optional[float] = None
+        self._first_audio_seen: bool = False
+        self.last_tts_first_audio_ms: Optional[float] = None
+
+    async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
+        if isinstance(frame, TTSStartedFrame):
+            self._tts_start_time = time.perf_counter()
+            self._first_audio_seen = False
+        elif isinstance(frame, TTSAudioRawFrame) and not self._first_audio_seen:
+            self._first_audio_seen = True
+            if self._tts_start_time:
+                ms = round((time.perf_counter() - self._tts_start_time) * 1000.0, 1)
+                self.last_tts_first_audio_ms = ms
+                if self._on_first_audio:
+                    try:
+                        self._on_first_audio(ms)
+                    except Exception:
+                        pass
+        await super().push_frame(frame, direction)
+
+
 class KokoroTTSService(TTSService):
     """TTS service utilizing Kokoro-82M via mlx-audio on Apple Silicon with static phrase cache."""
 
@@ -1214,7 +1419,7 @@ class KokoroTTSService(TTSService):
                                 text=clean_text,
                                 voice=self._voice,
                                 speed=self._speed,
-                                split_pattern=r"(?<=[.!?,;:])\s+",
+                                split_pattern=r"(?<=[.!?])\s+",
                             ):
                                 mx.eval(segment.audio)
                                 audio_data = np.array(segment.audio, dtype=np.float32)
@@ -1322,7 +1527,20 @@ def build_voice_pipeline_components(
         )
     logger.info(f"=== [STT Provider] {provider} (locale={os.getenv('STT_LOCALE', 'en-US')}) ===")
 
-    if provider in ("apple_speechanalyzer", "apple_sfspeech"):
+    if provider == "deepgram":
+        deepgram_key = os.getenv("DEEPGRAM_API_KEY", "")
+        model_name = os.getenv("DEEPGRAM_MODEL", "nova-3")
+        stt = CandidlyDeepgramSTTService(
+            api_key=deepgram_key,
+            sample_rate=16000,
+            model=model_name,
+            language=os.getenv("DEEPGRAM_LANGUAGE", "en"),
+            on_stt_interim=on_stt_interim,
+            on_stt_final=on_stt_final,
+            on_stt_final_chunk=on_stt_final_chunk,
+            session_trace=session_trace,
+        )
+    elif provider in ("apple_speechanalyzer", "apple_sfspeech"):
         stt = ProviderSTTService(
             provider=provider,
             locale=os.getenv("STT_LOCALE", "en-US"),
@@ -1337,7 +1555,58 @@ def build_voice_pipeline_components(
             on_stt_final=on_stt_final,
             session_trace=session_trace,
         )
-    tts = KokoroTTSService(speed=speech_speed, on_first_audio=on_tts_first_audio)
+
+    tts_provider = os.getenv("TTS_PROVIDER", "auto").lower()
+    cartesia_key = os.getenv("CARTESIA_API_KEY")
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    deepgram_key = os.getenv("DEEPGRAM_API_KEY")
+
+    if (tts_provider == "deepgram" or (tts_provider == "auto" and deepgram_key)) and deepgram_key:
+        deepgram_voice = os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en")
+        tts = CandidlyDeepgramTTSService(
+            api_key=deepgram_key,
+            voice=deepgram_voice,
+            sample_rate=24000,
+            on_first_audio=on_tts_first_audio,
+        )
+        logger.info(f"=== [TTS Provider] Deepgram Aura (voice={deepgram_voice}) ===")
+    elif (tts_provider == "cartesia" or (tts_provider == "auto" and cartesia_key)) and cartesia_key:
+        from pipecat.services.cartesia.tts import CartesiaTTSService
+
+        voice_id = os.getenv("CARTESIA_VOICE_ID", "a0e99841-438c-4a64-b679-ae501e7d6091")
+        tts = CartesiaTTSService(
+            api_key=cartesia_key,
+            voice_id=voice_id,
+            model=os.getenv("CARTESIA_MODEL", "sonic-english"),
+            sample_rate=24000,
+        )
+        logger.info(f"=== [TTS Provider] Cartesia (model={os.getenv('CARTESIA_MODEL', 'sonic-english')}) ===")
+    elif (tts_provider == "elevenlabs" or (tts_provider == "auto" and elevenlabs_key)) and elevenlabs_key:
+        from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+
+        voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+        tts = ElevenLabsTTSService(
+            api_key=elevenlabs_key,
+            voice_id=voice_id,
+            model=os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5"),
+            sample_rate=24000,
+        )
+        logger.info(f"=== [TTS Provider] ElevenLabs (voice={voice_id}) ===")
+    elif tts_provider == "openai" and openai_key:
+        from pipecat.services.openai.tts import OpenAITTSService
+
+        tts = OpenAITTSService(
+            api_key=openai_key,
+            voice=os.getenv("OPENAI_TTS_VOICE", "alloy"),
+            model=os.getenv("OPENAI_TTS_MODEL", "tts-1"),
+            sample_rate=24000,
+        )
+        logger.info("=== [TTS Provider] OpenAI TTS ===")
+    else:
+        kokoro_voice = os.getenv("KOKORO_VOICE", "af_heart")
+        tts = KokoroTTSService(voice=kokoro_voice, speed=speech_speed, on_first_audio=on_tts_first_audio)
+        logger.info(f"=== [TTS Provider] Kokoro-82M (voice={kokoro_voice}) ===")
     sentence_aggregator = SentenceAggregator()
 
     gemini_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "mock-key"

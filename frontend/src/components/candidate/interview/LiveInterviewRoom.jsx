@@ -155,6 +155,7 @@ export default function LiveInterviewRoom({
   const localStreamRef = useRef(null);
   const peerConnRef = useRef(null);
   const transcriptScrollRef = useRef(null);
+  const candidateTranscriptScrollRef = useRef(null);
 
   const getAuthHeaders = useCallback(() => {
     const authToken =
@@ -209,6 +210,13 @@ export default function LiveInterviewRoom({
       transcriptScrollRef.current.scrollTop = transcriptScrollRef.current.scrollHeight;
     }
   }, [transcriptOpen, transcriptEntries]);
+
+  // Auto-scroll candidate live speech transcript as they speak
+  useEffect(() => {
+    if (candidateTranscriptScrollRef.current) {
+      candidateTranscriptScrollRef.current.scrollTop = candidateTranscriptScrollRef.current.scrollHeight;
+    }
+  }, [candidateSubtitle]);
 
   // 1. Initialize local candidate media stream (Webcam + Mic) & Device loss listeners (Part C3)
   const startLocalMedia = useCallback(
@@ -371,7 +379,7 @@ export default function LiveInterviewRoom({
           enableCam: true,
           callbacks: {
             onUserTranscript: (data) => {
-              if (data?.text) {
+              if (interviewModeRef.current !== 'simple' && data?.text) {
                 setCandidateSubtitle(data.text);
               }
             },
@@ -414,7 +422,9 @@ export default function LiveInterviewRoom({
 
         // Native RTVI transcript event listeners
         pipecatClient.on('userTranscript', (data) => {
-          if (data?.text) setCandidateSubtitle(data.text);
+          if (interviewModeRef.current !== 'simple' && data?.text) {
+            setCandidateSubtitle(data.text);
+          }
         });
         pipecatClient.on('botTranscript', (data) => {
           if (data?.text) setAiSubtitle(data.text);
@@ -542,8 +552,9 @@ export default function LiveInterviewRoom({
               setCurrentQuestionText(msg.text);
             }
             pushTranscriptEntry({ kind: 'ai', text: msg.text });
-          } else if (msg.type === 'candidate-speech-transcript' && msg.text) {
-            setCandidateSubtitle(msg.text);
+          } else if (msg.type === 'candidate-speech-transcript') {
+            const txt = typeof msg.text === 'string' ? msg.text : '';
+            setCandidateSubtitle(txt);
             setCandidateIsInterim(
               typeof msg.is_final === 'boolean' ? !msg.is_final : Boolean(msg.is_interim)
             );
@@ -1161,18 +1172,34 @@ export default function LiveInterviewRoom({
             </div>
 
             {/* Live caption: candidate's own words (cleared when the answer is committed / a question starts) */}
-            <div className="shrink-0 border-t border-slate-800/80 bg-slate-950/80 px-4 py-3">
-              <div className="flex items-center gap-2 text-[10px] font-semibold font-mono uppercase tracking-wide text-emerald-400">
-                <span
-                  className={`h-1.5 w-1.5 rounded-full bg-emerald-400 ${
-                    candidateState === 'speaking' || candidateIsInterim ? 'animate-ping' : ''
-                  }`}
-                />
-                <span>{candidateIsInterim ? 'Your words (live)' : 'Your words'}</span>
+            <div className="shrink-0 border-t border-slate-800/80 bg-slate-950/90 px-4 py-3 backdrop-blur-md">
+              <div className="flex items-center justify-between text-[11px] font-semibold font-mono uppercase tracking-wide text-emerald-400">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`h-2 w-2 rounded-full bg-emerald-400 ${
+                      candidateState === 'speaking' || candidateIsInterim ? 'animate-ping' : ''
+                    }`}
+                  />
+                  <span>{candidateIsInterim ? 'Your answer (live speech)' : 'Your answer'}</span>
+                </div>
+                {candidateSubtitle ? (
+                  <span className="rounded-md border border-emerald-500/30 bg-emerald-950/70 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
+                    {candidateSubtitle.trim().split(/\s+/).filter(Boolean).length} words
+                  </span>
+                ) : null}
               </div>
-              <p className="mt-1 min-h-[2.5rem] line-clamp-3 text-xs sm:text-sm font-medium text-slate-100">
-                {candidateSubtitle || 'Your answer will appear here as you speak…'}
-              </p>
+              <div
+                ref={candidateTranscriptScrollRef}
+                className="mt-2 max-h-32 min-h-[2.5rem] overflow-y-auto pr-1 text-xs sm:text-sm font-medium leading-relaxed text-slate-100 scrollbar-thin scrollbar-thumb-slate-700"
+              >
+                {candidateSubtitle ? (
+                  <p className="whitespace-pre-wrap">{candidateSubtitle}</p>
+                ) : (
+                  <p className="text-slate-500 italic">
+                    Your answer will appear here live as you speak. Speak clearly and take your time…
+                  </p>
+                )}
+              </div>
             </div>
 
             {/* Device Switcher Popover (Part C3) */}

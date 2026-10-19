@@ -32,6 +32,13 @@ import subprocess
 import time
 import uuid
 import wave
+
+try:
+    import certifi
+    if not os.environ.get("SSL_CERT_FILE"):
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+except Exception:
+    pass
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -44,7 +51,7 @@ APPLE_STT_BINARY = Path(
 )
 CONTEXT_TERMS_FILE = REPO_ROOT / "debug" / "stt_context_terms.txt"
 
-SUPPORTED_PROVIDERS = ("apple_speechanalyzer", "apple_sfspeech", "local_two_lane")
+SUPPORTED_PROVIDERS = ("apple_speechanalyzer", "apple_sfspeech", "local_two_lane", "deepgram")
 
 
 def stitch_sliding_text(committed: str, incoming: str) -> str:
@@ -160,6 +167,15 @@ def resolve_stt_provider(locale: Optional[str] = None) -> tuple[str, SttProvider
     env_choice = (os.getenv("STT_PROVIDER", "auto") or "auto").strip().lower()
     mac_version = macos_major_version()
     status = SttProviderStatus("local_two_lane", ready=True, detail="MLX in-process")
+
+    # Cloud STT: Deepgram Nova-3/Nova-2 (highest accuracy, technical jargon aware)
+    if env_choice == "deepgram" or (env_choice == "auto" and os.getenv("DEEPGRAM_API_KEY")):
+        has_key = bool(os.getenv("DEEPGRAM_API_KEY"))
+        return "deepgram", SttProviderStatus(
+            "deepgram",
+            ready=has_key,
+            detail="Deepgram Cloud STT (Nova-3/Nova-2)" if has_key else "DEEPGRAM_API_KEY missing from environment",
+        )
 
     if env_choice not in ("", "auto"):
         return env_choice, SttProviderStatus(env_choice, ready=True, detail="explicit STT_PROVIDER")
@@ -488,6 +504,19 @@ def _wav_to_pcm16(wav_bytes: bytes) -> tuple[bytes, int]:
     return (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16).tobytes(), 16000
 
 
+def _pcm16_to_wav(pcm_bytes: bytes, sample_rate: int = 16000) -> bytes:
+    """Wrap raw 16kHz mono PCM16 bytes in a standard RIFF WAV header."""
+    if pcm_bytes.startswith(b"RIFF"):
+        return pcm_bytes
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    return buf.getvalue()
+
+
 async def transcribe_with_provider_async(
     wav_bytes: bytes,
     provider: Optional[str] = None,
@@ -500,6 +529,31 @@ async def transcribe_with_provider_async(
         provider, _ = resolve_stt_provider(locale)
     locale = locale or os.getenv("STT_LOCALE", "en-US")
     started = time.perf_counter()
+    if provider == "deepgram":
+        deepgram_key = os.getenv("DEEPGRAM_API_KEY", "")
+        if not deepgram_key:
+            return {"provider": "deepgram", "text": "", "error": "DEEPGRAM_API_KEY not configured"}
+        try:
+            from deepgram import AsyncDeepgramClient
+
+            dg_client = AsyncDeepgramClient(api_key=deepgram_key)
+            model_name = os.getenv("DEEPGRAM_MODEL", "nova-3-general")
+            wav_payload = _pcm16_to_wav(wav_bytes)
+            response = await dg_client.listen.v1.media.transcribe_file(
+                request=wav_payload,
+                model=model_name,
+                smart_format=True,
+                punctuate=True,
+                language=os.getenv("DEEPGRAM_LANGUAGE", "en"),
+            )
+            transcript = response.results.channels[0].alternatives[0].transcript
+            return {
+                "provider": "deepgram",
+                "text": transcript,
+                "latency_ms": round((time.perf_counter() - started) * 1000.0, 1),
+            }
+        except Exception as exc:
+            return {"provider": "deepgram", "text": "", "error": str(exc)}
 
     if provider in ("apple_speechanalyzer", "apple_sfspeech"):
         if not helper_is_built():
