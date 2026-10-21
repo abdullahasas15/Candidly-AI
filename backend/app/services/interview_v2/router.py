@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -84,66 +85,95 @@ async def ws_interview_endpoint(
     websocket: WebSocket,
     session_id: str,
     ticket: Optional[str] = Query(None),
-    token: Optional[str] = Query(None),
 ) -> None:
     """WebSocket endpoint connecting client audio worklet to the Interview v2 SessionRunner."""
-    # 1. Extract and validate ticket / token claims
-    auth_token = ticket or token
-    if not auth_token:
+    # 1. Extract and cryptographically validate ticket claims BEFORE accept
+    auth_ticket = ticket
+    if not auth_ticket:
         headers = getattr(websocket, "headers", {})
         auth_header = headers.get("authorization") if hasattr(headers, "get") else None
         if auth_header and auth_header.startswith("Bearer "):
-            auth_token = auth_header.split(" ")[1]
+            auth_ticket = auth_header.split(" ")[1]
 
-    allow_dev = os.getenv("ALLOW_DEV_WS_AUTH", "false").lower() == "true"
+    allow_dev = (
+        os.getenv("ALLOW_DEV_WS_AUTH", "false").lower() == "true"
+        and os.getenv("ENV") in ("development", "dev", "test")
+    )
     claims = None
-    if auth_token:
-        if allow_dev and auth_token in ("dev", "test", "dev-token"):
-            claims = {"sub": "dev-user", "role": "dev", "session_id": session_id}
+    if auth_ticket:
+        if allow_dev and auth_ticket in ("dev", "test", "dev-token"):
+            claims = {"sub": "dev-user", "role": "dev", "session_id": session_id, "type": "ws_ticket"}
         else:
             try:
-                claims = decode_access_token(auth_token)
+                decoded = decode_access_token(auth_ticket)
+                # Enforce ws_ticket type, session binding, and user claims
+                if (
+                    decoded.get("type") == "ws_ticket"
+                    and decoded.get("session_id") == session_id
+                    and (decoded.get("sub") or decoded.get("id"))
+                    and decoded.get("role")
+                ):
+                    claims = decoded
+                else:
+                    logger.warning("Ticket rejected: invalid type or session mismatch for %s", session_id)
             except Exception as e:
                 logger.warning("Invalid WS ticket for session %s: %s", session_id, e)
                 claims = None
-    elif allow_dev and os.getenv("ENV") in ("development", "dev", "test"):
-        claims = {"sub": "dev-user", "role": "dev", "session_id": session_id}
+    elif allow_dev:
+        claims = {"sub": "dev-user", "role": "dev", "session_id": session_id, "type": "ws_ticket"}
 
     if not claims:
         logger.warning("Rejecting unauthenticated WS connection for session %s (no valid ticket)", session_id)
+        # Reject at handshake before accept: produces HTTP 403 / close code 1006 in browser
         await websocket.close(code=4401, reason="Unauthorized: Missing or invalid ticket")
         return
 
-    # Check origin if present
+    # 2. Ticket signature and session binding are valid. Call accept() BEFORE loading session / checking ownership
+    # so terminal close frames (4004, 4403, 4000, 4003, 1011) can reach the client.
+    await websocket.accept()
+
+    # 3. Exact origin check
     headers = getattr(websocket, "headers", {})
     origin = headers.get("origin") if hasattr(headers, "get") else None
     if origin and not allow_dev:
-        allowed_origins = os.getenv("ALLOWED_ORIGINS", "").split(",")
-        is_allowed = (
-            "localhost" in origin
-            or "127.0.0.1" in origin
-            or any(ao.strip() and ao.strip() in origin for ao in allowed_origins)
-        )
-        if not is_allowed:
-            logger.warning("Rejecting WS connection from disallowed origin %s", origin)
+        raw_allowed = os.getenv("ALLOWED_ORIGINS", "").split(",")
+        default_origins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
+        all_allowed = [ao.strip() for ao in raw_allowed if ao.strip()] + default_origins
+        allowed_tuples = set()
+        for ao in all_allowed:
+            p = urlparse(ao)
+            allowed_tuples.add((p.scheme, p.hostname, p.port))
+
+        parsed_origin = urlparse(origin)
+        origin_tuple = (parsed_origin.scheme, parsed_origin.hostname, parsed_origin.port)
+        if origin_tuple not in allowed_tuples:
+            logger.warning("Rejecting WS connection from disallowed origin %s (parsed=%s)", origin, origin_tuple)
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "ForbiddenOrigin",
+                "detail": f"Origin {origin} is not allowed.",
+            })
             await websocket.close(code=4403, reason="Forbidden origin")
             return
 
-    # Ticket bound session check
-    ticket_session = claims.get("session_id")
-    if ticket_session and ticket_session != session_id:
-        logger.warning("WS ticket session mismatch: ticket is for %s, requested %s", ticket_session, session_id)
-        await websocket.close(code=4403, reason="Forbidden: Ticket bound to different session")
-        return
-
-    # 2. Load real session script from database with eager relationships
+    # 4. Load real session script from database with eager relationships
     session, script = await load_real_session_script(session_id)
     if not session:
         logger.warning("Session %s not found in database", session_id)
+        await websocket.send_json({
+            "type": "SessionError",
+            "error": "SessionNotFound",
+            "detail": f"Interview session {session_id} not found.",
+        })
         await websocket.close(code=4004, reason="Session not found")
         return
 
-    # 3. Ownership check: user must be candidate, recruiter, or admin
+    # 5. Ownership check: user must be candidate, recruiter, or admin
     user_id = claims.get("sub") or claims.get("id")
     user_email = (claims.get("email") or "").lower()
     user_role = claims.get("role")
@@ -166,12 +196,16 @@ async def ws_interview_endpoint(
 
     if not (is_candidate or is_recruiter or is_admin or is_dev):
         logger.warning("User %s is not authorized for session %s", user_id, session_id)
+        await websocket.send_json({
+            "type": "SessionError",
+            "error": "Forbidden",
+            "detail": "User is not authorized for this session.",
+        })
         await websocket.close(code=4403, reason="Forbidden: Not session owner")
         return
 
     if not script.get("questions"):
         logger.warning("Session %s has no questions in database", session_id)
-        await websocket.accept()
         await websocket.send_json({
             "type": "SessionError",
             "error": "EmptySession",
@@ -180,7 +214,7 @@ async def ws_interview_endpoint(
         await websocket.close(code=4000)
         return
 
-    # 4. Key pool & audio clients
+    # 6. Key pool & audio clients
     key_pool = get_shared_key_pool()
     flux_client = FluxSTTClient(
         key_pool=key_pool,
@@ -200,7 +234,6 @@ async def ws_interview_endpoint(
             await flux_client.wait_until_ready(timeout=10.0)
     except Exception as e:
         logger.error("Flux STT initialization failed for session %s: %s", session_id, e)
-        await websocket.accept()
         await websocket.send_json({
             "type": "SessionError",
             "error": "STTInitializationFailed",
@@ -209,42 +242,59 @@ async def ws_interview_endpoint(
         await websocket.close(code=4003)
         return
 
-    # 5. Authorization & Flux readiness succeeded -> Now accept WebSocket!
-    await websocket.accept()
-    logger.info("Client connected to /ws/interview/%s (user=%s)", session_id, user_id)
+    # 7. Clean up incumbent runner ONLY after authorization and connection success
+    runner = None
+    try:
+        if session_id in ACTIVE_RUNNERS:
+            old_runner = ACTIVE_RUNNERS.pop(session_id, None)
+            if old_runner:
+                try:
+                    await old_runner.stop()
+                except Exception as e:
+                    logger.warning("Error stopping incumbent runner: %s", e)
 
-    # 6. Clean up incumbent runner ONLY after authorization and connection success
-    if session_id in ACTIVE_RUNNERS:
-        old_runner = ACTIVE_RUNNERS.pop(session_id, None)
-        if old_runner:
+        runner = SessionRunner(
+            session_id=session_id,
+            script=script,
+            websocket=websocket,
+            flux_client=flux_client,
+            aura_client=aura_client,
+        )
+        ACTIVE_RUNNERS[session_id] = runner
+
+        logger.info("Client successfully initialized /ws/interview/%s (user=%s)", session_id, user_id)
+
+        # Forward Flux events into runner queue
+        async def _forward_flux_loop() -> None:
             try:
-                await old_runner.stop()
-            except Exception as e:
-                logger.warning("Error stopping incumbent runner: %s", e)
+                async for ev in flux_client.stream_events():
+                    await runner.on_flux_event(ev)
+            except (asyncio.CancelledError, Exception) as e:
+                logger.debug("Flux event forwarding ended: %s", e)
 
-    runner = SessionRunner(
-        session_id=session_id,
-        script=script,
-        websocket=websocket,
-        flux_client=flux_client,
-        aura_client=aura_client,
-    )
-    ACTIVE_RUNNERS[session_id] = runner
-
-    # Forward Flux events into runner queue
-    async def _forward_flux_loop() -> None:
+        # Inform client of session metadata first
+        await websocket.send_json({
+            "type": "SessionConnected",
+            "session_id": session_id,
+            "question_count": len(script.get("questions", [])),
+        })
+    except Exception as e:
+        logger.error("Unexpected setup exception for session %s: %s", session_id, e, exc_info=True)
+        ACTIVE_RUNNERS.pop(session_id, None)
         try:
-            async for ev in flux_client.stream_events():
-                await runner.on_flux_event(ev)
-        except (asyncio.CancelledError, Exception) as e:
-            logger.debug("Flux event forwarding ended: %s", e)
-
-    # Inform client of session metadata first
-    await websocket.send_json({
-        "type": "SessionConnected",
-        "session_id": session_id,
-        "question_count": len(script.get("questions", [])),
-    })
+            await flux_client.stop()
+        except Exception:
+            pass
+        try:
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "SetupFailed",
+                "detail": "Internal error initializing interview session.",
+            })
+            await websocket.close(code=1011, reason="Internal setup error")
+        except Exception:
+            pass
+        return
 
     # Wait for explicit client_ready handshake event before starting greeting
     client_ready = False

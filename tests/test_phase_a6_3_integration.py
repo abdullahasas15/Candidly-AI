@@ -93,11 +93,12 @@ class FakeWebSocket:
         self.sent_bytes: List[bytes] = []
         self._incoming = list(incoming_messages or [])
         self.closed = False
+        self.accepted = False
         self.close_code: Optional[int] = None
         self.close_reason: Optional[str] = None
 
     async def accept(self) -> None:
-        pass
+        self.accepted = True
 
     async def receive(self) -> Dict[str, Any]:
         if self._incoming:
@@ -217,7 +218,13 @@ async def test_handshake_timeout_handling():
     mock_session.job_id = "job-1"
     mock_session.application = MagicMock(candidate_id="cand-timeout", email="cand@test.com")
     mock_session.job = MagicMock(recruiter_id="rec-1")
-    ticket = create_access_token({"sub": "cand-timeout", "email": "cand@test.com", "role": "candidate", "session_id": mock_session.id})
+    ticket = create_access_token({
+        "sub": "cand-timeout",
+        "email": "cand@test.com",
+        "role": "candidate",
+        "session_id": mock_session.id,
+        "type": "ws_ticket",
+    })
 
     with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
         with patch("backend.app.services.interview_v2.router.FluxSTTClient") as mock_flux_cls:
@@ -244,7 +251,13 @@ async def test_flux_initialization_failure_clean_exit():
     mock_session.id = "test-flux-fail"
     mock_session.application = MagicMock(candidate_id="cand-flux", email="cand@test.com")
     mock_session.job = MagicMock(recruiter_id="rec-1")
-    ticket = create_access_token({"sub": "cand-flux", "email": "cand@test.com", "role": "candidate", "session_id": mock_session.id})
+    ticket = create_access_token({
+        "sub": "cand-flux",
+        "email": "cand@test.com",
+        "role": "candidate",
+        "session_id": mock_session.id,
+        "type": "ws_ticket",
+    })
 
     with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
         with patch("backend.app.services.interview_v2.router.FluxSTTClient") as mock_flux_cls:
@@ -272,26 +285,44 @@ async def test_p0_4_websocket_authentication_ownership_and_incumbent_runner_prot
     mock_session.application = MagicMock(candidate_id="candidate-owner-1", email="candidate@test.com")
     mock_session.job = MagicMock(recruiter_id="recruiter-owner-1")
 
-    # 1. Missing ticket -> 4401
+    # 1. Missing ticket -> 4401 (rejected before accept)
     ws_no_ticket = FakeWebSocket()
     with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
         await ws_interview_endpoint(ws_no_ticket, session_id, ticket=None)
+        assert ws_no_ticket.accepted is False
         assert ws_no_ticket.closed is True
         assert ws_no_ticket.close_code == 4401
 
-    # 2. Invalid ticket string -> 4401
+    # 2. Invalid ticket string -> 4401 (rejected before accept)
     ws_invalid_ticket = FakeWebSocket()
     with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
         await ws_interview_endpoint(ws_invalid_ticket, session_id, ticket="invalid.garbage.jwt")
+        assert ws_invalid_ticket.accepted is False
         assert ws_invalid_ticket.closed is True
         assert ws_invalid_ticket.close_code == 4401
 
-    # 3. Unauthorized user's ticket (attacker with valid JWT for different user) -> 4403
+    # 3. Session not found -> accepted first, then 4004 close
+    ws_not_found = FakeWebSocket()
+    valid_format_ticket = create_access_token({
+        "sub": "some-user-1",
+        "email": "user@test.com",
+        "role": "candidate",
+        "session_id": "nonexistent-session",
+        "type": "ws_ticket",
+    })
+    with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(None, {})):
+        await ws_interview_endpoint(ws_not_found, "nonexistent-session", ticket=valid_format_ticket)
+        assert ws_not_found.accepted is True
+        assert ws_not_found.closed is True
+        assert ws_not_found.close_code == 4004
+
+    # 4. Unauthorized user's ticket (valid JWT with ws_ticket for different user) -> accepted first, then 4403
     attacker_ticket = create_access_token({
         "sub": "attacker-user-999",
         "email": "attacker@evil.com",
         "role": "candidate",
         "session_id": session_id,
+        "type": "ws_ticket",
     })
     ws_attacker = FakeWebSocket()
 
@@ -302,6 +333,7 @@ async def test_p0_4_websocket_authentication_ownership_and_incumbent_runner_prot
 
     with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
         await ws_interview_endpoint(ws_attacker, session_id, ticket=attacker_ticket)
+        assert ws_attacker.accepted is True
         assert ws_attacker.closed is True
         assert ws_attacker.close_code == 4403
 
@@ -310,12 +342,13 @@ async def test_p0_4_websocket_authentication_ownership_and_incumbent_runner_prot
         assert ACTIVE_RUNNERS[session_id] is mock_incumbent_runner
         mock_incumbent_runner.stop.assert_not_called()
 
-    # 4. Valid ticket for authorized candidate -> SessionConnected and displaces runner
+    # 5. Valid ticket for authorized candidate -> SessionConnected and displaces runner
     valid_ticket = create_access_token({
         "sub": "candidate-owner-1",
         "email": "candidate@test.com",
         "role": "candidate",
         "session_id": session_id,
+        "type": "ws_ticket",
     })
     ws_valid = FakeWebSocket(incoming_messages=[{"type": "client_ready", "sample_rate": 24000}])
 
@@ -329,6 +362,8 @@ async def test_p0_4_websocket_authentication_ownership_and_incumbent_runner_prot
                     ws_interview_endpoint(ws_valid, session_id, ticket=valid_ticket)
                 )
                 await asyncio.sleep(0.05)
+
+                assert ws_valid.accepted is True
 
                 # Incumbent runner was stopped and evicted
                 mock_incumbent_runner.stop.assert_awaited_once()

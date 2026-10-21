@@ -31,6 +31,8 @@ import { initAudioPipeline } from './audioWorklet';
  * - Top bar: thin section progress indicator (n of N), End Interview button with confirm dialog
  * - Completely hands-free (voice-driven, optional accelerators)
  */
+const MAX_RECONNECT_ATTEMPTS = 5;
+
 export default function LiveInterviewRoom({
   sessionId,
   session,
@@ -226,6 +228,41 @@ export default function LiveInterviewRoom({
     canonicalOnExit();
   }, [canonicalOnExit]);
 
+  // Terminal session error handler stops all hardware and halts reconnection
+  const terminateSession = useCallback((msg) => {
+    isTerminatedRef.current = true;
+    setConnectionState('error');
+    updateStatus('failed');
+    if (msg) setErrorMessage(msg);
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (endTimeoutRef.current) {
+      clearTimeout(endTimeoutRef.current);
+      endTimeoutRef.current = null;
+    }
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = null;
+    }
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+      try {
+        audioCtxRef.current.close().catch(() => {});
+      } catch (e) {}
+    }
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch (e) {}
+      wsRef.current = null;
+    }
+  }, [updateStatus]);
+
   // Connect WebSocket & audio pipeline
   const connectSession = useCallback(async () => {
     if (!canonicalSessionId || mockState?.skipConnect) return;
@@ -325,39 +362,62 @@ export default function LiveInterviewRoom({
       // In mock/test environments getUserMedia might be unmocked
     }
 
-    // 2. Open WebSocket
+    // 2. Open WebSocket with short-lived ticket
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     let url = `${proto}//${host}/ws/interview/${canonicalSessionId}`;
 
-    const tokenToUse =
-      token ||
-      localStorage.getItem('candidly-auth-token-candidate') ||
-      localStorage.getItem('candidly-auth-token');
+    let ticket = mockState?.ticket || null;
+    if (!ticket) {
+      const tokenToUse =
+        token ||
+        localStorage.getItem('candidly-auth-token-candidate') ||
+        localStorage.getItem('candidly-auth-token');
 
-    if (tokenToUse) {
-      try {
-        const ticketRes = await fetch(`/api/interview-sessions/${canonicalSessionId}/ws-ticket`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${tokenToUse}`,
-          },
-        });
-        if (ticketRes.ok) {
-          const ticketData = await ticketRes.json();
-          if (ticketData?.ticket) {
-            url += `?ticket=${encodeURIComponent(ticketData.ticket)}`;
-          } else {
-            url += `?ticket=${encodeURIComponent(tokenToUse)}`;
+      if (!tokenToUse) {
+        terminateSession('Authentication required: please log in to access this interview session.');
+        return;
+      }
+
+      let ticketAttempts = 0;
+      const maxTicketAttempts = 3;
+
+      while (ticketAttempts < maxTicketAttempts && !ticket && !isTerminatedRef.current) {
+        ticketAttempts++;
+        try {
+          const ticketRes = await fetch(`/api/interview-sessions/${canonicalSessionId}/ws-ticket`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${tokenToUse}`,
+            },
+          });
+          if (ticketRes.status === 401 || ticketRes.status === 403) {
+            terminateSession('Access forbidden: you are not authorized to join this interview session.');
+            return;
           }
-        } else {
-          url += `?ticket=${encodeURIComponent(tokenToUse)}`;
+          if (ticketRes.ok) {
+            const ticketData = await ticketRes.json();
+            if (ticketData?.ticket) {
+              ticket = ticketData.ticket;
+              break;
+            }
+          }
+        } catch (err) {
+          console.warn(`Ticket fetch attempt ${ticketAttempts} failed:`, err);
         }
-      } catch (e) {
-        url += `?ticket=${encodeURIComponent(tokenToUse)}`;
+        if (!ticket && ticketAttempts < maxTicketAttempts) {
+          await new Promise((r) => setTimeout(r, 400));
+        }
+      }
+
+      if (!ticket) {
+        terminateSession('Failed to obtain interview session ticket. Please refresh or try again later.');
+        return;
       }
     }
+
+    url += `?ticket=${encodeURIComponent(ticket)}`;
 
     try {
       const ws = new WebSocket(url);
@@ -520,26 +580,21 @@ export default function LiveInterviewRoom({
         if (!isComponentMountedRef.current || isTerminatedRef.current) return;
         const code = event?.code;
         if ([4000, 4003, 4004, 4008, 4401, 4403].includes(code)) {
-          isTerminatedRef.current = true;
-          setConnectionState('error');
-          updateStatus('failed');
-          setErrorMessage(
+          const msg =
             code === 4401
               ? 'Authentication failed: unauthorized ticket or session token.'
               : code === 4403
               ? 'Access forbidden: you are not authorized for this interview session.'
               : code === 4004
               ? 'Interview session not found.'
-              : 'Interview session terminated with terminal error.'
-          );
-          if (micStreamRef.current) {
-            micStreamRef.current.getTracks().forEach((track) => track.stop());
-            micStreamRef.current = null;
-          }
-          if (cameraStreamRef.current) {
-            cameraStreamRef.current.getTracks().forEach((track) => track.stop());
-            cameraStreamRef.current = null;
-          }
+              : 'Interview session terminated with terminal error.';
+          terminateSession(msg);
+          return;
+        }
+
+        // Enforce maximum reconnect attempts cap
+        if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+          terminateSession('Connection lost. Maximum reconnection attempts exceeded.');
           return;
         }
 
@@ -562,7 +617,7 @@ export default function LiveInterviewRoom({
       setConnectionState('error');
       setErrorMessage(err.message || 'Failed to establish WebSocket connection');
     }
-  }, [canonicalSessionId, selectedMicId, sendClientReadyIfReady, handleTerminalCleanup, updateStatus]);
+  }, [canonicalSessionId, selectedMicId, sendClientReadyIfReady, handleTerminalCleanup, terminateSession, updateStatus]);
 
   // Initial startup
   useEffect(() => {
@@ -620,6 +675,12 @@ export default function LiveInterviewRoom({
         console.warn('Failed to resume AudioContext on ready click:', e);
       }
     }
+
+    if (!audioCtxRef.current || audioCtxRef.current.state !== 'running') {
+      setErrorMessage('Audio device not ready. Tap again to enable audio.');
+      return;
+    }
+
     sendClientReadyIfReady();
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'ready_button' }));
@@ -736,7 +797,7 @@ export default function LiveInterviewRoom({
     failed: { label: 'Connection Failed', dotColor: 'bg-rose-400', textColor: 'text-rose-300' },
   }[status] || { label: 'Connecting...', dotColor: 'bg-zinc-500', textColor: 'text-zinc-400' };
 
-  if (!canonicalSessionId && !mockState?.skipConnect) {
+  if ((!canonicalSessionId || connectionState === 'error') && !mockState?.skipConnect) {
     return (
       <div
         data-testid="live-interview-room-error"
@@ -747,7 +808,7 @@ export default function LiveInterviewRoom({
             <AlertTriangle className="w-6 h-6" />
           </div>
           <h2 className="text-lg font-semibold text-white">Interview Session Unavailable</h2>
-          <p className="text-xs text-zinc-400 leading-relaxed">
+          <p className="text-xs text-zinc-400 leading-relaxed" data-testid="error-message">
             {errorMessage || 'The interview session identifier was missing or invalid. Please return to your dashboard and launch the interview again.'}
           </p>
           <button
@@ -880,6 +941,13 @@ export default function LiveInterviewRoom({
             <span className={`text-xs font-medium uppercase tracking-wider ${statusConfig.textColor}`}>
               {statusConfig.label}
             </span>
+
+            {/* Actionable Error Notice for Audio or Device warning */}
+            {errorMessage && connectionState !== 'error' && (
+              <span className="ml-3 text-xs text-rose-400 font-medium" data-testid="audio-device-error">
+                {errorMessage}
+              </span>
+            )}
 
             {/* Ready Gate Optional Button */}
             {status === 'waiting_for_ready' && (

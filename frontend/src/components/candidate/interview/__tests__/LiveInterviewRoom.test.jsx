@@ -62,15 +62,30 @@ describe('AudioDomeVisualizer Component', () => {
 
 describe('LiveInterviewRoom Component', () => {
   let originalWebSocket;
+  let originalFetch;
 
   beforeEach(() => {
     MockWebSocket.instances = [];
     originalWebSocket = global.WebSocket;
     global.WebSocket = MockWebSocket;
+    originalFetch = global.fetch;
+    localStorage.setItem('candidly-auth-token', 'mock-valid-jwt-token');
+    global.fetch = vi.fn(async (url) => {
+      if (typeof url === 'string' && url.includes('/ws-ticket')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ticket: 'mock-ws-ticket-abc', session_id: 'test-session-123' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
   });
 
   afterEach(() => {
     global.WebSocket = originalWebSocket;
+    global.fetch = originalFetch;
+    localStorage.clear();
     vi.clearAllMocks();
   });
 
@@ -531,5 +546,172 @@ describe('LiveInterviewRoom Component', () => {
     // Terminal cleanup triggers exit callback and closes socket
     expect(handleExit).toHaveBeenCalledTimes(1);
     expect(ws.close).toHaveBeenCalled();
+  });
+
+  it('handles ws-ticket 401/403 failure: no WebSocket created, displays terminal error (Phase 3)', async () => {
+    global.fetch = vi.fn(async (url) => {
+      if (typeof url === 'string' && url.includes('/ws-ticket')) {
+        return { ok: false, status: 403, json: async () => ({ detail: 'Forbidden' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    render(
+      <LiveInterviewRoom
+        sessionId="sess-auth-forbidden"
+        jobTitle="Backend Engineer"
+        candidateName="Test User"
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('live-interview-room-error')).toBeInTheDocument();
+      expect(screen.getByText(/Access forbidden/i)).toBeInTheDocument();
+    });
+
+    // WebSocket MUST NEVER be opened
+    expect(MockWebSocket.instances.length).toBe(0);
+  });
+
+  it('uses short-lived ws-ticket in URL and raw JWT never appears (Phase 3)', async () => {
+    const rawJwt = 'my-super-secret-long-lived-jwt-token';
+    localStorage.setItem('candidly-auth-token', rawJwt);
+
+    global.fetch = vi.fn(async (url) => {
+      if (typeof url === 'string' && url.includes('/ws-ticket')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ticket: 'short-lived-signed-ws-ticket-999', session_id: 'sess-ticket-test' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    render(
+      <LiveInterviewRoom
+        sessionId="sess-ticket-test"
+        jobTitle="Backend Engineer"
+        candidateName="Test User"
+      />
+    );
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+    });
+
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    expect(ws.url).toContain('ticket=short-lived-signed-ws-ticket-999');
+    expect(ws.url).not.toContain(rawJwt);
+  });
+
+  it('caps non-terminal 1006 reconnection attempts at MAX_RECONNECT_ATTEMPTS=5 (Phase 3)', async () => {
+    render(
+      <LiveInterviewRoom
+        sessionId="sess-reconnect-cap"
+        jobTitle="Backend Engineer"
+        candidateName="Test User"
+      />
+    );
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+
+    const ws = MockWebSocket.instances[0];
+
+    // Simulate close events until max reconnect attempts cap (5) is exceeded
+    for (let i = 0; i <= 5; i++) {
+      act(() => {
+        if (ws.onclose) ws.onclose({ code: 1006, reason: 'Abnormal Closure' });
+      });
+    }
+
+    // After cap is exceeded -> terminal error screen displayed
+    await waitFor(() => {
+      expect(screen.getByTestId('live-interview-room-error')).toBeInTheDocument();
+      expect(screen.getByText(/Maximum reconnection attempts exceeded/i)).toBeInTheDocument();
+    });
+  });
+
+  it('treats 4403 as immediate terminal close without reconnecting (Phase 3)', async () => {
+    render(
+      <LiveInterviewRoom
+        sessionId="sess-4403-terminal"
+        jobTitle="Backend Engineer"
+        candidateName="Test User"
+      />
+    );
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      if (ws.onclose) ws.onclose({ code: 4403, reason: 'Forbidden' });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('live-interview-room-error')).toBeInTheDocument();
+      expect(screen.getByText(/Access forbidden/i)).toBeInTheDocument();
+    });
+  });
+
+  it('guards AudioContext readiness: suspended context prevents client_ready and listening status (Phase 4)', async () => {
+    const origAudioContext = window.AudioContext;
+    class SuspendedAudioContext extends origAudioContext {
+      constructor() {
+        super();
+        this.state = 'suspended';
+      }
+      resume() {
+        return Promise.reject(new Error('Audio gesture required'));
+      }
+    }
+    window.AudioContext = SuspendedAudioContext;
+
+    render(
+      <LiveInterviewRoom
+        sessionId="sess-audiocontext-guard"
+        jobTitle="Backend Engineer"
+        candidateName="Test User"
+      />
+    );
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+    });
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+
+    act(() => {
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionConnected', question_count: 5 }) });
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionReady' }) });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('ready-gate-button')).toBeInTheDocument();
+    });
+    const readyBtn = screen.getByTestId('ready-gate-button');
+
+    act(() => {
+      fireEvent.click(readyBtn);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Audio device not ready. Tap again to enable audio/i)).toBeInTheDocument();
+    });
+
+    const clientReadySent = ws.send.mock.calls.some((args) => {
+      try {
+        const payload = JSON.parse(args[0]);
+        return payload.type === 'client_ready';
+      } catch (e) {
+        return false;
+      }
+    });
+    expect(clientReadySent).toBe(false);
+
+    window.AudioContext = origAudioContext;
   });
 });
