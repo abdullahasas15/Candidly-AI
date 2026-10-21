@@ -101,7 +101,11 @@ native/apple_stt/.build/
 CLAUDE.md
 INTERVIEW_ENGINE_CONTEXT.md
 ARCHITECTURE_AND_CODEBASE_DOSSIER.md
-tests/
+# tests tracked
+!tests/
+!tests/**
+tests/__pycache__/
+*.pyc
 scripts/
 docs/
 

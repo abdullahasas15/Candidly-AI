@@ -35,6 +35,7 @@ from backend.app.models import (
     JobApplication,
     JobPosting,
 )
+from backend.app.services.interview_v2.finalizer import finalize_interview_session
 from backend.app.services.interview.trace import SessionTrace
 from backend.app.services.interview_v2.conductor import (
     AckReady,
@@ -612,26 +613,25 @@ class SessionRunner:
                 if self.state.phase != prev_phase:
                     logger.info("Session %s phase: %s -> %s", self.session_id, prev_phase.value, self.state.phase.value)
                     if self.state.phase == ConductorPhase.COMPLETED:
+                        persistence_ok = False
                         try:
                             async with AsyncSessionLocal() as db:
-                                stmt = select(InterviewSession).where(InterviewSession.id == self.session_id)
-                                res = await db.execute(stmt)
-                                s_row = res.scalar_one_or_none()
-                                if s_row and s_row.status != "completed":
-                                    s_row.status = "completed"
-                                    s_row.current_phase = "completed"
-                                    s_row.completed_at = datetime.utcnow()
-                                    if s_row.application_id and not s_row.is_practice:
-                                        await db.execute(
-                                            update(JobApplication)
-                                            .where(JobApplication.id == s_row.application_id)
-                                            .values(status="interview_completed")
-                                        )
-                                    await db.commit()
+                                await finalize_interview_session(self.session_id, ended_by="candidate", db=db)
+                            persistence_ok = True
                         except Exception as e:
-                            logger.warning("Could not mark session completed in DB: %s", e)
+                            logger.error("Could not finalize session %s in DB: %s", self.session_id, e, exc_info=True)
+                            if self.websocket:
+                                try:
+                                    await self.websocket.send_json({
+                                        "type": "SessionError",
+                                        "error": "SessionPersistenceFailed",
+                                        "detail": "Failed to persist interview session completion to database.",
+                                        "retryable": True,
+                                    })
+                                except Exception:
+                                    pass
 
-                        if self.websocket:
+                        if persistence_ok and self.websocket:
                             try:
                                 await self.websocket.send_json({
                                     "type": "SessionEnded",

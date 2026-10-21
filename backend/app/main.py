@@ -79,6 +79,10 @@ from backend.app.services.blueprint.contracts import (
     SuggestSkillsRequest,
     BlueprintUpdatePayload,
 )
+from backend.app.services.interview_v2.finalizer import (
+    finalize_interview_session,
+    run_evaluation_for_session as _run_evaluation_for_session,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -370,13 +374,7 @@ async def _run_candidate_personalization(application_id: str) -> None:
         logger.exception("Candidate personalization/plan materialization failed for application %s", application_id)
 
 
-async def _run_evaluation_for_session(session_id: str) -> None:
-    """Run post-interview Judge evaluation off-request when a session completes."""
-    try:
-        async with AsyncSessionLocal() as session:
-            await evaluate_interview_session(session_id, session)
-    except Exception:
-        logger.exception("Post-interview evaluation failed for session %s", session_id)
+
 
 
 app = FastAPI(
@@ -2135,46 +2133,14 @@ async def end_interview_session(
 
     from backend.app.services.interview_v2.router import ACTIVE_RUNNERS
 
-    # Idempotency check: if already completed, ensure runners cleaned up and return immediately
-    if session.status == "completed":
-        runner = ACTIVE_RUNNERS.pop(session_id, None)
-        if runner:
-            try:
-                await runner.stop()
-            except Exception as e:
-                logger.warning("Error stopping active V2 runner for %s: %s", session_id, e)
-        await interview_manager.cleanup_session(session_id)
-        return {
-            "status": "completed",
-            "session_id": session.id,
-            "application_id": session.application_id,
-            "message": "Interview session already completed.",
-        }
-
-    session.status = "completed"
-    session.current_phase = "completed"
-    session.completed_at = datetime.utcnow()
-
-    if not session.is_practice:
-        if session.application:
-            session.application.status = "interview_completed"
-        if session.application_id:
-            await db.execute(
-                update(JobApplication)
-                .where(JobApplication.id == session.application_id)
-                .values(status="interview_completed")
-            )
-
     actor_email = current_user.email if current_user else "candidate"
-    await record_audit(
-        db,
-        current_user,
-        "interview.ended",
-        session_id=session.id,
-        application_id=session.application_id,
-        metadata={"ended_by": actor_email},
+    res = await finalize_interview_session(
+        session_id,
+        ended_by=actor_email,
+        current_user=current_user,
+        db=db,
+        background_tasks=background_tasks,
     )
-    await db.commit()
 
     # Clean up runner in ACTIVE_RUNNERS (V2) and interview_manager (V1)
     runner = ACTIVE_RUNNERS.pop(session_id, None)
@@ -2186,16 +2152,7 @@ async def end_interview_session(
 
     await interview_manager.cleanup_session(session_id)
 
-    # Trigger post-interview Judge evaluation in background
-    if background_tasks is not None and not session.is_practice:
-        background_tasks.add_task(_run_evaluation_for_session, session.id)
-
-    return {
-        "status": "completed",
-        "session_id": session.id,
-        "application_id": session.application_id,
-        "message": "Interview session ended and marked as completed.",
-    }
+    return res
 
 
 @app.post("/api/candidate/practice-interview")
