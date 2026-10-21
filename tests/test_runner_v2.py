@@ -290,10 +290,17 @@ async def test_runner_cancel_during_speech():
     await runner.on_end_button()
     await asyncio.sleep(0.05)
 
-    # Conductor cancelled speech and marked completed
+    # Conductor cancelled speech and transitioned to closing to let closing audio play
     assert tts.cancel_count >= 1
-    assert runner.state.phase == ConductorPhase.COMPLETED
+    assert runner.state.phase == ConductorPhase.CLOSING
     assert any(m.get("type") == "TTSCancelled" for m in ws.sent_messages)
+    assert any(m.get("type") == "SessionEnding" for m in ws.sent_messages)
+
+    # When client playback ends, conductor transitions to completed and sends SessionEnded
+    await runner.on_playback_ended(runner.state.active_speech_id)
+    await asyncio.sleep(0.05)
+    assert runner.state.phase == ConductorPhase.COMPLETED
+    assert any(m.get("type") == "SessionEnded" for m in ws.sent_messages)
     await runner.stop()
 
 

@@ -261,18 +261,28 @@ def build_script(session: Any) -> Dict[str, Any]:
     job_record: Dict[str, Any] = {}
     job = getattr(session, "job", None)
     if job:
+        raw_skills = getattr(job, "skills", []) or []
+        skill_names = [
+            getattr(s, "name", str(s)) if not isinstance(s, str) else s
+            for s in raw_skills
+        ]
         job_record = {
-            "title": str(getattr(job, "title", "") or ""),
-            "description": str(getattr(job, "description", "") or ""),
-            "skills": list(getattr(job, "skills", []) or []),
-            "seniority": str(getattr(job, "seniority", "") or getattr(job, "level", "") or ""),
+            "title": str(getattr(job, "job_title", "") or getattr(job, "title", "") or ""),
+            "description": str(getattr(job, "job_description", "") or getattr(job, "description", "") or ""),
+            "skills": skill_names,
+            "seniority": str(getattr(job, "seniority_level", "") or getattr(job, "seniority", "") or getattr(job, "level", "") or ""),
         }
     elif blueprint:
+        raw_skills = getattr(blueprint, "target_skills", []) or []
+        skill_names = [
+            getattr(s, "name", str(s)) if not isinstance(s, str) else s
+            for s in raw_skills
+        ]
         job_record = {
-            "title": str(getattr(blueprint, "job_title", "") or ""),
-            "description": str(getattr(blueprint, "job_description", "") or ""),
-            "skills": list(getattr(blueprint, "target_skills", []) or []),
-            "seniority": str(getattr(blueprint, "seniority_level", "") or ""),
+            "title": str(getattr(blueprint, "job_title", "") or getattr(blueprint, "title", "") or ""),
+            "description": str(getattr(blueprint, "job_description", "") or getattr(blueprint, "description", "") or ""),
+            "skills": skill_names,
+            "seniority": str(getattr(blueprint, "seniority_level", "") or getattr(blueprint, "seniority", "") or ""),
         }
 
     return {"questions": plan_questions, "skill_budgets_ms": skill_budgets_ms, "job_record": job_record}
@@ -506,6 +516,7 @@ class SessionRunner:
         # Latency tracking
         self.current_metrics = TurnLatencyMetrics()
         self.latency_history: List[Dict[str, Any]] = []
+        self.end_request_id: Optional[str] = None
 
     def now_ms(self) -> int:
         return self.clock_fn()
@@ -612,6 +623,18 @@ class SessionRunner:
                 # Log phase transitions
                 if self.state.phase != prev_phase:
                     logger.info("Session %s phase: %s -> %s", self.session_id, prev_phase.value, self.state.phase.value)
+                    if self.state.phase == ConductorPhase.CLOSING:
+                        if self.websocket:
+                            try:
+                                await self.websocket.send_json({
+                                    "type": "SessionEnding",
+                                    "session_id": self.session_id,
+                                    "request_id": self.end_request_id or getattr(event, "request_id", None) or "",
+                                    "status": "ending",
+                                })
+                            except Exception:
+                                pass
+
                     if self.state.phase == ConductorPhase.COMPLETED:
                         persistence_ok = False
                         try:
@@ -636,7 +659,7 @@ class SessionRunner:
                                 await self.websocket.send_json({
                                     "type": "SessionEnded",
                                     "session_id": self.session_id,
-                                    "request_id": getattr(event, "request_id", None) or "",
+                                    "request_id": self.end_request_id or getattr(event, "request_id", None) or "",
                                     "status": "completed",
                                 })
                             except Exception:
@@ -1703,6 +1726,7 @@ class SessionRunner:
         await self.queue.put(RepeatRequest(now_ms=self.now_ms()))
 
     async def on_end_button(self, request_id: Optional[str] = None) -> None:
+        self.end_request_id = request_id
         await self.queue.put(EndButton(now_ms=self.now_ms(), request_id=request_id))
 
     async def on_mic_audio(self, raw_bytes: bytes) -> None:

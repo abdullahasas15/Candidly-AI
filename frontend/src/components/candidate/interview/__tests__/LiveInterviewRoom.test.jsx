@@ -491,4 +491,45 @@ describe('LiveInterviewRoom Component', () => {
     });
     expect(getSentBuffers()).toHaveLength(2); // Still 2, testChunk5 dropped
   });
+
+  it('handles SessionEnding event gracefully without immediate teardown and tears down on SessionEnded', async () => {
+    const handleExit = vi.fn();
+    render(
+      <LiveInterviewRoom
+        sessionId="sess-test-session-ending"
+        jobTitle="Backend Engineer"
+        candidateName="Test User"
+        onExit={handleExit}
+      />
+    );
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+    });
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+
+    // Session connects and completes ready gate
+    act(() => {
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionConnected', question_count: 5 }) });
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionReady' }) });
+    });
+
+    // Receive SessionEnding (conductor entered closing speech)
+    act(() => {
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionEnding', session_id: 'sess-test-session-ending', status: 'ending' }) });
+    });
+
+    // Room must not have exited or closed WebSocket yet so closing audio can play
+    expect(handleExit).not.toHaveBeenCalled();
+    expect(ws.close).not.toHaveBeenCalled();
+
+    // Now SessionEnded arrives after audio playback finishes
+    act(() => {
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionEnded', session_id: 'sess-test-session-ending', status: 'completed' }) });
+    });
+
+    // Terminal cleanup triggers exit callback and closes socket
+    expect(handleExit).toHaveBeenCalledTimes(1);
+    expect(ws.close).toHaveBeenCalled();
+  });
 });

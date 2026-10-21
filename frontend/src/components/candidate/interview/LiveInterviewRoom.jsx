@@ -125,6 +125,7 @@ export default function LiveInterviewRoom({
   const reconnectTimerRef = useRef(null);
   const endTimeoutRef = useRef(null);
   const endFallbackAttemptedRef = useRef(false);
+  const performRestFallbackRef = useRef(null);
 
   // Determine active visualizer level
   useEffect(() => {
@@ -415,6 +416,18 @@ export default function LiveInterviewRoom({
                 cameraStreamRef.current = null;
               }
             }
+          } else if (msg.type === 'SessionEnding') {
+            setIsEndingSession(true);
+            setConnectionState('ending');
+            updateStatus('closing');
+            if (endTimeoutRef.current) {
+              clearTimeout(endTimeoutRef.current);
+              endTimeoutRef.current = setTimeout(() => {
+                if (performRestFallbackRef.current) {
+                  performRestFallbackRef.current();
+                }
+              }, 14000);
+            }
           } else if (msg.type === 'SessionEnded') {
             handleTerminalCleanup();
           } else if (msg.type === 'TTSError') {
@@ -435,6 +448,9 @@ export default function LiveInterviewRoom({
               updateStatus('completed');
               setConnectionState('completed');
               handleTerminalCleanup();
+            } else if (newStatus === 'closing') {
+              updateStatus('closing');
+              setConnectionState('ending');
             } else if (newStatus === 'uncommitted') {
               // Interim answer from candidate
               if (msg.payload?.answer) {
@@ -646,6 +662,45 @@ export default function LiveInterviewRoom({
     }
   }, []);
 
+  // Bounded REST fallback if WS terminal ack doesn't arrive within bounded time
+  const performRestFallback = useCallback(async () => {
+    if (endFallbackAttemptedRef.current || isTerminatedRef.current) return;
+    endFallbackAttemptedRef.current = true;
+    const controller = new AbortController();
+    const abortTimeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const tokenToUse =
+        token ||
+        localStorage.getItem('candidly-auth-token-candidate') ||
+        localStorage.getItem('candidly-auth-token');
+      const res = await fetch(`/api/interview-sessions/${canonicalSessionId}/end`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(tokenToUse ? { Authorization: `Bearer ${tokenToUse}` } : {}),
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(abortTimeout);
+      if (res.ok) {
+        handleTerminalCleanup();
+        return;
+      }
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || 'Failed to end session via API');
+    } catch (err) {
+      clearTimeout(abortTimeout);
+      console.error('REST end interview fallback failed:', err);
+      setIsEndingSession(false);
+      endFallbackAttemptedRef.current = false;
+      setErrorMessage('Unable to persist session completion to server. You can exit anyway.');
+    }
+  }, [canonicalSessionId, token, handleTerminalCleanup]);
+
+  useEffect(() => {
+    performRestFallbackRef.current = performRestFallback;
+  }, [performRestFallback]);
+
   // Handle End Interview with unique request ID and REST fallback
   const handleConfirmEndInterview = useCallback(async () => {
     if (isEndingSession) return;
@@ -662,47 +717,12 @@ export default function LiveInterviewRoom({
       }
     }
 
-    // Bounded REST fallback if WS terminal ack doesn't arrive within 3.5s
-    const performRestFallback = async () => {
-      if (endFallbackAttemptedRef.current || isTerminatedRef.current) return;
-      endFallbackAttemptedRef.current = true;
-      const controller = new AbortController();
-      const abortTimeout = setTimeout(() => controller.abort(), 8000);
-      try {
-        const tokenToUse =
-          token ||
-          localStorage.getItem('candidly-auth-token-candidate') ||
-          localStorage.getItem('candidly-auth-token');
-        const res = await fetch(`/api/interview-sessions/${canonicalSessionId}/end`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(tokenToUse ? { Authorization: `Bearer ${tokenToUse}` } : {}),
-          },
-          signal: controller.signal,
-        });
-        clearTimeout(abortTimeout);
-        if (res.ok) {
-          handleTerminalCleanup();
-          return;
-        }
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || 'Failed to end session via API');
-      } catch (err) {
-        clearTimeout(abortTimeout);
-        console.error('REST end interview fallback failed:', err);
-        setIsEndingSession(false);
-        endFallbackAttemptedRef.current = false;
-        setErrorMessage('Unable to persist session completion to server. You can exit anyway.');
-      }
-    };
-
     if (!socketOpen) {
       await performRestFallback();
     } else {
       endTimeoutRef.current = setTimeout(performRestFallback, 3500);
     }
-  }, [isEndingSession, canonicalSessionId, token, handleTerminalCleanup]);
+  }, [isEndingSession, performRestFallback]);
 
   // Status badge config
   const statusConfig = {
@@ -711,6 +731,7 @@ export default function LiveInterviewRoom({
     speaking: { label: 'Speaking', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
     waiting_for_ready: { label: 'Ready Gate', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
     preparing_audio: { label: 'Preparing Audio', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
+    closing: { label: 'Concluding...', dotColor: 'bg-amber-400', textColor: 'text-amber-300' },
     completed: { label: 'Interview Finished', dotColor: 'bg-zinc-400', textColor: 'text-zinc-300' },
     failed: { label: 'Connection Failed', dotColor: 'bg-rose-400', textColor: 'text-rose-300' },
   }[status] || { label: 'Connecting...', dotColor: 'bg-zinc-500', textColor: 'text-zinc-400' };

@@ -1509,7 +1509,7 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
             new_state.active_speculation_token = None
 
         effects.append(CancelSpeech())
-        new_state.phase = ConductorPhase.COMPLETED
+        new_state.phase = ConductorPhase.CLOSING
         new_state.speech_seq += 1
         end_speech_id = f"speech_{new_state.speech_seq}"
         new_state.active_speech_id = end_speech_id
@@ -1517,8 +1517,14 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         new_state.bot_audio_started = False
 
         close_text = "Thank you for taking the time to speak with me today. The interview is now concluded. Have a wonderful day!"
-        effects.append(Speak(text=close_text, speech_id=end_speech_id))
-        effects.append(EmitUI(status="completed", payload={"reason": "ended_by_candidate"}))
+        effects.append(Speak(text=close_text, speech_id=end_speech_id, kind="closing", question_id="closing"))
+        effects.append(EmitUI(status="closing", payload={"reason": "ended_by_candidate"}))
+
+        # Schedule bounded 12s fallback timeout for closing audio in case playback_ended is delayed or absent
+        new_state.timer_seq += 1
+        closing_token = f"closing_{new_state.timer_seq}"
+        new_state.active_timers["closing"] = {"at_ms": event.now_ms + 12000, "token": closing_token}
+        effects.append(ScheduleTimer(name="closing", at_ms=event.now_ms + 12000, token=closing_token, delay_ms=12000))
         return new_state, effects
 
     # 3. Ready Gate handling (ReadyButton, CommitButton, TurnEnd, or EagerTurnEnd matching ready-intent)
@@ -1703,6 +1709,9 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
 
             # After Closing speech finishes -> transition to COMPLETED
             if new_state.phase == ConductorPhase.CLOSING:
+                if "closing" in new_state.active_timers:
+                    effects.append(CancelTimer(name="closing"))
+                    new_state.active_timers.pop("closing", None)
                 new_state.phase = ConductorPhase.COMPLETED
                 effects.append(EmitUI(status="completed", payload={"message": "Interview session finished"}))
                 return new_state, effects
@@ -2114,6 +2123,15 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
                     new_state.speech_seq += 1
                     bridge_speech_id = f"bridge_{new_state.speech_seq}"
                     effects.append(PlayBridge(text=bridge_text, speech_id=bridge_speech_id))
+
+        # Check Closing Timeout Timer (12s bounded fallback)
+        if "closing" in new_state.active_timers and new_state.phase == ConductorPhase.CLOSING:
+            timer_info = new_state.active_timers["closing"]
+            if now_ms >= timer_info["at_ms"] or event.token == timer_info.get("token"):
+                new_state.active_timers.pop("closing", None)
+                new_state.phase = ConductorPhase.COMPLETED
+                effects.append(EmitUI(status="completed", payload={"message": "Interview session finished"}))
+                return new_state, effects
 
         # E. Check Silence Progression (25s nudge, 60s repeat, 90s move on)
         if (

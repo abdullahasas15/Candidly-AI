@@ -472,13 +472,14 @@ async def test_tts_synthesis_failure_recovers_to_listening():
 
 @pytest.mark.asyncio
 async def test_runner_on_end_button_produces_session_ended_event():
-    """Verify that runner on_end_button emits SessionEnded terminal event with matching request_id."""
+    """Verify that runner on_end_button emits SessionEnding first, then SessionEnded upon playback completion."""
     ws = FakeWebSocket()
+    tts = FakeTTS()
     runner = SessionRunner(
         session_id="test-end-req-1",
         websocket=ws,
         flux_client=None,
-        aura_client=FakeTTS(),
+        aura_client=tts,
         script=make_sample_script(),
     )
 
@@ -492,7 +493,22 @@ async def test_runner_on_end_button_produces_session_ended_event():
 
         # Candidate clicks End Interview with client request_id
         await runner.on_end_button(request_id="req-uuid-999")
-        await asyncio.sleep(0.20)
+        await asyncio.sleep(0.05)
+
+        # 1. Verify SessionEnding event was emitted first, not SessionEnded
+        ending_events = [m for m in ws.sent_messages if m.get("type") == "SessionEnding"]
+        assert len(ending_events) == 1
+        assert ending_events[0]["session_id"] == "test-end-req-1"
+        assert ending_events[0]["request_id"] == "req-uuid-999"
+        assert ending_events[0]["status"] == "ending"
+        assert runner.state.phase == ConductorPhase.CLOSING
+
+        # SessionEnded must NOT be emitted while closing audio is still streaming/playing
+        assert not any(m.get("type") == "SessionEnded" for m in ws.sent_messages)
+
+        # 2. Client finishes playback and reports playback_ended
+        await runner.on_playback_ended(runner.state.active_speech_id)
+        await asyncio.sleep(0.05)
 
         # Verify terminal WebSocket event
         end_events = [m for m in ws.sent_messages if m.get("type") == "SessionEnded"]
@@ -504,6 +520,86 @@ async def test_runner_on_end_button_produces_session_ended_event():
         assert runner.state.phase == ConductorPhase.COMPLETED
 
         await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_p1_9_closing_speech_timeout_fallback():
+    """Verify that if client fails to send playback_ended, conductor 12s timeout finalizes and sends SessionEnded."""
+    ws = FakeWebSocket()
+    tts = FakeTTS()
+    runner = SessionRunner(
+        session_id="test-end-timeout-1",
+        websocket=ws,
+        flux_client=None,
+        aura_client=tts,
+        script=make_sample_script(),
+    )
+
+    with patch("backend.app.services.interview_v2.runner.AsyncSessionLocal") as mock_db_cls:
+        mock_db = AsyncMock()
+        mock_db_cls.return_value.__aenter__.return_value = mock_db
+        mock_db.execute.return_value.scalar_one_or_none.return_value = None
+
+        await runner.start()
+        await asyncio.sleep(0.05)
+
+        await runner.on_end_button(request_id="req-timeout-1")
+        await asyncio.sleep(0.05)
+
+        assert runner.state.phase == ConductorPhase.CLOSING
+        assert any(m.get("type") == "SessionEnding" for m in ws.sent_messages)
+        assert not any(m.get("type") == "SessionEnded" for m in ws.sent_messages)
+
+        # Advance tick past 12s timeout
+        now = runner.now_ms() + 13000
+        from backend.app.services.interview_v2.conductor import Tick
+        await runner.queue.put(Tick(now_ms=now))
+        await asyncio.sleep(0.05)
+
+        assert runner.state.phase == ConductorPhase.COMPLETED
+        assert any(m.get("type") == "SessionEnded" for m in ws.sent_messages)
+
+        await runner.stop()
+
+
+def test_p1_12_build_script_job_facts_model_mapping():
+    """Verify that build_script correctly maps JobPosting fields and JobSkill objects into candidate Q&A facts."""
+    class MockSkill:
+        def __init__(self, name):
+            self.name = name
+
+    class MockJob:
+        def __init__(self):
+            self.job_title = "Senior Distributed Systems Engineer"
+            self.job_description = "Design and maintain high-throughput streaming systems using Kafka and Redis."
+            self.seniority_level = "senior"
+            self.skills = [MockSkill("Distributed Systems"), MockSkill("Python"), MockSkill("FastAPI")]
+
+    class MockSession:
+        def __init__(self):
+            self.id = "sess-qa-facts"
+            self.job = MockJob()
+            self.blueprint = None
+            self.questions = []
+
+    mock_session = MockSession()
+    script = build_script(mock_session)
+    job_record = script.get("job_record", {})
+
+    assert job_record["title"] == "Senior Distributed Systems Engineer"
+    assert job_record["description"] == "Design and maintain high-throughput streaming systems using Kafka and Redis."
+    assert job_record["seniority"] == "senior"
+    assert job_record["skills"] == ["Distributed Systems", "Python", "FastAPI"]
+
+    # Verify extract_job_facts in conductor processes it into facts dictionary
+    from backend.app.services.interview_v2.conductor import extract_job_facts
+    facts = extract_job_facts(job_record)
+    assert facts["job_title"] == "The job title is Senior Distributed Systems Engineer."
+    assert facts["seniority"] == "The seniority level is senior."
+    assert facts["required_skill_1"] == "Required technical skill: Distributed Systems."
+    assert facts["required_skill_2"] == "Required technical skill: Python."
+    assert facts["required_skill_3"] == "Required technical skill: FastAPI."
+    assert "Kafka" in facts["description_fact_001"]
 
 
 @pytest.mark.asyncio
@@ -569,9 +665,12 @@ async def test_p0_2_runner_end_and_rest_fallback_evaluate_exactly_once():
         await runner.start()
         await asyncio.sleep(0.05)
 
-        # 1. Runner finishes via end button
+        # 1. Runner finishes via end button -> closing speech starts
         await runner.on_end_button(request_id="req-p02-1")
-        await asyncio.sleep(0.20)
+        await asyncio.sleep(0.05)
+        # Client finishes playback
+        await runner.on_playback_ended(runner.state.active_speech_id)
+        await asyncio.sleep(0.10)
 
         # Verify SessionEnded emitted
         end_events = [m for m in ws.sent_messages if m.get("type") == "SessionEnded"]
@@ -635,9 +734,12 @@ async def test_p0_3_commit_exception_sends_session_error_and_does_not_send_sessi
         await runner.start()
         await asyncio.sleep(0.05)
 
-        # Trigger completion
+        # Trigger completion via end button -> enters closing speech
         await runner.on_end_button(request_id="req-fail-commit-1")
-        await asyncio.sleep(0.20)
+        await asyncio.sleep(0.05)
+        # Client finishes playback -> triggers finalizer which fails commit
+        await runner.on_playback_ended(runner.state.active_speech_id)
+        await asyncio.sleep(0.10)
 
         # Assert no SessionEnded was sent!
         end_events = [m for m in ws.sent_messages if m.get("type") == "SessionEnded"]
