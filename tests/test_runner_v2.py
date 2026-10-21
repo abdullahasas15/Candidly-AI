@@ -7,6 +7,7 @@ with fake Flux/TTS/LLM components and ZERO network.
 
 import asyncio
 import json
+import time
 from typing import Any, AsyncIterator, Dict, List
 import pytest
 
@@ -52,6 +53,16 @@ class FakeWebSocket:
 
     async def send_bytes(self, data: bytes) -> None:
         self.sent_bytes.append(data)
+
+
+async def wait_for_ws_message(ws: FakeWebSocket, msg_type: str, timeout: float = 2.0) -> None:
+    """Poll for a specific WebSocket message type with bounded timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(m.get("type") == msg_type for m in ws.sent_messages):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"Timed out waiting for {msg_type}")
 
 
 class FakeAuraTTSClient:
@@ -298,7 +309,7 @@ async def test_runner_cancel_during_speech():
 
     # When client playback ends, conductor transitions to completed and sends SessionEnded
     await runner.on_playback_ended(runner.state.active_speech_id)
-    await asyncio.sleep(0.05)
+    await wait_for_ws_message(ws, "SessionEnded", timeout=2.0)
     assert runner.state.phase == ConductorPhase.COMPLETED
     assert any(m.get("type") == "SessionEnded" for m in ws.sent_messages)
     await runner.stop()
