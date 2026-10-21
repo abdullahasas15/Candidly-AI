@@ -11,7 +11,8 @@ import DemoModal from './components/DemoModal';
 import AuthModal from './components/auth/AuthModal';
 import RecruiterDashboard from './components/recruiter/RecruiterDashboard';
 import CandidateDashboard from './components/candidate/CandidateDashboard';
-import InterviewPreviewGallery from './components/candidate/interview/InterviewPreviewGallery';
+
+const InterviewPreviewGallery = React.lazy(() => import('./components/candidate/interview/InterviewPreviewGallery'));
 
 export default function App() {
   // Check for developer/preview gallery mode in URL
@@ -20,7 +21,11 @@ export default function App() {
     new URLSearchParams(window.location.search).get('preview') === 'interview';
 
   if (isPreviewMode) {
-    return <InterviewPreviewGallery />;
+    return (
+      <React.Suspense fallback={<div className="min-h-screen bg-black flex items-center justify-center text-teal-400">Loading Preview...</div>}>
+        <InterviewPreviewGallery />
+      </React.Suspense>
+    );
   }
 
   const [authUser, setAuthUser] = useState(() => {

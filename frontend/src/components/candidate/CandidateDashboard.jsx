@@ -10,8 +10,9 @@ import { Card, Badge, Stat, EmptyState, PageHeader } from '../ui';
 import CandidateJobListing from './CandidateJobListing';
 import ApplicationWizard from './ApplicationWizard';
 import PreFlightCheckModal from './interview/PreFlightCheckModal';
-import LiveInterviewRoom from './interview/LiveInterviewRoom';
 import { getCandidateToken as getAuthCandidateToken } from '../../utils/auth';
+
+const LiveInterviewRoom = React.lazy(() => import('./interview/LiveInterviewRoom'));
 
 function getApplicationStep(app) {
   if (!app) return 1;
@@ -267,35 +268,46 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
   // If live interview is running, render interview room directly with verified contract
   if (interviewStarted && interviewSession && interviewSession.id) {
     return (
-      <LiveInterviewRoom
-        sessionId={interviewSession.id}
-        session={interviewSession}
-        jobTitle={
-          isPracticeMode
-            ? (interviewSession.job_title || 'Practice Interview')
-            : (currentApp?.job?.job_title || interviewSession.job_title || 'Technical Interview')
+      <React.Suspense
+        fallback={
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black text-white p-6">
+            <div className="flex items-center gap-2 text-teal-400 font-semibold text-sm">
+              <RefreshCw className="w-5 h-5 animate-spin" />
+              <span>Loading interview environment...</span>
+            </div>
+          </div>
         }
-        candidateName={authUser?.full_name || 'Candidate'}
-        durationMins={
-          isPracticeMode
-            ? (interviewSession.duration_mins || interviewSession.duration_planned_mins || 5)
-            : (currentApp?.job?.interview_duration_mins || interviewSession.duration_planned_mins || 20)
-        }
-        token={getCandidateToken()}
-        onExit={() => {
-          setInterviewStarted(false);
-          setInterviewSession(null);
-          setIsPracticeMode(false);
-          fetchApplications();
-        }}
-        onEndInterview={() => {
-          setInterviewStarted(false);
-          setInterviewSession(null);
-          setIsPracticeMode(false);
-          fetchApplications();
-        }}
-        isPractice={isPracticeMode}
-      />
+      >
+        <LiveInterviewRoom
+          sessionId={interviewSession.id}
+          session={interviewSession}
+          jobTitle={
+            isPracticeMode
+              ? (interviewSession.job_title || 'Practice Interview')
+              : (currentApp?.job?.job_title || interviewSession.job_title || 'Technical Interview')
+          }
+          candidateName={authUser?.full_name || 'Candidate'}
+          durationMins={
+            isPracticeMode
+              ? (interviewSession.duration_mins || interviewSession.duration_planned_mins || 5)
+              : (currentApp?.job?.interview_duration_mins || interviewSession.duration_planned_mins || 20)
+          }
+          token={getCandidateToken()}
+          onExit={() => {
+            setInterviewStarted(false);
+            setInterviewSession(null);
+            setIsPracticeMode(false);
+            fetchApplications();
+          }}
+          onEndInterview={() => {
+            setInterviewStarted(false);
+            setInterviewSession(null);
+            setIsPracticeMode(false);
+            fetchApplications();
+          }}
+          isPractice={isPracticeMode}
+        />
+      </React.Suspense>
     );
   }
 

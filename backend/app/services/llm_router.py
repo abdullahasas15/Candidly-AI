@@ -671,7 +671,7 @@ async def stream_decision_with_ack_first(
             tokens: List[str] = []
             ack_emitted = False
 
-            async with client.stream("POST", url, headers=headers, json=payload, timeout=8.0) as resp:
+            async with client.stream("POST", url, headers=headers, json=payload, timeout=5.0) as resp:
                 resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
                     buffer.add_data(chunk)

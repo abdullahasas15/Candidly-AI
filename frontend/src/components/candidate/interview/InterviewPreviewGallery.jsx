@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import LiveInterviewRoom from './LiveInterviewRoom';
+
+const LiveInterviewRoom = React.lazy(() => import('./LiveInterviewRoom'));
 
 const PREVIEW_STATES = {
   speaking: {
@@ -100,14 +101,16 @@ export default function InterviewPreviewGallery() {
         ))}
       </div>
 
-      <LiveInterviewRoom
-        key={activeKey}
-        sessionId="preview-session-id"
-        jobTitle="Staff Distributed Systems Engineer"
-        candidateName="Alex Morgan"
-        durationMins={20}
-        mockState={activeState}
-      />
+      <React.Suspense fallback={<div className="p-12 text-center text-teal-400 font-semibold">Loading Live Room Preview...</div>}>
+        <LiveInterviewRoom
+          key={activeKey}
+          sessionId="preview-session-id"
+          jobTitle="Staff Distributed Systems Engineer"
+          candidateName="Alex Morgan"
+          durationMins={20}
+          mockState={activeState}
+        />
+      </React.Suspense>
     </div>
   );
 }

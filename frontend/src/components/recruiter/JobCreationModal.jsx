@@ -4,7 +4,8 @@ import {
   Award, BookOpen, Briefcase, Settings2, HelpCircle, Layers, Sparkles,
   ArrowRight, RefreshCw, Cpu, Database, Server, Terminal, ChevronDown, ChevronUp
 } from 'lucide-react';
-import BlueprintReviewEditor from './BlueprintReviewEditor';
+
+const BlueprintReviewEditor = React.lazy(() => import('./BlueprintReviewEditor'));
 
 const VAGUE_SKILL_NAMES = new Set([
   'projects', 'project', 'work', 'general', 'misc', 'miscellaneous',
@@ -1882,13 +1883,22 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   </button>
                 </div>
               ) : (
-                <BlueprintReviewEditor
-                  job={createdJob}
-                  onApproved={(approvedBp) => {
-                    setBlueprintApproved(true);
-                    onJobCreated(createdJob);
-                  }}
-                />
+                <React.Suspense
+                  fallback={
+                    <div className="p-12 text-center text-teal-400 font-semibold space-y-2">
+                      <RefreshCw className="w-6 h-6 animate-spin mx-auto text-teal-400" />
+                      <p className="text-xs text-zinc-400">Loading Blueprint Editor...</p>
+                    </div>
+                  }
+                >
+                  <BlueprintReviewEditor
+                    job={createdJob}
+                    onApproved={(approvedBp) => {
+                      setBlueprintApproved(true);
+                      onJobCreated(createdJob);
+                    }}
+                  />
+                </React.Suspense>
               )}
             </div>
           )}

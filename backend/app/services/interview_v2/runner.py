@@ -602,6 +602,17 @@ class SessionRunner:
                             self.latency_history[-1] = metrics_dict
                         else:
                             self.latency_history.append(metrics_dict)
+                        if len(self.latency_history) >= 10:
+                            latencies = sorted(
+                                m["commit_to_audio_ms"] for m in self.latency_history if m.get("commit_to_audio_ms")
+                            )
+                            if latencies:
+                                p50 = latencies[len(latencies) // 2]
+                                p95 = latencies[min(int(len(latencies) * 0.95), len(latencies) - 1)]
+                                logger.info(
+                                    "Session %s turn latency stats (turns=%d): p50=%.1fms, p95=%.1fms",
+                                    self.session_id, len(latencies), p50, p95
+                                )
                         if self.websocket:
                             try:
                                 await self.websocket.send_json({"type": "TurnMetrics", "metrics": metrics_dict})

@@ -36,10 +36,6 @@ from backend.app.main import (
 )
 
 
-@pytest.fixture(autouse=True)
-def cleanup_db_engine_after_test():
-    yield
-    engine.sync_engine.dispose()
 from backend.app.models import (
     BlueprintExpectation,
     BlueprintQuestion,
@@ -53,6 +49,22 @@ from backend.app.models import (
     JobSkill,
     User,
 )
+
+
+@pytest.fixture(autouse=True)
+def cleanup_db_engine_after_test():
+    yield
+    try:
+        from sqlalchemy import text
+        with engine.sync_engine.begin() as conn:
+            conn.execute(text("DELETE FROM interview_evaluations WHERE session_id LIKE 'test-%'"))
+            conn.execute(text("DELETE FROM interview_sessions WHERE id LIKE 'test-%'"))
+            conn.execute(text("DELETE FROM job_applications WHERE email LIKE '%@example.com'"))
+            conn.execute(text("DELETE FROM job_postings WHERE department IN ('Engineering', 'Test Dept', 'Engineering Gate')"))
+            conn.execute(text("DELETE FROM users WHERE email LIKE '%@example.com'"))
+    except Exception:
+        pass
+    engine.sync_engine.dispose()
 from backend.app.services.interview_v2.finalizer import finalize_interview_session
 from backend.app.services.auth import create_access_token, decode_access_token
 from backend.app.services.interview_v2.conductor import (

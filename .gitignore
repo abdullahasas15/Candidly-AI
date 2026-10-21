@@ -96,6 +96,13 @@ review/
 /*.jpg
 /*.jpeg
 
+# Local SQLite Databases & Bundles
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+create_bundle.py
+
 # SwiftPM build artifacts (Apple STT helper) — regenerable via scripts/build_apple_stt.sh
 native/apple_stt/.build/
 CLAUDE.md
