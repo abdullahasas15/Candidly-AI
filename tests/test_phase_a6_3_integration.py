@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -51,20 +52,15 @@ from backend.app.models import (
 )
 
 
-@pytest.fixture(autouse=True)
-def cleanup_db_engine_after_test():
-    yield
-    try:
-        from sqlalchemy import text
-        with engine.sync_engine.begin() as conn:
-            conn.execute(text("DELETE FROM interview_evaluations WHERE session_id LIKE 'test-%'"))
-            conn.execute(text("DELETE FROM interview_sessions WHERE id LIKE 'test-%'"))
-            conn.execute(text("DELETE FROM job_applications WHERE email LIKE '%@example.com'"))
-            conn.execute(text("DELETE FROM job_postings WHERE department IN ('Engineering', 'Test Dept', 'Engineering Gate')"))
-            conn.execute(text("DELETE FROM users WHERE email LIKE '%@example.com'"))
-    except Exception:
-        pass
-    engine.sync_engine.dispose()
+
+@pytest.mark.asyncio
+async def test_database_isolation_and_no_dev_contamination():
+    """Verify that test engine runs against a dedicated test database and never dev database."""
+    test_db_url = os.environ.get("TEST_DATABASE_URL")
+    assert test_db_url is not None, "TEST_DATABASE_URL must be defined"
+    assert "test" in (engine.url.database or "").lower(), f"Database name '{engine.url.database}' must contain 'test'"
+    assert (engine.url.database or "").lower() != "candidly ai", "Test database must not be the dev database"
+
 from backend.app.services.interview_v2.finalizer import finalize_interview_session
 from backend.app.services.auth import create_access_token, decode_access_token
 from backend.app.services.interview_v2.conductor import (
