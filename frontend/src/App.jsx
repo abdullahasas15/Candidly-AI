@@ -23,20 +23,10 @@ export default function App() {
     return <InterviewPreviewGallery />;
   }
 
-  const [viewMode, setViewMode] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const paramView = new URLSearchParams(window.location.search).get('view');
-      if (paramView === 'recruiter' || paramView === 'candidate') {
-        return paramView;
-      }
-    }
-    return 'landing';
-  }); // 'landing' | 'recruiter' | 'candidate'
-
   const [authUser, setAuthUser] = useState(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('candidly-auth-user');
+        const saved = localStorage.getItem('candidly-auth-user') || localStorage.getItem('candidly_user');
         return saved ? JSON.parse(saved) : null;
       } catch (e) {
         return null;
@@ -44,6 +34,26 @@ export default function App() {
     }
     return null;
   });
+
+  const [viewMode, setViewMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const paramView = new URLSearchParams(window.location.search).get('view');
+      if (paramView === 'recruiter' || paramView === 'candidate' || paramView === 'landing') {
+        return paramView;
+      }
+      try {
+        const saved = localStorage.getItem('candidly-auth-user') || localStorage.getItem('candidly_user');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed?.role === 'candidate') return 'candidate';
+          if (parsed?.role === 'recruiter') return 'recruiter';
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    return 'landing';
+  }); // 'landing' | 'recruiter' | 'candidate'
 
   const [authModal, setAuthModal] = useState({
     isOpen: false,
@@ -81,11 +91,17 @@ export default function App() {
     setAuthUser(user);
     localStorage.setItem('candidly-auth-user', JSON.stringify(user));
     setAuthModal((prev) => ({ ...prev, isOpen: false }));
-    // Immediately navigate to their role-specific dashboard
+    // Immediately navigate to their role-specific dashboard and sync URL
     if (user.role === 'candidate') {
       setViewMode('candidate');
+      if (typeof window !== 'undefined') {
+        window.history.replaceState(null, '', '?view=candidate');
+      }
     } else {
       setViewMode('recruiter');
+      if (typeof window !== 'undefined') {
+        window.history.replaceState(null, '', '?view=recruiter');
+      }
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -94,9 +110,14 @@ export default function App() {
     setAuthUser(null);
     localStorage.removeItem('candidly-auth-user');
     localStorage.removeItem('candidly-auth-token');
+    localStorage.removeItem('candidly-auth-token-candidate');
+    localStorage.removeItem('candidly-auth-token-recruiter');
     localStorage.removeItem('candidly_user');
     localStorage.removeItem('candidly_token');
     setViewMode('landing');
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', '/');
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -107,14 +128,23 @@ export default function App() {
     }
     if (authUser.role === 'candidate') {
       setViewMode('candidate');
+      if (typeof window !== 'undefined') {
+        window.history.replaceState(null, '', '?view=candidate');
+      }
     } else {
       setViewMode('recruiter');
+      if (typeof window !== 'undefined') {
+        window.history.replaceState(null, '', '?view=recruiter');
+      }
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleBackToLanding = () => {
     setViewMode('landing');
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', '?view=landing');
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 

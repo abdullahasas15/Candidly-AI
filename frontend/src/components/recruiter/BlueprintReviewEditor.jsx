@@ -4,13 +4,17 @@ import {
   RefreshCw, Trash2, Plus, ShieldCheck, FileText, ChevronRight,
   Info, Layers, Lock, Edit3, AlertCircle, Check, Play, UserCheck
 } from 'lucide-react';
+import { getRecruiterToken, getAuthHeaders } from '../../utils/auth';
 
 export default function BlueprintReviewEditor({
-  job,
+  job: propJob,
+  jobId: propJobId,
   onApproved,
+  onBlueprintApproved,
   onClose,
   initialBlueprint = null
 }) {
+  const job = propJob || (propJobId ? { id: propJobId } : null);
   const [blueprint, setBlueprint] = useState(initialBlueprint);
   const [loading, setLoading] = useState(!initialBlueprint);
   const [generating, setGenerating] = useState(false);
@@ -25,12 +29,15 @@ export default function BlueprintReviewEditor({
 
   // Fetch blueprint and budget preview on mount
   const fetchBlueprint = async () => {
-    if (!job?.id) return;
+    if (!job?.id) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setErrorMsg(null);
     try {
-      const token = localStorage.getItem('candidly-auth-token');
-      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const token = getRecruiterToken();
+      const headers = getAuthHeaders(token);
 
       const res = await fetch(`/api/jobs/${job.id}/blueprint`, { headers });
       if (res.ok) {
@@ -84,8 +91,8 @@ export default function BlueprintReviewEditor({
 
     const checkStatus = async () => {
       try {
-        const token = localStorage.getItem('candidly-auth-token');
-        const headers = token ? { Authorization: `Bearer ${token}` } : {};
+        const token = getRecruiterToken();
+        const headers = getAuthHeaders(token);
         const res = await fetch(`/api/jobs/${job.id}/blueprint/generate/status`, { headers });
         if (!res.ok) return;
         const data = await res.json();
@@ -95,9 +102,12 @@ export default function BlueprintReviewEditor({
         if (data.status === 'in_progress') {
           setGenerating(true);
           timer = setTimeout(checkStatus, 1500);
-        } else if (data.status === 'completed' && data.blueprint) {
+        } else if (data.status === 'completed') {
           setGenerating(false);
-          setBlueprint(data.blueprint);
+          if (data.blueprint) {
+            setBlueprint(data.blueprint);
+          }
+          await fetchBlueprint();
         } else if (data.status === 'failed') {
           setGenerating(false);
           setErrorMsg(data.error || 'Blueprint generation failed');
@@ -122,8 +132,8 @@ export default function BlueprintReviewEditor({
     setErrorMsg(null);
     setSuccessMsg(null);
     try {
-      const token = localStorage.getItem('candidly-auth-token');
-      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const token = getRecruiterToken();
+      const headers = getAuthHeaders(token);
 
       const res = await fetch(`/api/jobs/${job.id}/blueprint/generate`, {
         method: 'POST',
@@ -150,11 +160,8 @@ export default function BlueprintReviewEditor({
     setSaving(true);
     setErrorMsg(null);
     try {
-      const token = localStorage.getItem('candidly-auth-token');
-      const headers = {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
-      };
+      const token = getRecruiterToken();
+      const headers = getAuthHeaders(token, 'application/json');
 
       const res = await fetch(`/api/jobs/${job.id}/blueprint/${blueprint.id}`, {
         method: 'PUT',
@@ -206,11 +213,8 @@ export default function BlueprintReviewEditor({
     setRegeneratingSectionId(sectionId);
     setErrorMsg(null);
     try {
-      const token = localStorage.getItem('candidly-auth-token');
-      const headers = {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
-      };
+      const token = getRecruiterToken();
+      const headers = getAuthHeaders(token, 'application/json');
 
       const res = await fetch(`/api/jobs/${job.id}/blueprint/sections/${sectionId}/regenerate`, {
         method: 'POST',
@@ -351,11 +355,8 @@ export default function BlueprintReviewEditor({
     setSaving(true);
     setErrorMsg(null);
     try {
-      const token = localStorage.getItem('candidly-auth-token');
-      const headers = {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
-      };
+      const token = getRecruiterToken();
+      const headers = getAuthHeaders(token, 'application/json');
 
       const res = await fetch(`/api/jobs/${job.id}/blueprint/approve`, {
         method: 'POST',
@@ -379,6 +380,7 @@ export default function BlueprintReviewEditor({
       setBlueprint(approved);
       setSuccessMsg('Blueprint approved! This job is now accepting candidate applications.');
       if (onApproved) onApproved(approved);
+      if (onBlueprintApproved) onBlueprintApproved(approved);
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -530,14 +532,14 @@ export default function BlueprintReviewEditor({
           </div>
 
           {/* View mode toggle */}
-          <div className="flex items-center gap-1 bg-white dark:bg-slate-800 p-1 rounded-2xl border border-slate-200 dark:border-slate-700 text-xs font-bold">
+          <div className="flex items-center gap-1 bg-[#18181B] p-1 rounded-2xl border border-white/[0.08] text-xs font-bold">
             <button
               type="button"
               onClick={() => setViewMode('sections')}
               className={`px-3 py-1.5 rounded-xl transition-all ${
                 viewMode === 'sections'
-                  ? 'bg-teal-500 text-white shadow-sm'
-                  : 'text-slate-600 dark:text-slate-300 hover:text-slate-900'
+                  ? 'bg-teal-500 text-black shadow-sm'
+                  : 'text-zinc-400 hover:text-white'
               }`}
             >
               Sections & Rubrics
@@ -547,8 +549,8 @@ export default function BlueprintReviewEditor({
               onClick={() => setViewMode('script_preview')}
               className={`px-3 py-1.5 rounded-xl transition-all ${
                 viewMode === 'script_preview'
-                  ? 'bg-teal-500 text-white shadow-sm'
-                  : 'text-slate-600 dark:text-slate-300 hover:text-slate-900'
+                  ? 'bg-teal-500 text-black shadow-sm'
+                  : 'text-zinc-400 hover:text-white'
               }`}
             >
               Spoken Script Preview
@@ -557,7 +559,7 @@ export default function BlueprintReviewEditor({
         </div>
 
         {/* Time Budget Meter */}
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700/60 space-y-2">
+        <div className="p-3.5 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-2">
           <div className="flex items-center justify-between text-xs font-bold">
             <div className="flex items-center gap-2">
               <Clock className="w-4 h-4 text-teal-400" />
@@ -567,25 +569,25 @@ export default function BlueprintReviewEditor({
             </div>
             <span className={`text-[11px] font-bold ${
               timeDifference === 0
-                ? 'text-emerald-600 dark:text-emerald-400'
+                ? 'text-emerald-400'
                 : Math.abs(timeDifference) <= 1.0
-                ? 'text-amber-600 dark:text-amber-400'
-                : 'text-rose-600 dark:text-rose-400'
+                ? 'text-amber-400'
+                : 'text-rose-400'
             }`}>
               {timeDifference === 0 ? 'Perfect Budget Match' : `${timeDifference > 0 ? '+' : ''}${timeDifference}m variance`}
             </span>
           </div>
 
           {/* Visual Bar */}
-          <div className="w-full h-2.5 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden flex">
+          <div className="w-full h-2 rounded-full bg-[#18181B] overflow-hidden flex">
             {blueprint.sections?.map((s, idx) => {
               const widthPct = Math.min(100, (s.allocated_minutes / durationTarget) * 100);
               const color = s.section_type === 'welcome' || s.section_type === 'closing'
-                ? 'bg-slate-400 dark:bg-slate-500'
+                ? 'bg-zinc-600'
                 : s.priority_tier === 'P0'
                 ? 'bg-rose-500'
                 : s.priority_tier === 'P1'
-                ? 'bg-indigo-500'
+                ? 'bg-teal-500'
                 : 'bg-emerald-500';
 
               return (
@@ -593,7 +595,7 @@ export default function BlueprintReviewEditor({
                   key={idx}
                   title={`${s.title}: ${s.allocated_minutes}m`}
                   style={{ width: `${widthPct}%` }}
-                  className={`${color} h-full border-r border-white/20 dark:border-slate-800/50 transition-all`}
+                  className={`${color} h-full border-r border-white/10 transition-all`}
                 />
               );
             })}
@@ -647,7 +649,7 @@ export default function BlueprintReviewEditor({
       {/* VIEW MODE 1: Static Spoken Script Preview */}
       {viewMode === 'script_preview' && (
         <div className="space-y-4">
-          <div className="p-4 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-900 text-xs text-indigo-900 dark:text-indigo-200 font-medium space-y-1">
+          <div className="p-4 rounded-2xl bg-teal-500/10 border border-teal-500/20 text-xs text-teal-200 font-medium space-y-1">
             <p className="font-bold flex items-center gap-1.5 text-teal-300">
               <FileText className="w-4 h-4" />
               <span>Static Spoken Interview Script Preview</span>
@@ -668,7 +670,7 @@ export default function BlueprintReviewEditor({
                 key={sec.id || idx}
                 className="p-5 rounded-3xl bg-[#0A0A0B] border border-white/[0.08] shadow-sm space-y-3"
               >
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
                   <div className="flex items-center gap-2">
                     <span className="w-6 h-6 rounded-lg bg-teal-500/10 text-teal-400 font-black text-xs flex items-center justify-center">
                       {idx + 1}
@@ -677,24 +679,24 @@ export default function BlueprintReviewEditor({
                       {sec.title}
                     </h4>
                   </div>
-                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#18181B] text-slate-600 dark:text-slate-300">
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#18181B] text-zinc-300">
                     {sec.allocated_minutes} minutes
                   </span>
                 </div>
 
                 {/* Spoken script content */}
                 {sec.section_type === 'welcome' && (
-                  <div className="p-3.5 rounded-2xl bg-[#111113]/60 border border-slate-100 dark:border-slate-800 text-xs text-zinc-300 space-y-2">
-                    <p className="font-bold text-slate-500 uppercase text-[10px]">Spoken Welcome & Agenda</p>
+                  <div className="p-3.5 rounded-2xl bg-[#111113] border border-white/[0.08] text-xs text-zinc-300 space-y-2">
+                    <p className="font-bold text-zinc-500 uppercase text-[10px]">Spoken Welcome & Agenda</p>
                     <p className="italic leading-relaxed">
-                      "{sec.welcome_script || `Hello! Welcome to your interview for ${job.job_title}. We have ${job.interview_duration_mins} minutes today. We'll start with a brief introduction, dive into your technical competencies, and reserve time for your questions.`}"
+                      "{sec.welcome_script || `Hello! Welcome to your interview for ${job?.job_title || 'this role'}. We have ${job?.interview_duration_mins || 20} minutes today. We'll start with a brief introduction, dive into your technical competencies, and reserve time for your questions.`}"
                     </p>
                   </div>
                 )}
 
                 {sec.section_type === 'closing' && (
-                  <div className="p-3.5 rounded-2xl bg-[#111113]/60 border border-slate-100 dark:border-slate-800 text-xs text-zinc-300 space-y-2">
-                    <p className="font-bold text-slate-500 uppercase text-[10px]">Spoken Closing & Candidate Q&A</p>
+                  <div className="p-3.5 rounded-2xl bg-[#111113] border border-white/[0.08] text-xs text-zinc-300 space-y-2">
+                    <p className="font-bold text-zinc-500 uppercase text-[10px]">Spoken Closing & Candidate Q&A</p>
                     <p className="italic leading-relaxed">
                       "{sec.closing_script || 'Thank you for walking us through your experience! We now have a few minutes for any questions you would like to ask us about the role, team, or architecture.'}"
                     </p>
@@ -704,8 +706,8 @@ export default function BlueprintReviewEditor({
                 {!isFixed && (
                   <div className="space-y-3 text-xs">
                     {/* Spoken Transition */}
-                    <div className="p-3 rounded-2xl bg-[#111113]/60 border border-slate-100 dark:border-slate-800 space-y-1">
-                      <span className="text-[10px] font-bold uppercase text-slate-400">Natural Verbal Transition</span>
+                    <div className="p-3 rounded-2xl bg-[#111113] border border-white/[0.08] space-y-1">
+                      <span className="text-[10px] font-bold uppercase text-zinc-400">Natural Verbal Transition</span>
                       <p className="italic text-zinc-300">
                         "Now, let's turn our attention to {sec.skill_name}. I'd like to explore how you approach architecture and problem solving in this domain."
                       </p>
@@ -713,12 +715,12 @@ export default function BlueprintReviewEditor({
 
                     {/* Calibrated Anchor */}
                     {anchorQ && (
-                      <div className="p-3.5 rounded-2xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50 space-y-1.5">
+                      <div className="p-3.5 rounded-2xl bg-teal-500/10 border border-teal-500/20 space-y-1.5">
                         <div className="flex items-center justify-between">
-                          <span className="text-[10px] font-black uppercase text-indigo-700 dark:text-teal-400">
+                          <span className="text-[10px] font-black uppercase text-teal-400">
                             Spoken Anchor Question ({anchorQ.source === 'recruiter' ? 'Recruiter-Authored' : 'AI-Calibrated'})
                           </span>
-                          <span className="text-[10px] text-slate-400 font-semibold">{anchorQ.word_count || 0} words</span>
+                          <span className="text-[10px] text-zinc-400 font-semibold">{anchorQ.word_count || 0} words</span>
                         </div>
                         <p className="font-bold text-white leading-relaxed">
                           "{anchorQ.question_text}"
@@ -728,11 +730,11 @@ export default function BlueprintReviewEditor({
 
                     {/* Escalation Path */}
                     {escQ && (
-                      <div className="p-3 rounded-2xl bg-purple-50/40 dark:bg-purple-950/20 border border-purple-100 dark:border-purple-900/40 space-y-1">
-                        <span className="text-[10px] font-black uppercase text-purple-700 dark:text-purple-400">
+                      <div className="p-3 rounded-2xl bg-purple-950/20 border border-purple-900/40 space-y-1">
+                        <span className="text-[10px] font-black uppercase text-purple-400">
                           Senior Escalation Path (If candidate shows strong L4+ mastery)
                         </span>
-                        <p className="italic text-slate-800 dark:text-slate-200">
+                        <p className="italic text-zinc-300">
                           "{escQ.question_text}"
                         </p>
                       </div>
@@ -741,18 +743,18 @@ export default function BlueprintReviewEditor({
                     {/* Dynamic Probes */}
                     {probes.length > 0 && (
                       <div className="space-y-2 pt-1">
-                        <span className="text-[10px] font-black uppercase text-slate-400 block">
+                        <span className="text-[10px] font-black uppercase text-zinc-400 block">
                           Calibrated Follow-Up Probes ({probes.length})
                         </span>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                           {probes.map((pr, pIdx) => (
                             <div
                               key={pIdx}
-                              className="p-2.5 rounded-xl bg-[#111113] border border-slate-100 dark:border-slate-800 text-[11px] space-y-1"
+                              className="p-2.5 rounded-xl bg-[#111113] border border-white/[0.08] text-[11px] space-y-1"
                             >
-                              <p className="font-semibold text-slate-800 dark:text-slate-200">"{pr.question_text}"</p>
+                              <p className="font-semibold text-zinc-200">"{pr.question_text}"</p>
                               {pr.trigger_condition && (
-                                <p className="text-[10px] text-amber-600 dark:text-amber-400 font-medium">
+                                <p className="text-[10px] text-amber-400 font-medium">
                                   Trigger: {pr.trigger_condition}
                                 </p>
                               )}
@@ -772,7 +774,20 @@ export default function BlueprintReviewEditor({
       {/* VIEW MODE 2: Sections & Rubrics Editor */}
       {viewMode === 'sections' && (
         <div className="space-y-4">
-          {blueprint.sections?.map((sec, sIdx) => {
+          {(!blueprint.sections || blueprint.sections.length === 0) ? (
+            <div className="p-8 text-center space-y-4 bg-[#111113] rounded-3xl border border-dashed border-zinc-800">
+              <p className="text-sm text-zinc-400">No sections found in this blueprint.</p>
+              <button
+                type="button"
+                onClick={handleGenerateBlueprint}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-teal-500 hover:bg-teal-400 text-black font-semibold text-xs transition-all"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>Generate Blueprint Sections</span>
+              </button>
+            </div>
+          ) : (
+            blueprint.sections.map((sec, sIdx) => {
             const isFixed = sec.section_type === 'welcome' || sec.section_type === 'closing';
             const isRegenerating = regeneratingSectionId === sec.id;
 
@@ -799,16 +814,16 @@ export default function BlueprintReviewEditor({
                         ) : (
                           <span className={`px-2 py-0.5 rounded-md text-[10px] font-black ${
                             sec.priority_tier === 'P0'
-                              ? 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900'
-                              : 'bg-teal-500/10 text-teal-300 border border-indigo-200 dark:border-indigo-900'
+                              ? 'bg-rose-500/10 text-rose-300 border border-rose-500/20'
+                              : 'bg-teal-500/10 text-teal-300 border border-teal-500/20'
                           }`}>
                             {sec.priority_tier || 'P1'}
                           </span>
                         )}
                       </div>
                       {!isFixed && (
-                        <p className="text-[11px] text-slate-400">
-                          Target Rubric Tier: <strong className="text-slate-600 dark:text-slate-300">{sec.target_rubric_tier || 'L4-L5 Expert'}</strong>
+                        <p className="text-[11px] text-zinc-400">
+                          Target Rubric Tier: <strong className="text-zinc-200">{sec.target_rubric_tier || 'Not configured'}</strong>
                         </p>
                       )}
                     </div>
@@ -817,8 +832,8 @@ export default function BlueprintReviewEditor({
                   {/* Section Controls */}
                   <div className="flex items-center gap-2">
                     {/* Time Input */}
-                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs">
-                      <Clock className="w-3.5 h-3.5 text-slate-400" />
+                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-[#18181B] border border-white/[0.08] text-xs">
+                      <Clock className="w-3.5 h-3.5 text-zinc-400" />
                       <input
                         type="number"
                         step="0.5"
@@ -829,18 +844,18 @@ export default function BlueprintReviewEditor({
                         onBlur={() => saveSections(blueprint.sections)}
                         className="w-12 bg-transparent text-center font-bold text-white focus:outline-none"
                       />
-                      <span className="text-slate-400 text-[11px]">min</span>
+                      <span className="text-zinc-400 text-[11px]">min</span>
                     </div>
 
                     {!isFixed && (
                       <>
                         {/* Reorder Buttons */}
-                        <div className="flex items-center border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+                        <div className="flex items-center border border-white/[0.08] rounded-xl overflow-hidden bg-[#18181B]">
                           <button
                             type="button"
                             disabled={sIdx <= 1}
                             onClick={() => handleMoveSection(sIdx, -1)}
-                            className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 text-slate-500"
+                            className="p-1.5 hover:bg-[#27272A] disabled:opacity-30 text-zinc-400"
                             title="Move Up"
                           >
                             <ArrowUp className="w-3.5 h-3.5" />
@@ -849,7 +864,7 @@ export default function BlueprintReviewEditor({
                             type="button"
                             disabled={sIdx >= blueprint.sections.length - 2}
                             onClick={() => handleMoveSection(sIdx, 1)}
-                            className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 text-slate-500"
+                            className="p-1.5 hover:bg-[#27272A] disabled:opacity-30 text-zinc-400"
                             title="Move Down"
                           >
                             <ArrowDown className="w-3.5 h-3.5" />
@@ -861,7 +876,7 @@ export default function BlueprintReviewEditor({
                           type="button"
                           disabled={isRegenerating || saving}
                           onClick={() => handleRegenerateSection(sec.id)}
-                          className="p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 hover:text-teal-400 transition-colors disabled:opacity-40"
+                          className="p-1.5 rounded-xl border border-white/[0.08] text-zinc-300 hover:bg-[#18181B] hover:text-teal-400 transition-colors disabled:opacity-40"
                           title="Regenerate this section with Gemini"
                         >
                           <RefreshCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin text-teal-400' : ''}`} />
@@ -871,7 +886,7 @@ export default function BlueprintReviewEditor({
                         <button
                           type="button"
                           onClick={() => handleDeleteSection(sIdx)}
-                          className="p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors"
+                          className="p-1.5 rounded-xl border border-white/[0.08] text-rose-400 hover:bg-rose-950/30 transition-colors"
                           title="Delete Section"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -908,7 +923,7 @@ export default function BlueprintReviewEditor({
                         {sec.expectations?.map((exp, eIdx) => (
                           <div
                             key={exp.id || eIdx}
-                            className="flex items-center gap-2 p-2 rounded-xl bg-[#111113] border border-slate-100 dark:border-slate-800"
+                            className="flex items-center gap-2 p-2 rounded-xl bg-[#18181B] border border-white/[0.08]"
                           >
                             <input
                               type="text"
@@ -925,7 +940,7 @@ export default function BlueprintReviewEditor({
                                 handleUpdateExpectation(sIdx, eIdx, 'importance', e.target.value);
                                 saveSections(blueprint.sections);
                               }}
-                              className="px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[10px] font-bold"
+                              className="px-2 py-0.5 rounded-md border border-white/[0.08] bg-[#111113] text-zinc-300 text-[10px] font-bold"
                             >
                               <option value="core">Core</option>
                               <option value="stretch">Stretch</option>
@@ -934,7 +949,7 @@ export default function BlueprintReviewEditor({
                             <button
                               type="button"
                               onClick={() => handleRemoveExpectation(sIdx, eIdx)}
-                              className="p-1 text-slate-400 hover:text-rose-500"
+                              className="p-1 text-zinc-500 hover:text-rose-400"
                             >
                               <Trash2 className="w-3 h-3" />
                             </button>
@@ -944,7 +959,7 @@ export default function BlueprintReviewEditor({
                     </div>
 
                     {/* 2. Questions (Anchor, Escalation, Probes) */}
-                    <div className="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                    <div className="space-y-3 pt-2 border-t border-white/[0.08]">
                       <div className="flex items-center justify-between">
                         <label className="font-bold text-zinc-300 text-[11px] uppercase tracking-wider">
                           Questions & Probing Tree
@@ -953,7 +968,7 @@ export default function BlueprintReviewEditor({
                           <button
                             type="button"
                             onClick={() => handleAddRecruiterAnchor(sIdx)}
-                            className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400 hover:underline"
+                            className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-400 hover:underline"
                           >
                             <Plus className="w-3 h-3" />
                             <span>Add My Custom Anchor</span>
@@ -979,9 +994,9 @@ export default function BlueprintReviewEditor({
                               key={q.id || qIdx}
                               className={`p-3 rounded-2xl border space-y-2 ${
                                 isAnchor
-                                  ? 'bg-indigo-50/40 dark:bg-indigo-950/20 border-indigo-200/80 dark:border-indigo-900/60'
+                                  ? 'bg-teal-500/10 border-teal-500/30'
                                   : isEsc
-                                  ? 'bg-purple-50/40 dark:bg-purple-950/20 border-purple-200/80 dark:border-purple-900/60'
+                                  ? 'bg-purple-950/20 border-purple-900/60'
                                   : 'bg-[#111113] border-white/[0.08]'
                               }`}
                             >
@@ -989,16 +1004,16 @@ export default function BlueprintReviewEditor({
                                 <div className="flex items-center gap-1.5">
                                   <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
                                     isAnchor
-                                      ? 'bg-teal-500 text-white'
+                                      ? 'bg-teal-500 text-black'
                                       : isEsc
                                       ? 'bg-purple-600 text-white'
-                                      : 'bg-slate-200 dark:bg-slate-700 text-zinc-300'
+                                      : 'bg-[#27272A] text-zinc-300'
                                   }`}>
                                     {q.question_role}
                                   </span>
 
                                   {q.source === 'recruiter' && (
-                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300">
+                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
                                       Recruiter Authored
                                     </span>
                                   )}
@@ -1008,7 +1023,7 @@ export default function BlueprintReviewEditor({
                                   <button
                                     type="button"
                                     onClick={() => handleRemoveQuestion(sIdx, qIdx)}
-                                    className="p-1 text-slate-400 hover:text-rose-500"
+                                    className="p-1 text-zinc-500 hover:text-rose-400"
                                   >
                                     <Trash2 className="w-3 h-3" />
                                   </button>
@@ -1020,12 +1035,12 @@ export default function BlueprintReviewEditor({
                                 value={q.question_text}
                                 onChange={(e) => handleUpdateQuestion(sIdx, qIdx, 'question_text', e.target.value)}
                                 onBlur={() => saveSections(blueprint.sections)}
-                                className="w-full p-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-white focus:outline-none focus:ring-1 focus:ring-teal-400"
+                                className="w-full p-2.5 rounded-xl bg-[#18181B] border border-white/[0.08] text-xs text-white focus:outline-none focus:border-teal-500/50"
                               />
 
                               {q.question_role === 'probe' && (
                                 <div className="flex items-center gap-2">
-                                  <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 whitespace-nowrap">
+                                  <span className="text-[10px] font-bold text-amber-400 whitespace-nowrap">
                                     Trigger Condition:
                                   </span>
                                   <input
@@ -1034,7 +1049,7 @@ export default function BlueprintReviewEditor({
                                     placeholder="e.g. If candidate skips memory bounds or trade-offs"
                                     onChange={(e) => handleUpdateQuestion(sIdx, qIdx, 'trigger_condition', e.target.value)}
                                     onBlur={() => saveSections(blueprint.sections)}
-                                    className="flex-1 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[11px] focus:outline-none"
+                                    className="flex-1 px-2.5 py-1 rounded-lg bg-[#18181B] border border-white/[0.08] text-[11px] text-white focus:outline-none focus:border-teal-500/50"
                                   />
                                 </div>
                               )}
@@ -1047,22 +1062,28 @@ export default function BlueprintReviewEditor({
                 )}
               </div>
             );
-          })}
+          })
+          )}
         </div>
       )}
 
       {/* Bottom Sticky Action Strip */}
-      <div className="sticky bottom-0 p-4 rounded-3xl bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border border-white/[0.08] shadow-xl flex items-center justify-between gap-4">
+      <div className="sticky bottom-0 p-4 rounded-3xl bg-[#0A0A0B]/95 backdrop-blur-md border border-white/[0.08] shadow-2xl flex items-center justify-between gap-4">
         <div className="text-xs text-slate-500 dark:text-slate-400">
           {saving ? (
             <span className="inline-flex items-center gap-1.5 text-teal-400 font-semibold">
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
               <span>Saving changes (Copy-on-write)...</span>
             </span>
-          ) : blueprint.status === 'approved' && !blueprint.is_stale ? (
-            <span className="text-emerald-600 font-semibold flex items-center gap-1">
-              <CheckCircle2 className="w-3.5 h-3.5" />
+          ) : blueprint.status === 'approved' && !blueprint.is_stale && validatorErrors.length === 0 ? (
+            <span className="text-emerald-400 font-semibold flex items-center gap-1">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
               <span>Approved & Live for Applications</span>
+            </span>
+          ) : blueprint.status === 'approved' && validatorErrors.length > 0 ? (
+            <span className="text-rose-400 font-semibold flex items-center gap-1">
+              <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+              <span>Approved with Unresolved Validation Errors — Requires Repair & Re-Approval</span>
             </span>
           ) : (
             <span>Edits are saved as draft. Approval is required before candidates can apply.</span>
@@ -1074,7 +1095,7 @@ export default function BlueprintReviewEditor({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-400 hover:bg-[#18181B]"
             >
               Close
             </button>
@@ -1086,8 +1107,8 @@ export default function BlueprintReviewEditor({
             onClick={() => handleApprove(false)}
             className={`inline-flex items-center gap-2 px-6 py-2.5 rounded-xl font-bold text-xs shadow-md transition-all ${
               validatorErrors.length > 0
-                ? 'bg-slate-300 dark:bg-slate-800 text-slate-500 cursor-not-allowed'
-                : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/20 hover:-translate-y-0.5'
+                ? 'bg-[#18181B] text-zinc-500 cursor-not-allowed'
+                : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/20 hover:-translate-y-0.5'
             }`}
           >
             <Check className="w-4 h-4" />
@@ -1098,18 +1119,18 @@ export default function BlueprintReviewEditor({
 
       {/* Warning Confirmation Modal */}
       {confirmWarningModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-fadeIn">
-          <div className="w-full max-w-lg p-6 rounded-3xl bg-[#0A0A0B] border border-amber-300 dark:border-amber-800 shadow-2xl space-y-4">
-            <div className="flex items-center gap-3 text-amber-600 dark:text-amber-400">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-lg p-6 rounded-3xl bg-[#0A0A0B] border border-amber-500/40 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-amber-400">
               <AlertTriangle className="w-6 h-6 flex-shrink-0" />
               <h3 className="text-base font-extrabold text-white">
                 Acknowledge Blueprint Warnings
               </h3>
             </div>
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+            <p className="text-xs text-zinc-400 leading-relaxed">
               The blueprint generator or validator surfaced the following non-blocking warnings:
             </p>
-            <div className="max-h-40 overflow-y-auto p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-300 space-y-1">
+            <div className="max-h-40 overflow-y-auto p-3 rounded-2xl bg-amber-950/20 border border-amber-900/40 text-xs text-amber-300 space-y-1">
               {validatorWarnings.map((w, idx) => (
                 <div key={idx} className="flex items-start gap-1.5">
                   <span>•</span>
@@ -1117,21 +1138,21 @@ export default function BlueprintReviewEditor({
                 </div>
               ))}
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
+            <p className="text-xs text-zinc-400 font-medium">
               You can confirm and approve the blueprint anyway, or return to edit the sections.
             </p>
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 type="button"
                 onClick={() => setConfirmWarningModal(false)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-400 hover:bg-[#18181B]"
               >
                 Return to Editor
               </button>
               <button
                 type="button"
                 onClick={() => handleApprove(true)}
-                className="px-5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md shadow-amber-600/20"
+                className="px-5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs shadow-md shadow-amber-600/20"
               >
                 Confirm & Approve Blueprint
               </button>

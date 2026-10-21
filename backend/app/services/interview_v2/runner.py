@@ -22,11 +22,19 @@ from datetime import datetime
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
 
 from fastapi import WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from backend.app.database import AsyncSessionLocal
-from backend.app.models import InterviewQuestion, InterviewSession, InterviewTranscriptTurn
+from backend.app.models import (
+    BlueprintSection,
+    InterviewBlueprint,
+    InterviewQuestion,
+    InterviewSession,
+    InterviewTranscriptTurn,
+    JobApplication,
+    JobPosting,
+)
 from backend.app.services.interview.trace import SessionTrace
 from backend.app.services.interview_v2.conductor import (
     AckReady,
@@ -270,12 +278,19 @@ def build_script(session: Any) -> Dict[str, Any]:
 
 
 async def load_real_session_script(session_id: str) -> Tuple[Optional[InterviewSession], Dict[str, Any]]:
-    """Load a real InterviewSession from the database and build the conductor script."""
+    """Load a real InterviewSession from the database and build the conductor script,
+    with full eager-loading across questions, job skills, and blueprint sections."""
     async with AsyncSessionLocal() as db:
+        eager_options = (
+            selectinload(InterviewSession.questions),
+            selectinload(InterviewSession.job).selectinload(JobPosting.skills),
+            selectinload(InterviewSession.blueprint).selectinload(InterviewBlueprint.sections).selectinload(BlueprintSection.questions),
+            selectinload(InterviewSession.blueprint).selectinload(InterviewBlueprint.sections).selectinload(BlueprintSection.expectations),
+        )
         result = await db.execute(
             select(InterviewSession)
             .where(InterviewSession.id == session_id)
-            .options(selectinload(InterviewSession.questions))
+            .options(*eager_options)
         )
         session = result.scalar_one_or_none()
         if not session:
@@ -286,11 +301,11 @@ async def load_real_session_script(session_id: str) -> Tuple[Optional[InterviewS
             from backend.app.services.interview.plan_materializer import materialize_blueprint_session_plan
             await materialize_blueprint_session_plan(session, db)
             await db.commit()
-            # Reload
+            # Reload with full eager options
             result2 = await db.execute(
                 select(InterviewSession)
                 .where(InterviewSession.id == session_id)
-                .options(selectinload(InterviewSession.questions))
+                .options(*eager_options)
             )
             session = result2.scalar_one_or_none()
 
@@ -602,13 +617,30 @@ class SessionRunner:
                                 stmt = select(InterviewSession).where(InterviewSession.id == self.session_id)
                                 res = await db.execute(stmt)
                                 s_row = res.scalar_one_or_none()
-                                if s_row:
+                                if s_row and s_row.status != "completed":
                                     s_row.status = "completed"
                                     s_row.current_phase = "completed"
                                     s_row.completed_at = datetime.utcnow()
+                                    if s_row.application_id and not s_row.is_practice:
+                                        await db.execute(
+                                            update(JobApplication)
+                                            .where(JobApplication.id == s_row.application_id)
+                                            .values(status="interview_completed")
+                                        )
                                     await db.commit()
                         except Exception as e:
                             logger.warning("Could not mark session completed in DB: %s", e)
+
+                        if self.websocket:
+                            try:
+                                await self.websocket.send_json({
+                                    "type": "SessionEnded",
+                                    "session_id": self.session_id,
+                                    "request_id": getattr(event, "request_id", None) or "",
+                                    "status": "completed",
+                                })
+                            except Exception:
+                                pass
 
             except asyncio.CancelledError:
                 break
@@ -854,11 +886,16 @@ class SessionRunner:
                 await self.websocket.send_json({"type": "TTSCancelled", "speech_id": speech_id})
         except Exception as e:
             logger.error("Error streaming Aura speech: %s", repr(e), exc_info=True)
+            self.speech_ledger.mark_cancelled(speech_id)
             if self.websocket:
                 try:
                     await self.websocket.send_json({"type": "TTSError", "speech_id": speech_id, "error": str(e)})
                 except Exception:
                     pass
+            # Clear stuck speaking state and transition to listening
+            self.state.bot_speaking = False
+            self.state.bot_audio_started = False
+            await self.queue.put(BotSpeechDone(speech_id=speech_id, now_ms=self.now_ms()))
 
     async def _handle_cancel_speech(self) -> None:
         """Cancel active TTS stream and speculative generation."""
@@ -1665,8 +1702,8 @@ class SessionRunner:
     async def on_repeat_button(self) -> None:
         await self.queue.put(RepeatRequest(now_ms=self.now_ms()))
 
-    async def on_end_button(self) -> None:
-        await self.queue.put(EndButton(now_ms=self.now_ms()))
+    async def on_end_button(self, request_id: Optional[str] = None) -> None:
+        await self.queue.put(EndButton(now_ms=self.now_ms(), request_id=request_id))
 
     async def on_mic_audio(self, raw_bytes: bytes) -> None:
         """Process incoming client mic PCM chunk."""

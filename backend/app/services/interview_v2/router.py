@@ -84,11 +84,27 @@ async def ws_interview_endpoint(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
     logger.info("Client connected to /ws/interview/%s", session_id)
 
-    # 1. Load real session script from database
+    # 1. Load real session script from database with eager relationships
     session, script = await load_real_session_script(session_id)
+    if not session:
+        logger.warning("Session %s not found in database", session_id)
+        await websocket.send_json({
+            "type": "SessionError",
+            "error": "SessionNotFound",
+            "detail": f"Interview session {session_id} not found.",
+        })
+        await websocket.close(code=4004)
+        return
+
     if not script.get("questions"):
-        # Fallback to empty script
         logger.warning("Session %s has no questions in database", session_id)
+        await websocket.send_json({
+            "type": "SessionError",
+            "error": "EmptySession",
+            "detail": f"Interview session {session_id} has no questions configured.",
+        })
+        await websocket.close(code=4000)
+        return
 
     # 2. Key pool & audio clients
     key_pool = get_shared_key_pool()
@@ -104,7 +120,17 @@ async def ws_interview_endpoint(websocket: WebSocket, session_id: str) -> None:
         encoding="linear16",
     )
 
-    await flux_client.start()
+    try:
+        await flux_client.start()
+    except Exception as e:
+        logger.error("Flux STT initialization failed for session %s: %s", session_id, e)
+        await websocket.send_json({
+            "type": "SessionError",
+            "error": "STTInitializationFailed",
+            "detail": "Failed to initialize audio transcription service.",
+        })
+        await websocket.close(code=4003)
+        return
 
     # 3. Clean up existing runner before attaching new runner
     if session_id in ACTIVE_RUNNERS:
@@ -129,11 +155,47 @@ async def ws_interview_endpoint(websocket: WebSocket, session_id: str) -> None:
         except (asyncio.CancelledError, Exception) as e:
             logger.debug("Flux event forwarding ended: %s", e)
 
-    # Inform client of ready session first
+    # Inform client of session metadata first
     await websocket.send_json({
         "type": "SessionConnected",
         "session_id": session_id,
         "question_count": len(script.get("questions", [])),
+    })
+
+    # Wait for explicit client_ready handshake event before starting greeting
+    client_ready = False
+    try:
+        while not client_ready:
+            msg = await asyncio.wait_for(websocket.receive(), timeout=15.0)
+            if "text" in msg and msg["text"]:
+                try:
+                    payload = json.loads(msg["text"])
+                except Exception:
+                    continue
+                if payload.get("type") == "client_ready":
+                    client_ready = True
+                    break
+                elif payload.get("type") == "ping":
+                    await websocket.send_json({"type": "pong", "time": time.time()})
+            elif "bytes" in msg and msg["bytes"]:
+                # Drop candidate PCM before handshake completes
+                pass
+    except asyncio.TimeoutError:
+        logger.warning("Session %s: client_ready timeout after 15s", session_id)
+        await websocket.send_json({
+            "type": "SessionError",
+            "error": "HandshakeTimeout",
+            "detail": "Client audio readiness handshake timed out.",
+        })
+        await flux_client.stop()
+        await websocket.close(code=4008)
+        ACTIVE_RUNNERS.pop(session_id, None)
+        return
+
+    # Notify client that handshake is complete
+    await websocket.send_json({
+        "type": "SessionReady",
+        "session_id": session_id,
     })
 
     flux_task = asyncio.create_task(_forward_flux_loop())
@@ -175,7 +237,8 @@ async def ws_interview_endpoint(websocket: WebSocket, session_id: str) -> None:
                     await runner.on_repeat_button()
 
                 elif msg_type == "end_button":
-                    await runner.on_end_button()
+                    req_id = payload.get("request_id")
+                    await runner.on_end_button(request_id=req_id)
 
                 elif msg_type == "restart_session":
                     from backend.app.services.interview_v2.runner import SESSION_STATE_CACHE
@@ -535,6 +598,7 @@ DEV_INTERVIEW_PAGE_HTML = r"""<!DOCTYPE html>
         if (audioCtx && audioCtx.state === 'suspended') {
           await audioCtx.resume();
         }
+        ws.send(JSON.stringify({ type: 'client_ready', sample_rate: audioCtx ? audioCtx.sampleRate : 24000 }));
       };
 
       ws.onmessage = (event) => {

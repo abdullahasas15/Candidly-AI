@@ -129,8 +129,10 @@ async def save_job_blueprint(
     res = await db.execute(ver_stmt)
     next_ver = res.scalar_one() + 1
 
-    status_val = "approved" if auto_approve else "draft"
-    approved_at_val = datetime.utcnow() if auto_approve else None
+    val_rep = blueprint_data.get("validation_report")
+    has_errors = bool(val_rep and val_rep.get("errors"))
+    status_val = "approved" if (auto_approve and not has_errors) else "draft"
+    approved_at_val = datetime.utcnow() if (auto_approve and not has_errors) else None
 
     blueprint = InterviewBlueprint(
         job_id=job_id,
@@ -139,7 +141,7 @@ async def save_job_blueprint(
         total_duration_mins=blueprint_data["total_duration_mins"],
         active_skill_mins=blueprint_data["active_skill_mins"],
         fixed_overhead_mins=blueprint_data["fixed_overhead_mins"],
-        approved_by=approved_by_id,
+        approved_by=approved_by_id if (auto_approve and not has_errors) else None,
         approved_at=approved_at_val,
         validation_report=blueprint_data.get("validation_report"),
         input_hash=inp_hash,
@@ -281,7 +283,7 @@ async def save_job_blueprint(
                 db.add(q)
                 await db.flush()
 
-    if auto_approve:
+    if auto_approve and not has_errors:
         await db.execute(
             update(JobPosting)
             .where(JobPosting.id == job_id)
@@ -340,6 +342,7 @@ async def update_or_fork_job_blueprint(
         job_skills=job_skills_data,
         active_skill_time=orig_bp.active_skill_mins,
         total_duration_mins=orig_bp.total_duration_mins,
+        seniority_level=job.seniority_level or "mid",
     )
 
     inp_hash = compute_job_input_hash(job)
@@ -574,13 +577,18 @@ async def approve_job_blueprint(
         job_skills=job_skills_data,
         active_skill_time=bp.active_skill_mins,
         total_duration_mins=bp.total_duration_mins,
+        seniority_level=job.seniority_level or "mid",
     )
 
-    if bp.is_generated_with_backup and report.errors:
+    # Check newly computed errors as well as any existing stored validation errors
+    existing_errors = list((bp.validation_report or {}).get("errors") or [])
+    all_errors = list(dict.fromkeys(report.errors + existing_errors))
+
+    if bp.is_generated_with_backup and all_errors:
         raise ValueError("Blueprint generated with backup provider has unresolved errors ('generated with backup; regenerate on primary') and cannot be approved.")
 
-    if report.errors:
-        raise ValueError(f"Approval blocked due to validation errors: {'; '.join(report.errors)}")
+    if all_errors:
+        raise ValueError(f"Approval blocked due to validation errors: {'; '.join(all_errors)}")
 
     if report.warnings and not confirmed_warnings:
         raise ValueError(f"Blueprint has validation warnings that must be confirmed: {'; '.join(report.warnings)}")

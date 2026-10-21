@@ -90,7 +90,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
   const [submittedSuccessfully, setSubmittedSuccessfully] = useState(false);
 
   const getAuthHeaders = (includeJson = false) => {
-    const token = localStorage.getItem('candidly-auth-token');
+    const token =
+      authUser?.access_token ||
+      localStorage.getItem('candidly-auth-token-candidate') ||
+      localStorage.getItem('candidly-auth-token');
     return {
       ...(includeJson ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {})

@@ -379,10 +379,14 @@ describe('LiveInterviewRoom Component', () => {
     const confirmBtn = screen.getByTestId('confirm-end-button');
     fireEvent.click(confirmBtn);
 
-    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'end_button' }));
+    const endCall = ws.send.mock.calls.find((call) => call[0].includes('"type":"end_button"'));
+    expect(endCall).toBeDefined();
+    const parsedEnd = JSON.parse(endCall[0]);
+    expect(parsedEnd.type).toBe('end_button');
+    expect(parsedEnd.request_id).toBeDefined();
 
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 700));
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionEnded', request_id: parsedEnd.request_id }) });
     });
 
     expect(onExitMock).toHaveBeenCalled();

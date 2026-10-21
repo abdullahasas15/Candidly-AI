@@ -289,9 +289,13 @@ export default function JobDetailModal({ job, isOpen, onClose, onJobUpdated }) {
           {activeTab === 'blueprint' && (
             <div className="space-y-4">
               <BlueprintReviewEditor
+                job={job}
                 jobId={job.id}
-                onBlueprintApproved={() => {
-                  if (onJobUpdated) onJobUpdated({ ...job, blueprint_status: 'approved' });
+                onApproved={(approvedBp) => {
+                  if (onJobUpdated) onJobUpdated({ ...job, blueprint_status: 'approved', active_blueprint_id: approvedBp?.id });
+                }}
+                onBlueprintApproved={(approvedBp) => {
+                  if (onJobUpdated) onJobUpdated({ ...job, blueprint_status: 'approved', active_blueprint_id: approvedBp?.id });
                 }}
               />
             </div>

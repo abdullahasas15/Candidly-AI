@@ -512,6 +512,7 @@ class RepeatRequest:
 @dataclass(frozen=True)
 class EndButton:
     now_ms: int = 0
+    request_id: Optional[str] = None
 
 
 @dataclass(frozen=True)

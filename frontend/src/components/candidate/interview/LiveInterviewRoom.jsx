@@ -33,27 +33,39 @@ import { initAudioPipeline } from './audioWorklet';
  */
 export default function LiveInterviewRoom({
   sessionId,
+  session,
   jobTitle = 'Technical Interview',
   candidateName = 'Candidate',
   durationMins = 20,
   token,
   onExit,
+  onEndInterview,
+  isPractice = false,
   mockState = null,
 }) {
-  // Connection states: 'connecting' | 'connected' | 'reconnecting' | 'completed' | 'error'
-  const [connectionState, setConnectionState] = useState(mockState?.connectionState || 'connecting');
-  const [errorMessage, setErrorMessage] = useState('');
+  const canonicalSessionId = sessionId || session?.id;
+  const canonicalOnExit = useCallback(() => {
+    if (onExit) {
+      onExit();
+    } else if (onEndInterview) {
+      onEndInterview();
+    }
+  }, [onExit, onEndInterview]);
+
+  // Connection states: 'connecting' | 'preparing_audio' | 'connected' | 'reconnecting' | 'completed' | 'error'
+  const [connectionState, setConnectionState] = useState(mockState?.connectionState || (canonicalSessionId ? 'preparing_audio' : 'error'));
+  const [errorMessage, setErrorMessage] = useState(mockState?.errorMessage || (!canonicalSessionId ? 'Interview session identifier is missing or invalid.' : ''));
 
   // Interview state from conductor
   const [phase, setPhase] = useState(mockState?.phase || 'welcome');
-  const [status, setStatus] = useState(mockState?.status || 'speaking'); // 'listening' | 'thinking' | 'speaking' | 'waiting_for_ready' | 'completed'
+  const [status, setStatus] = useState(mockState?.status || 'waiting_for_ready'); // 'listening' | 'thinking' | 'speaking' | 'waiting_for_ready' | 'preparing_audio' | 'completed' | 'failed'
   const [currentSection, setCurrentSection] = useState(mockState?.currentSection || 1);
   const [totalSections, setTotalSections] = useState(mockState?.totalSections || 5);
   const [skillName, setSkillName] = useState(mockState?.skillName || '');
 
   // Captions
   const [currentBotCaption, setCurrentBotCaption] = useState(
-    mockState?.currentBotCaption || 'Welcome to your interview. Setting up audio...'
+    mockState?.currentBotCaption || 'Preparing your interview environment and audio pipeline...'
   );
   const [previousBotCaption, setPreviousBotCaption] = useState(mockState?.previousBotCaption || '');
   const [candidateLiveTranscript, setCandidateLiveTranscript] = useState(mockState?.candidateLiveTranscript || '');
@@ -91,6 +103,13 @@ export default function LiveInterviewRoom({
   const currentSpeechIdRef = useRef(null);
   const reconnectAttemptsRef = useRef(0);
   const isComponentMountedRef = useRef(true);
+  const earlyAudioBufferRef = useRef([]);
+  const clientReadySentRef = useRef(false);
+  const isHandshakeCompleteRef = useRef(false);
+  const isTerminatedRef = useRef(false);
+  const reconnectTimerRef = useRef(null);
+  const endTimeoutRef = useRef(null);
+  const endFallbackAttemptedRef = useRef(false);
 
   // Determine active visualizer level
   useEffect(() => {
@@ -138,9 +157,65 @@ export default function LiveInterviewRoom({
     }
   }, []);
 
+  // Send client_ready event once WebSocket is OPEN and Audio Pipeline is running
+  const sendClientReadyIfReady = useCallback(() => {
+    if (
+      wsRef.current &&
+      wsRef.current.readyState === WebSocket.OPEN &&
+      audioPipelineRef.current &&
+      !clientReadySentRef.current
+    ) {
+      clientReadySentRef.current = true;
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'client_ready',
+          sample_rate: audioCtxRef.current?.sampleRate || 24000,
+        })
+      );
+    }
+  }, []);
+
+  // Terminal cleanup stops all hardware and invokes exit
+  const handleTerminalCleanup = useCallback(() => {
+    isTerminatedRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (endTimeoutRef.current) {
+      clearTimeout(endTimeoutRef.current);
+      endTimeoutRef.current = null;
+    }
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = null;
+    }
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+      try {
+        audioCtxRef.current.close().catch(() => {});
+      } catch (e) {}
+    }
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch (e) {}
+      wsRef.current = null;
+    }
+    canonicalOnExit();
+  }, [canonicalOnExit]);
+
   // Connect WebSocket & audio pipeline
   const connectSession = useCallback(async () => {
-    if (!sessionId || mockState?.skipConnect) return;
+    if (!canonicalSessionId || mockState?.skipConnect) return;
+
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
 
     // Reset or close existing WS
     if (wsRef.current) {
@@ -150,10 +225,90 @@ export default function LiveInterviewRoom({
       wsRef.current = null;
     }
 
+    clientReadySentRef.current = false;
+    isHandshakeCompleteRef.current = false;
+    setConnectionState('preparing_audio');
+
+    // 1. Initialize Audio Pipeline first
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+        audioCtxRef.current = new AudioContextClass({ sampleRate: 24000 });
+      }
+      if (audioCtxRef.current.state === 'suspended') {
+        await audioCtxRef.current.resume();
+      }
+
+      // Microphone stream
+      if (!micStreamRef.current && navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+            deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
+          },
+        });
+        micStreamRef.current = stream;
+      }
+
+      // Initialize Audio Worklets
+      if (audioCtxRef.current && micStreamRef.current) {
+        const pipeline = await initAudioPipeline({
+          audioCtx: audioCtxRef.current,
+          micStream: micStreamRef.current,
+          onPcmChunk: (buffer) => {
+            // Microphone gate: never transmit candidate PCM until startup handshake completes and bot is listening
+            if (
+              wsRef.current &&
+              wsRef.current.readyState === WebSocket.OPEN &&
+              !isMicMuted &&
+              isHandshakeCompleteRef.current &&
+              (status === 'listening' || status === 'talking')
+            ) {
+              wsRef.current.send(buffer);
+            }
+          },
+          onPlaybackStarted: (speechId) => {
+            setStatus('speaking');
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'playback_started', speech_id: speechId }));
+            }
+          },
+          onPlaybackEnded: (speechId) => {
+            setStatus('listening');
+            setBotLevel(0);
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'playback_ended', speech_id: speechId }));
+            }
+          },
+          onMicLevel: (lvl) => {
+            setMicLevel(isMicMuted ? 0 : lvl);
+          },
+          onBotLevel: (lvl) => {
+            setBotLevel(lvl);
+          },
+        });
+        audioPipelineRef.current = pipeline;
+
+        // Drain any early buffered chunks
+        if (earlyAudioBufferRef.current.length > 0) {
+          earlyAudioBufferRef.current.forEach((chunk) => {
+            pipeline.feedPlaybackChunk(currentSpeechIdRef.current, chunk);
+          });
+          earlyAudioBufferRef.current = [];
+        }
+      }
+    } catch (audioErr) {
+      console.warn('Audio initialization warning:', audioErr);
+      // In mock/test environments getUserMedia might be unmocked
+    }
+
+    // 2. Open WebSocket
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
-    // In dev Vite proxy or direct backend, handle host URL
-    const url = `${proto}//${host}/ws/interview/${sessionId}`;
+    const url = `${proto}//${host}/ws/interview/${canonicalSessionId}`;
 
     try {
       const ws = new WebSocket(url);
@@ -164,63 +319,7 @@ export default function LiveInterviewRoom({
         if (!isComponentMountedRef.current) return;
         reconnectAttemptsRef.current = 0;
         setConnectionState('connected');
-
-        // Setup Web Audio Context and Worklets
-        try {
-          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-          if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
-            audioCtxRef.current = new AudioContextClass({ sampleRate: 24000 });
-          } else if (audioCtxRef.current.state === 'suspended') {
-            await audioCtxRef.current.resume();
-          }
-
-          // Microphone stream
-          if (!micStreamRef.current) {
-            const stream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                channelCount: 1,
-                deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
-              },
-            });
-            micStreamRef.current = stream;
-          }
-
-          // Initialize Audio Worklets
-          const pipeline = await initAudioPipeline({
-            audioCtx: audioCtxRef.current,
-            micStream: micStreamRef.current,
-            onPcmChunk: (buffer) => {
-              if (ws.readyState === WebSocket.OPEN && !isMicMuted) {
-                ws.send(buffer);
-              }
-            },
-            onPlaybackStarted: (speechId) => {
-              setStatus('speaking');
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'playback_started', speech_id: speechId }));
-              }
-            },
-            onPlaybackEnded: (speechId) => {
-              setStatus('listening');
-              setBotLevel(0);
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'playback_ended', speech_id: speechId }));
-              }
-            },
-            onMicLevel: (lvl) => {
-              setMicLevel(isMicMuted ? 0 : lvl);
-            },
-            onBotLevel: (lvl) => {
-              setBotLevel(lvl);
-            },
-          });
-          audioPipelineRef.current = pipeline;
-        } catch (audioErr) {
-          console.error('Audio initialization error:', audioErr);
-        }
+        sendClientReadyIfReady();
       };
 
       ws.onmessage = (event) => {
@@ -231,6 +330,11 @@ export default function LiveInterviewRoom({
               currentSpeechIdRef.current,
               event.data
             );
+          } else {
+            // Buffer early chunks up to 50 (~1.5s) to guarantee zero greeting drop
+            if (earlyAudioBufferRef.current.length < 50) {
+              earlyAudioBufferRef.current.push(event.data);
+            }
           }
           return;
         }
@@ -243,6 +347,21 @@ export default function LiveInterviewRoom({
             if (msg.question_count) {
               setTotalSections(msg.question_count);
             }
+            sendClientReadyIfReady();
+          } else if (msg.type === 'SessionReady') {
+            isHandshakeCompleteRef.current = true;
+            setConnectionState('connected');
+            setStatus('waiting_for_ready');
+          } else if (msg.type === 'SessionError') {
+            setConnectionState('error');
+            setErrorMessage(msg.detail || msg.error || 'Interview session error');
+            setStatus('failed');
+          } else if (msg.type === 'SessionEnded') {
+            handleTerminalCleanup();
+          } else if (msg.type === 'TTSError') {
+            // TTS failure recovered: transition out of stuck speaking
+            setStatus('listening');
+            setBotLevel(0);
           } else if (msg.type === 'UIStatus') {
             const newStatus = msg.status;
             if (msg.phase) setPhase(msg.phase);
@@ -256,6 +375,7 @@ export default function LiveInterviewRoom({
             } else if (newStatus === 'completed') {
               setStatus('completed');
               setConnectionState('completed');
+              handleTerminalCleanup();
             } else if (newStatus === 'uncommitted') {
               // Interim answer from candidate
               if (msg.payload?.answer) {
@@ -322,18 +442,16 @@ export default function LiveInterviewRoom({
       };
 
       ws.onclose = () => {
-        if (!isComponentMountedRef.current) return;
-        if (connectionState !== 'completed') {
-          setConnectionState('reconnecting');
-          // Automatic seamless reconnection with backoff
-          const delay = Math.min(10000, 1000 * Math.pow(1.5, reconnectAttemptsRef.current));
-          reconnectAttemptsRef.current += 1;
-          setTimeout(() => {
-            if (isComponentMountedRef.current && wsRef.current?.readyState !== WebSocket.OPEN) {
-              connectSession();
-            }
-          }, delay);
-        }
+        if (!isComponentMountedRef.current || isTerminatedRef.current) return;
+        setConnectionState('reconnecting');
+        // Automatic seamless reconnection with backoff
+        const delay = Math.min(10000, 1000 * Math.pow(1.5, reconnectAttemptsRef.current));
+        reconnectAttemptsRef.current += 1;
+        reconnectTimerRef.current = setTimeout(() => {
+          if (isComponentMountedRef.current && !isTerminatedRef.current && wsRef.current?.readyState !== WebSocket.OPEN) {
+            connectSession();
+          }
+        }, delay);
       };
 
       ws.onerror = (err) => {
@@ -344,17 +462,24 @@ export default function LiveInterviewRoom({
       setConnectionState('error');
       setErrorMessage(err.message || 'Failed to establish WebSocket connection');
     }
-  }, [sessionId, isMicMuted, selectedMicId, connectionState]);
+  }, [canonicalSessionId, isMicMuted, selectedMicId, status, sendClientReadyIfReady, handleTerminalCleanup]);
 
   // Initial startup
   useEffect(() => {
     isComponentMountedRef.current = true;
+    isTerminatedRef.current = false;
     refreshDevices();
     initCamera(selectedCameraId);
     connectSession();
 
     return () => {
       isComponentMountedRef.current = false;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+      }
+      if (endTimeoutRef.current) {
+        clearTimeout(endTimeoutRef.current);
+      }
       if (wsRef.current) {
         try {
           wsRef.current.close();
@@ -428,16 +553,57 @@ export default function LiveInterviewRoom({
     }
   }, []);
 
-  // Handle End Interview
-  const handleConfirmEndInterview = useCallback(() => {
+  // Handle End Interview with unique request ID and REST fallback
+  const handleConfirmEndInterview = useCallback(async () => {
+    if (isEndingSession) return;
     setIsEndingSession(true);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'end_button' }));
+
+    const requestId = `end_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const socketOpen = wsRef.current && wsRef.current.readyState === WebSocket.OPEN;
+
+    if (socketOpen) {
+      try {
+        wsRef.current.send(JSON.stringify({ type: 'end_button', request_id: requestId }));
+      } catch (err) {
+        console.warn('Failed to send end_button on WebSocket:', err);
+      }
     }
-    setTimeout(() => {
-      if (onExit) onExit();
-    }, 600);
-  }, [onExit]);
+
+    // Bounded REST fallback if WS terminal ack doesn't arrive within 3.5s
+    const performRestFallback = async () => {
+      if (endFallbackAttemptedRef.current || isTerminatedRef.current) return;
+      endFallbackAttemptedRef.current = true;
+      try {
+        const tokenToUse =
+          token ||
+          localStorage.getItem('candidly-auth-token-candidate') ||
+          localStorage.getItem('candidly-auth-token');
+        const res = await fetch(`/api/interview-sessions/${canonicalSessionId}/end`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(tokenToUse ? { Authorization: `Bearer ${tokenToUse}` } : {}),
+          },
+        });
+        if (res.ok) {
+          handleTerminalCleanup();
+          return;
+        }
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to end session via API');
+      } catch (err) {
+        console.error('REST end interview fallback failed:', err);
+        setIsEndingSession(false);
+        setErrorMessage('Unable to persist session completion to server. You can exit anyway.');
+      }
+    };
+
+    if (!socketOpen) {
+      await performRestFallback();
+    } else {
+      endTimeoutRef.current = setTimeout(performRestFallback, 3500);
+    }
+  }, [isEndingSession, canonicalSessionId, token, handleTerminalCleanup]);
 
   // Status badge config
   const statusConfig = {
@@ -445,8 +611,37 @@ export default function LiveInterviewRoom({
     thinking: { label: 'Thinking', dotColor: 'bg-amber-400', textColor: 'text-amber-300' },
     speaking: { label: 'Speaking', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
     waiting_for_ready: { label: 'Ready Gate', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
+    preparing_audio: { label: 'Preparing Audio', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
     completed: { label: 'Interview Finished', dotColor: 'bg-zinc-400', textColor: 'text-zinc-300' },
-  }[status] || { label: 'Idle', dotColor: 'bg-zinc-500', textColor: 'text-zinc-400' };
+    failed: { label: 'Connection Failed', dotColor: 'bg-rose-400', textColor: 'text-rose-300' },
+  }[status] || { label: 'Connecting...', dotColor: 'bg-zinc-500', textColor: 'text-zinc-400' };
+
+  if (!canonicalSessionId && !mockState?.skipConnect) {
+    return (
+      <div
+        data-testid="live-interview-room-error"
+        className="fixed inset-0 z-50 flex h-full w-full flex-col items-center justify-center bg-black text-white p-6 font-sans select-none"
+      >
+        <div className="max-w-md w-full rounded-2xl border border-rose-900/60 bg-zinc-950 p-6 text-center space-y-4 shadow-2xl">
+          <div className="w-12 h-12 rounded-full bg-rose-500/10 text-rose-400 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-6 h-6" />
+          </div>
+          <h2 className="text-lg font-semibold text-white">Interview Session Unavailable</h2>
+          <p className="text-xs text-zinc-400 leading-relaxed">
+            {errorMessage || 'The interview session identifier was missing or invalid. Please return to your dashboard and launch the interview again.'}
+          </p>
+          <button
+            type="button"
+            data-testid="exit-to-dashboard-button"
+            onClick={canonicalOnExit}
+            className="w-full py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-white transition"
+          >
+            Return to Candidate Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -847,6 +1042,11 @@ export default function LiveInterviewRoom({
             <p className="text-xs text-zinc-400 leading-relaxed">
               Are you sure you want to end your interview session now? Your responses recorded so far will be saved and evaluated.
             </p>
+            {errorMessage && (
+              <div className="mt-3 p-2.5 rounded-xl bg-rose-950/40 border border-rose-900/50 text-[11px] text-rose-300">
+                {errorMessage}
+              </div>
+            )}
             <div className="mt-6 flex items-center justify-end gap-3">
               <button
                 type="button"
@@ -855,22 +1055,33 @@ export default function LiveInterviewRoom({
               >
                 Continue Interview
               </button>
-              <button
-                type="button"
-                onClick={handleConfirmEndInterview}
-                disabled={isEndingSession}
-                data-testid="confirm-end-button"
-                className="flex items-center gap-1.5 rounded-full bg-rose-600 px-4 py-2 text-xs font-medium text-white hover:bg-rose-500 transition shadow-lg"
-              >
-                {isEndingSession ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    <span>Ending...</span>
-                  </>
-                ) : (
-                  <span>Confirm & End</span>
-                )}
-              </button>
+              {errorMessage && !isEndingSession ? (
+                <button
+                  type="button"
+                  data-testid="force-exit-button"
+                  onClick={handleTerminalCleanup}
+                  className="rounded-full bg-zinc-800 px-4 py-2 text-xs font-medium text-white hover:bg-zinc-700 transition"
+                >
+                  Exit Room Anyway
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleConfirmEndInterview}
+                  disabled={isEndingSession}
+                  data-testid="confirm-end-button"
+                  className="flex items-center gap-1.5 rounded-full bg-rose-600 px-4 py-2 text-xs font-medium text-white hover:bg-rose-500 transition shadow-lg"
+                >
+                  {isEndingSession ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Ending...</span>
+                    </>
+                  ) : (
+                    <span>Confirm & End</span>
+                  )}
+                </button>
+              )}
             </div>
           </div>
         </div>

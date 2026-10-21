@@ -447,12 +447,13 @@ def _public_job_payload(job: JobPosting) -> dict:
         "active_blueprint_id": job.active_blueprint_id,
         "blueprint_status": getattr(job, "blueprint_status", None),
         "blueprint_is_stale": getattr(job, "blueprint_is_stale", False),
+        "blueprint_has_errors": getattr(job, "blueprint_has_errors", False),
         "accepts_applications": getattr(job, "accepts_applications", False),
     }
 
 
 async def _enrich_jobs_with_blueprint_status(jobs: List[JobPosting], db: AsyncSession):
-    """Batch-enrich job instances with live blueprint status, staleness, and gate acceptance."""
+    """Batch-enrich job instances with live blueprint status, staleness, validation status, and gate acceptance."""
     bp_ids = [j.active_blueprint_id for j in jobs if j.active_blueprint_id]
     bp_map = {}
     if bp_ids:
@@ -466,12 +467,15 @@ async def _enrich_jobs_with_blueprint_status(jobs: List[JobPosting], db: AsyncSe
         if bp:
             curr_hash = compute_job_input_hash(job)
             is_stale = bp.is_stale or (bool(bp.input_hash) and bp.input_hash != curr_hash)
+            has_errors = bool((bp.validation_report or {}).get("errors"))
             job.blueprint_status = bp.status
             job.blueprint_is_stale = is_stale
-            job.accepts_applications = (bp.status == "approved" and not is_stale)
+            job.blueprint_has_errors = has_errors
+            job.accepts_applications = (bp.status == "approved" and not is_stale and not has_errors)
         else:
             job.blueprint_status = None
             job.blueprint_is_stale = False
+            job.blueprint_has_errors = False
             job.accepts_applications = False
 
 
@@ -886,10 +890,16 @@ async def suggest_skills_endpoint(
 async def get_job_blueprint_endpoint(
     job_id: str,
     version: Optional[int] = None,
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve active or latest blueprint for a job, enforcing ownership and candidate-safe redaction."""
+    current_user: Optional[User] = None
+    if authorization:
+        # If an Authorization header is provided, validate credentials strictly.
+        # Expired or invalid tokens must surface a 401 error, never silently fall back to public view.
+        current_user = await get_current_user(authorization=authorization, db=db)
+
     job_stmt = select(JobPosting).where(JobPosting.id == job_id).options(selectinload(JobPosting.skills))
     j_res = await db.execute(job_stmt)
     job = j_res.scalars().first()
@@ -897,7 +907,7 @@ async def get_job_blueprint_endpoint(
         raise HTTPException(status_code=404, detail="Job posting not found")
 
     is_recruiter = current_user and current_user.role == "recruiter"
-    if is_recruiter and job.recruiter_id != current_user.id:
+    if is_recruiter and job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this job's blueprint."
@@ -949,7 +959,7 @@ async def generate_blueprint_for_job_endpoint(
         raise HTTPException(status_code=404, detail="Job posting not found")
 
     # Security check: Recruiter must own the job
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to generate a blueprint for this job."
@@ -1033,7 +1043,7 @@ async def get_blueprint_generation_status_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this job's blueprint status."
@@ -1100,7 +1110,7 @@ async def update_job_blueprint_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to modify this blueprint."
@@ -1135,7 +1145,7 @@ async def regenerate_blueprint_section_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to modify this blueprint."
@@ -1169,7 +1179,7 @@ async def approve_job_blueprint_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to approve a blueprint for this job."
@@ -1208,7 +1218,7 @@ async def list_job_blueprint_versions_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this job's blueprint history."
@@ -2089,17 +2099,57 @@ async def get_interview_live_status(
 async def end_interview_session(
     session_id: str,
     background_tasks: BackgroundTasks,
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = (
         select(InterviewSession)
         .where(InterviewSession.id == session_id)
-        .options(selectinload(InterviewSession.application))
+        .options(
+            selectinload(InterviewSession.application),
+            selectinload(InterviewSession.job),
+        )
     )
     session = (await db.execute(stmt)).scalars().first()
     if not session:
         raise HTTPException(status_code=404, detail="Interview session not found")
+
+    is_candidate = (
+        session.application
+        and (
+            session.application.candidate_id == current_user.id
+            or (session.application.email and session.application.email.lower() == current_user.email.lower())
+        )
+    )
+    is_recruiter = (
+        session.job
+        and session.job.recruiter_id == current_user.id
+    )
+    is_admin = current_user.role == "admin"
+
+    if not (is_candidate or is_recruiter or is_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to end this interview session.",
+        )
+
+    from backend.app.services.interview_v2.router import ACTIVE_RUNNERS
+
+    # Idempotency check: if already completed, ensure runners cleaned up and return immediately
+    if session.status == "completed":
+        runner = ACTIVE_RUNNERS.pop(session_id, None)
+        if runner:
+            try:
+                await runner.stop()
+            except Exception as e:
+                logger.warning("Error stopping active V2 runner for %s: %s", session_id, e)
+        await interview_manager.cleanup_session(session_id)
+        return {
+            "status": "completed",
+            "session_id": session.id,
+            "application_id": session.application_id,
+            "message": "Interview session already completed.",
+        }
 
     session.status = "completed"
     session.current_phase = "completed"
@@ -2126,7 +2176,14 @@ async def end_interview_session(
     )
     await db.commit()
 
-    # Clean up runner in live_interview_manager
+    # Clean up runner in ACTIVE_RUNNERS (V2) and interview_manager (V1)
+    runner = ACTIVE_RUNNERS.pop(session_id, None)
+    if runner:
+        try:
+            await runner.stop()
+        except Exception as e:
+            logger.warning("Error stopping active V2 runner for %s: %s", session_id, e)
+
     await interview_manager.cleanup_session(session_id)
 
     # Trigger post-interview Judge evaluation in background
@@ -2617,7 +2674,9 @@ async def apply_to_job(
     await _enrich_jobs_with_blueprint_status([job], db)
     if not getattr(job, "accepts_applications", False):
         detail = "This job is not accepting applications yet. Requires an approved, up-to-date interview blueprint."
-        if getattr(job, "blueprint_is_stale", False):
+        if getattr(job, "blueprint_has_errors", False):
+            detail = "This job is not accepting applications yet. The interview blueprint has unresolved validation errors and requires recruiter repair."
+        elif getattr(job, "blueprint_is_stale", False):
             detail = "This job is not accepting applications yet. The interview blueprint is stale and requires recruiter re-approval."
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 

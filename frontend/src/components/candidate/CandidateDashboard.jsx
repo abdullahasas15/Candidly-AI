@@ -11,6 +11,7 @@ import CandidateJobListing from './CandidateJobListing';
 import ApplicationWizard from './ApplicationWizard';
 import PreFlightCheckModal from './interview/PreFlightCheckModal';
 import LiveInterviewRoom from './interview/LiveInterviewRoom';
+import { getCandidateToken as getAuthCandidateToken } from '../../utils/auth';
 
 function getApplicationStep(app) {
   if (!app) return 1;
@@ -54,9 +55,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
   const [selectedAppIndex, setSelectedAppIndex] = useState(0);
 
   const getCandidateToken = () =>
-    authUser?.access_token ||
-    localStorage.getItem('candidly-auth-token-candidate') ||
-    localStorage.getItem('candidly-auth-token');
+    getAuthCandidateToken(authUser);
 
   const fetchApplications = async (silent = false) => {
     if (!silent) {
@@ -130,6 +129,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
   };
 
   const handleStartPracticeInterview = async () => {
+    if (startingPractice) return;
     setStartingPractice(true);
     setInterviewError(null);
     try {
@@ -147,11 +147,17 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         throw new Error(payload.detail || 'Could not start practice interview');
       }
       const sessionId = payload.session_id || payload.id;
+      if (!sessionId) {
+        throw new Error('Server returned an invalid practice session identifier.');
+      }
       const startRes = await fetch(`/api/interview-sessions/${sessionId}/start`, {
         method: 'POST',
         headers,
       });
-      const startedPayload = startRes.ok ? await startRes.json() : { id: sessionId };
+      const startedPayload = await startRes.json().catch(() => ({ id: sessionId }));
+      if (!startRes.ok) {
+        throw new Error(startedPayload.detail || 'Failed to start practice interview session.');
+      }
       setIsPracticeMode(true);
       setInterviewSession({
         ...startedPayload,
@@ -170,6 +176,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
 
   const handleProceedToInterview = async () => {
     if (!currentApp?.id) return;
+    if (startingInterview) return;
     setStartingInterview(true);
     setInterviewError(null);
     try {
@@ -188,9 +195,13 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
             fetchApplications();
             throw new Error(generationPayload.message || 'Interview preparation started. Refresh in a moment.');
           }
-          throw new Error(generationPayload.detail || sessionPayload.detail);
+          throw new Error(generationPayload.detail || sessionPayload.detail || 'Interview preparation failed');
         }
         throw new Error(sessionPayload.detail || 'Interview preparation is not complete yet.');
+      }
+
+      if (!sessionPayload || !sessionPayload.id) {
+        throw new Error('Invalid interview session payload received from server.');
       }
 
       let activeSession = sessionPayload;
@@ -202,7 +213,13 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         const startedPayload = await startResponse.json();
         if (startResponse.ok) {
           activeSession = startedPayload;
+        } else {
+          throw new Error(startedPayload.detail || 'Failed to activate interview session.');
         }
+      }
+
+      if (!activeSession || !activeSession.id) {
+        throw new Error('Interview session could not be verified.');
       }
 
       setIsPracticeMode(false);
@@ -247,11 +264,22 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     }
   };
 
-  // If live interview is running, render interview room directly
-  if (interviewStarted && interviewSession) {
+  // If live interview is running, render interview room directly with verified contract
+  if (interviewStarted && interviewSession && interviewSession.id) {
     return (
       <LiveInterviewRoom
+        sessionId={interviewSession.id}
         session={interviewSession}
+        jobTitle={currentApp?.job?.job_title || interviewSession.job_title || 'Technical Interview'}
+        candidateName={authUser?.full_name || 'Candidate'}
+        durationMins={currentApp?.job?.interview_duration_mins || interviewSession.duration_planned_mins || 20}
+        token={getCandidateToken()}
+        onExit={() => {
+          setInterviewStarted(false);
+          setInterviewSession(null);
+          setIsPracticeMode(false);
+          fetchApplications();
+        }}
         onEndInterview={() => {
           setInterviewStarted(false);
           setInterviewSession(null);
@@ -273,16 +301,29 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     <div className="min-h-screen bg-black text-white flex flex-col">
       {/* Header with Role Navigation */}
       <Header
+        authUser={authUser}
         user={authUser}
+        currentView="candidate"
         roleNav="candidate"
+        activeNav={activePortalTab === 'browse' ? 'jobs' : 'applications'}
         activeRoleNav={activePortalTab === 'browse' ? 'jobs' : 'applications'}
         onNavChange={(key) => {
-          if (key === 'jobs') setActivePortalTab('browse');
+          if (key === 'jobs' || key === 'browse') setActivePortalTab('browse');
           else if (key === 'applications') setActivePortalTab('applications');
+          else if (key === 'profile') {
+            const el = document.getElementById('profile-readiness-card');
+            if (el) el.scrollIntoView({ behavior: 'smooth' });
+          }
         }}
-        onAction={() => setActivePortalTab('browse')}
-        actionLabel="Browse Jobs"
+        primaryAction={{
+          label: activePortalTab === 'browse' ? 'My Applications' : 'Explore Jobs',
+          icon: activePortalTab === 'browse' ? Layers : Sparkles,
+          onClick: () => setActivePortalTab((prev) => (prev === 'browse' ? 'applications' : 'browse')),
+        }}
+        onAction={() => setActivePortalTab((prev) => (prev === 'browse' ? 'applications' : 'browse'))}
+        actionLabel={activePortalTab === 'browse' ? 'My Applications' : 'Explore Jobs'}
         onSignOut={onSignOut}
+        onBackToLanding={onBackToLanding}
       />
 
       {/* Main Content Area */}
