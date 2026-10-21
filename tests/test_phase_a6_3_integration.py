@@ -54,7 +54,7 @@ from backend.app.models import (
     User,
 )
 from backend.app.services.interview_v2.finalizer import finalize_interview_session
-from backend.app.services.auth import create_access_token
+from backend.app.services.auth import create_access_token, decode_access_token
 from backend.app.services.interview_v2.conductor import (
     ConductorPhase,
     ConductorState,
@@ -207,6 +207,9 @@ async def test_handshake_timeout_handling():
     mock_session = MagicMock()
     mock_session.id = "test-timeout-session"
     mock_session.job_id = "job-1"
+    mock_session.application = MagicMock(candidate_id="cand-timeout", email="cand@test.com")
+    mock_session.job = MagicMock(recruiter_id="rec-1")
+    ticket = create_access_token({"sub": "cand-timeout", "email": "cand@test.com", "role": "candidate", "session_id": mock_session.id})
 
     with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
         with patch("backend.app.services.interview_v2.router.FluxSTTClient") as mock_flux_cls:
@@ -214,7 +217,7 @@ async def test_handshake_timeout_handling():
             mock_flux_cls.return_value = mock_flux
             with patch("backend.app.services.interview_v2.router.AuraTTSClient"):
                 with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
-                    await ws_interview_endpoint(ws, "test-timeout-session")
+                    await ws_interview_endpoint(ws, "test-timeout-session", ticket=ticket)
 
                 # Verify SessionError and socket closure
                 error_msgs = [m for m in ws.sent_messages if m.get("type") == "SessionError"]
@@ -231,6 +234,9 @@ async def test_flux_initialization_failure_clean_exit():
     ws = FakeWebSocket()
     mock_session = MagicMock()
     mock_session.id = "test-flux-fail"
+    mock_session.application = MagicMock(candidate_id="cand-flux", email="cand@test.com")
+    mock_session.job = MagicMock(recruiter_id="rec-1")
+    ticket = create_access_token({"sub": "cand-flux", "email": "cand@test.com", "role": "candidate", "session_id": mock_session.id})
 
     with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
         with patch("backend.app.services.interview_v2.router.FluxSTTClient") as mock_flux_cls:
@@ -238,13 +244,189 @@ async def test_flux_initialization_failure_clean_exit():
             mock_flux.start = AsyncMock(side_effect=RuntimeError("Flux connection failed"))
             mock_flux_cls.return_value = mock_flux
             with patch("backend.app.services.interview_v2.router.AuraTTSClient"):
-                await ws_interview_endpoint(ws, "test-flux-fail")
+                await ws_interview_endpoint(ws, "test-flux-fail", ticket=ticket)
 
                 error_msgs = [m for m in ws.sent_messages if m.get("type") == "SessionError"]
                 assert len(error_msgs) == 1
                 assert error_msgs[0]["error"] == "STTInitializationFailed"
                 assert ws.closed is True
                 assert ws.close_code == 4003
+
+
+@pytest.mark.asyncio
+async def test_p0_4_websocket_authentication_ownership_and_incumbent_runner_protection():
+    """Verify WebSocket authentication (4401 on missing/invalid, 4403 on wrong owner),
+    incumbent runner protection against eviction, and successful connection with ticket."""
+    session_id = "test-auth-session-uuid"
+    mock_session = MagicMock()
+    mock_session.id = session_id
+    mock_session.job_id = "job-auth-1"
+    mock_session.application = MagicMock(candidate_id="candidate-owner-1", email="candidate@test.com")
+    mock_session.job = MagicMock(recruiter_id="recruiter-owner-1")
+
+    # 1. Missing ticket -> 4401
+    ws_no_ticket = FakeWebSocket()
+    with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
+        await ws_interview_endpoint(ws_no_ticket, session_id, ticket=None)
+        assert ws_no_ticket.closed is True
+        assert ws_no_ticket.close_code == 4401
+
+    # 2. Invalid ticket string -> 4401
+    ws_invalid_ticket = FakeWebSocket()
+    with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
+        await ws_interview_endpoint(ws_invalid_ticket, session_id, ticket="invalid.garbage.jwt")
+        assert ws_invalid_ticket.closed is True
+        assert ws_invalid_ticket.close_code == 4401
+
+    # 3. Unauthorized user's ticket (attacker with valid JWT for different user) -> 4403
+    attacker_ticket = create_access_token({
+        "sub": "attacker-user-999",
+        "email": "attacker@evil.com",
+        "role": "candidate",
+        "session_id": session_id,
+    })
+    ws_attacker = FakeWebSocket()
+
+    # Place an incumbent runner in ACTIVE_RUNNERS
+    mock_incumbent_runner = MagicMock()
+    mock_incumbent_runner.stop = AsyncMock()
+    ACTIVE_RUNNERS[session_id] = mock_incumbent_runner
+
+    with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
+        await ws_interview_endpoint(ws_attacker, session_id, ticket=attacker_ticket)
+        assert ws_attacker.closed is True
+        assert ws_attacker.close_code == 4403
+
+        # Incumbent runner MUST NOT be evicted or stopped by unauthorized connection!
+        assert session_id in ACTIVE_RUNNERS
+        assert ACTIVE_RUNNERS[session_id] is mock_incumbent_runner
+        mock_incumbent_runner.stop.assert_not_called()
+
+    # 4. Valid ticket for authorized candidate -> SessionConnected and displaces runner
+    valid_ticket = create_access_token({
+        "sub": "candidate-owner-1",
+        "email": "candidate@test.com",
+        "role": "candidate",
+        "session_id": session_id,
+    })
+    ws_valid = FakeWebSocket(incoming_messages=[{"type": "client_ready", "sample_rate": 24000}])
+
+    with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
+        with patch("backend.app.services.interview_v2.router.FluxSTTClient") as mock_flux_cls:
+            mock_flux = AsyncMock()
+            mock_flux_cls.return_value = mock_flux
+            with patch("backend.app.services.interview_v2.router.AuraTTSClient"):
+                # Run connection in background task and cancel after handshake
+                endpoint_task = asyncio.create_task(
+                    ws_interview_endpoint(ws_valid, session_id, ticket=valid_ticket)
+                )
+                await asyncio.sleep(0.05)
+
+                # Incumbent runner was stopped and evicted
+                mock_incumbent_runner.stop.assert_awaited_once()
+
+                # Client received SessionConnected
+                connected_events = [m for m in ws_valid.sent_messages if m.get("type") == "SessionConnected"]
+                assert len(connected_events) == 1
+                assert connected_events[0]["session_id"] == session_id
+
+                endpoint_task.cancel()
+                try:
+                    await endpoint_task
+                except asyncio.CancelledError:
+                    pass
+
+    # Clean up ACTIVE_RUNNERS
+    ACTIVE_RUNNERS.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_p0_4_ws_ticket_endpoint_generation_and_authorization():
+    """Verify POST /api/interview-sessions/{id}/ws-ticket endpoint authorization and ticket issuance."""
+    async with AsyncSessionLocal() as db:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        candidate = User(
+            email=f"candidate_ticket_{now_ts}@example.com",
+            full_name="Candidate Ticket",
+            role="candidate",
+            password_hash="pw",
+        )
+        unauthorized_user = User(
+            email=f"other_ticket_{now_ts}@example.com",
+            full_name="Other Ticket",
+            role="candidate",
+            password_hash="pw",
+        )
+        recruiter = User(
+            email=f"recruiter_ticket_{now_ts}@example.com",
+            full_name="Recruiter Ticket",
+            role="recruiter",
+            password_hash="pw",
+        )
+        db.add_all([candidate, unauthorized_user, recruiter])
+        await db.flush()
+
+        job = JobPosting(
+            job_title="Security Engineer",
+            department="Engineering",
+            recruiter_id=recruiter.id,
+            status="active",
+        )
+        db.add(job)
+        await db.flush()
+
+        app_record = JobApplication(
+            job_id=job.id,
+            candidate_id=candidate.id,
+            full_name=candidate.full_name,
+            email=candidate.email,
+            status="interview_ready",
+        )
+        db.add(app_record)
+        await db.flush()
+
+        session = InterviewSession(
+            application_id=app_record.id,
+            job_id=job.id,
+            status="in_progress",
+            current_phase="greeting",
+        )
+        db.add(session)
+        await db.commit()
+        await db.refresh(session)
+        session_id = session.id
+
+    token_candidate = create_access_token({"sub": candidate.id, "email": candidate.email, "role": "candidate", "id": candidate.id})
+    token_unauth = create_access_token({"sub": unauthorized_user.id, "email": unauthorized_user.email, "role": "candidate", "id": unauthorized_user.id})
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Unauthenticated -> 401
+        res_no_auth = await client.post(f"/api/interview-sessions/{session_id}/ws-ticket")
+        assert res_no_auth.status_code == 401
+
+        # 2. Unauthorized user -> 403
+        res_forbidden = await client.post(
+            f"/api/interview-sessions/{session_id}/ws-ticket",
+            headers={"Authorization": f"Bearer {token_unauth}"},
+        )
+        assert res_forbidden.status_code == 403
+
+        # 3. Authorized candidate -> 200 with valid ticket bound to session
+        res_ok = await client.post(
+            f"/api/interview-sessions/{session_id}/ws-ticket",
+            headers={"Authorization": f"Bearer {token_candidate}"},
+        )
+        assert res_ok.status_code == 200
+        ticket_data = res_ok.json()
+        assert "ticket" in ticket_data
+        assert ticket_data["session_id"] == session_id
+        assert ticket_data["expires_in"] == 300
+
+        # Verify decoded ticket claims
+        claims = decode_access_token(ticket_data["ticket"])
+        assert claims["sub"] == candidate.id
+        assert claims["session_id"] == session_id
+        assert claims["type"] == "ws_ticket"
 
 
 @pytest.mark.asyncio

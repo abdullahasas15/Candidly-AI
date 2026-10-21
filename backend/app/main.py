@@ -12,7 +12,7 @@ import re
 import time
 from dotenv import load_dotenv
 load_dotenv(override=True)
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
 from fastapi import BackgroundTasks, FastAPI, Depends, HTTPException, status, File, UploadFile, Form, Body, Response, Header
@@ -2153,6 +2153,61 @@ async def end_interview_session(
     await interview_manager.cleanup_session(session_id)
 
     return res
+
+
+@app.post("/api/interview-sessions/{session_id}/ws-ticket")
+async def create_interview_ws_ticket(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a short-lived signed WebSocket ticket bound to the session and user identity."""
+    stmt = (
+        select(InterviewSession)
+        .where(InterviewSession.id == session_id)
+        .options(
+            selectinload(InterviewSession.application),
+            selectinload(InterviewSession.job),
+        )
+    )
+    session = (await db.execute(stmt)).scalars().first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+
+    is_candidate = (
+        session.application
+        and (
+            session.application.candidate_id == current_user.id
+            or (session.application.email and session.application.email.lower() == current_user.email.lower())
+        )
+    )
+    is_recruiter = (
+        session.job
+        and session.job.recruiter_id == current_user.id
+    )
+    is_admin = current_user.role == "admin"
+
+    if not (is_candidate or is_recruiter or is_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this interview session.",
+        )
+
+    ticket = create_access_token(
+        {
+            "sub": current_user.id,
+            "email": current_user.email,
+            "role": current_user.role,
+            "session_id": session.id,
+            "type": "ws_ticket",
+        },
+        expires_delta=timedelta(minutes=5),
+    )
+    return {
+        "ticket": ticket,
+        "session_id": session.id,
+        "expires_in": 300,
+    }
 
 
 @app.post("/api/candidate/practice-interview")

@@ -178,6 +178,8 @@ export default function LiveInterviewRoom({
       wsRef.current &&
       wsRef.current.readyState === WebSocket.OPEN &&
       audioPipelineRef.current &&
+      audioCtxRef.current &&
+      audioCtxRef.current.state === 'running' &&
       !clientReadySentRef.current
     ) {
       clientReadySentRef.current = true;
@@ -325,7 +327,36 @@ export default function LiveInterviewRoom({
     // 2. Open WebSocket
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
-    const url = `${proto}//${host}/ws/interview/${canonicalSessionId}`;
+    let url = `${proto}//${host}/ws/interview/${canonicalSessionId}`;
+
+    const tokenToUse =
+      token ||
+      localStorage.getItem('candidly-auth-token-candidate') ||
+      localStorage.getItem('candidly-auth-token');
+
+    if (tokenToUse) {
+      try {
+        const ticketRes = await fetch(`/api/interview-sessions/${canonicalSessionId}/ws-ticket`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${tokenToUse}`,
+          },
+        });
+        if (ticketRes.ok) {
+          const ticketData = await ticketRes.json();
+          if (ticketData?.ticket) {
+            url += `?ticket=${encodeURIComponent(ticketData.ticket)}`;
+          } else {
+            url += `?ticket=${encodeURIComponent(tokenToUse)}`;
+          }
+        } else {
+          url += `?ticket=${encodeURIComponent(tokenToUse)}`;
+        }
+      } catch (e) {
+        url += `?ticket=${encodeURIComponent(tokenToUse)}`;
+      }
+    }
 
     try {
       const ws = new WebSocket(url);
@@ -373,6 +404,17 @@ export default function LiveInterviewRoom({
             setConnectionState('error');
             setErrorMessage(msg.detail || msg.error || 'Interview session error');
             updateStatus('failed');
+            if (!msg.retryable) {
+              isTerminatedRef.current = true;
+              if (micStreamRef.current) {
+                micStreamRef.current.getTracks().forEach((t) => t.stop());
+                micStreamRef.current = null;
+              }
+              if (cameraStreamRef.current) {
+                cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+                cameraStreamRef.current = null;
+              }
+            }
           } else if (msg.type === 'SessionEnded') {
             handleTerminalCleanup();
           } else if (msg.type === 'TTSError') {
@@ -458,8 +500,33 @@ export default function LiveInterviewRoom({
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (!isComponentMountedRef.current || isTerminatedRef.current) return;
+        const code = event?.code;
+        if ([4000, 4003, 4004, 4008, 4401, 4403].includes(code)) {
+          isTerminatedRef.current = true;
+          setConnectionState('error');
+          updateStatus('failed');
+          setErrorMessage(
+            code === 4401
+              ? 'Authentication failed: unauthorized ticket or session token.'
+              : code === 4403
+              ? 'Access forbidden: you are not authorized for this interview session.'
+              : code === 4004
+              ? 'Interview session not found.'
+              : 'Interview session terminated with terminal error.'
+          );
+          if (micStreamRef.current) {
+            micStreamRef.current.getTracks().forEach((track) => track.stop());
+            micStreamRef.current = null;
+          }
+          if (cameraStreamRef.current) {
+            cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+            cameraStreamRef.current = null;
+          }
+          return;
+        }
+
         setConnectionState('reconnecting');
         // Automatic seamless reconnection with backoff
         const delay = Math.min(10000, 1000 * Math.pow(1.5, reconnectAttemptsRef.current));
@@ -529,12 +596,20 @@ export default function LiveInterviewRoom({
   }, []);
 
   // Handle Ready Button
-  const handleReadyClick = useCallback(() => {
+  const handleReadyClick = useCallback(async () => {
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      try {
+        await audioCtxRef.current.resume();
+      } catch (e) {
+        console.warn('Failed to resume AudioContext on ready click:', e);
+      }
+    }
+    sendClientReadyIfReady();
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'ready_button' }));
     }
     updateStatus('listening');
-  }, [updateStatus]);
+  }, [sendClientReadyIfReady, updateStatus]);
 
   // Handle Test Speakers
   const playTestSpeakerChime = useCallback(() => {
@@ -591,6 +666,8 @@ export default function LiveInterviewRoom({
     const performRestFallback = async () => {
       if (endFallbackAttemptedRef.current || isTerminatedRef.current) return;
       endFallbackAttemptedRef.current = true;
+      const controller = new AbortController();
+      const abortTimeout = setTimeout(() => controller.abort(), 8000);
       try {
         const tokenToUse =
           token ||
@@ -602,7 +679,9 @@ export default function LiveInterviewRoom({
             'Content-Type': 'application/json',
             ...(tokenToUse ? { Authorization: `Bearer ${tokenToUse}` } : {}),
           },
+          signal: controller.signal,
         });
+        clearTimeout(abortTimeout);
         if (res.ok) {
           handleTerminalCleanup();
           return;
@@ -610,8 +689,10 @@ export default function LiveInterviewRoom({
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || 'Failed to end session via API');
       } catch (err) {
+        clearTimeout(abortTimeout);
         console.error('REST end interview fallback failed:', err);
         setIsEndingSession(false);
+        endFallbackAttemptedRef.current = false;
         setErrorMessage('Unable to persist session completion to server. You can exit anyway.');
       }
     };

@@ -21,6 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.database import AsyncSessionLocal
 from backend.app.models import InterviewSession
+from backend.app.services.auth import decode_access_token
 from backend.app.services.interview_v2.conductor import ConductorPhase
 from backend.app.services.interview_v2.runner import (
     SessionRunner,
@@ -79,25 +80,98 @@ async def dev_interview_cockpit(session_id: Optional[str] = Query(None), reset: 
 
 
 @router.websocket("/ws/interview/{session_id}")
-async def ws_interview_endpoint(websocket: WebSocket, session_id: str) -> None:
+async def ws_interview_endpoint(
+    websocket: WebSocket,
+    session_id: str,
+    ticket: Optional[str] = Query(None),
+    token: Optional[str] = Query(None),
+) -> None:
     """WebSocket endpoint connecting client audio worklet to the Interview v2 SessionRunner."""
-    await websocket.accept()
-    logger.info("Client connected to /ws/interview/%s", session_id)
+    # 1. Extract and validate ticket / token claims
+    auth_token = ticket or token
+    if not auth_token:
+        headers = getattr(websocket, "headers", {})
+        auth_header = headers.get("authorization") if hasattr(headers, "get") else None
+        if auth_header and auth_header.startswith("Bearer "):
+            auth_token = auth_header.split(" ")[1]
 
-    # 1. Load real session script from database with eager relationships
+    allow_dev = os.getenv("ALLOW_DEV_WS_AUTH", "false").lower() == "true"
+    claims = None
+    if auth_token:
+        if allow_dev and auth_token in ("dev", "test", "dev-token"):
+            claims = {"sub": "dev-user", "role": "dev", "session_id": session_id}
+        else:
+            try:
+                claims = decode_access_token(auth_token)
+            except Exception as e:
+                logger.warning("Invalid WS ticket for session %s: %s", session_id, e)
+                claims = None
+    elif allow_dev and os.getenv("ENV") in ("development", "dev", "test"):
+        claims = {"sub": "dev-user", "role": "dev", "session_id": session_id}
+
+    if not claims:
+        logger.warning("Rejecting unauthenticated WS connection for session %s (no valid ticket)", session_id)
+        await websocket.close(code=4401, reason="Unauthorized: Missing or invalid ticket")
+        return
+
+    # Check origin if present
+    headers = getattr(websocket, "headers", {})
+    origin = headers.get("origin") if hasattr(headers, "get") else None
+    if origin and not allow_dev:
+        allowed_origins = os.getenv("ALLOWED_ORIGINS", "").split(",")
+        is_allowed = (
+            "localhost" in origin
+            or "127.0.0.1" in origin
+            or any(ao.strip() and ao.strip() in origin for ao in allowed_origins)
+        )
+        if not is_allowed:
+            logger.warning("Rejecting WS connection from disallowed origin %s", origin)
+            await websocket.close(code=4403, reason="Forbidden origin")
+            return
+
+    # Ticket bound session check
+    ticket_session = claims.get("session_id")
+    if ticket_session and ticket_session != session_id:
+        logger.warning("WS ticket session mismatch: ticket is for %s, requested %s", ticket_session, session_id)
+        await websocket.close(code=4403, reason="Forbidden: Ticket bound to different session")
+        return
+
+    # 2. Load real session script from database with eager relationships
     session, script = await load_real_session_script(session_id)
     if not session:
         logger.warning("Session %s not found in database", session_id)
-        await websocket.send_json({
-            "type": "SessionError",
-            "error": "SessionNotFound",
-            "detail": f"Interview session {session_id} not found.",
-        })
-        await websocket.close(code=4004)
+        await websocket.close(code=4004, reason="Session not found")
+        return
+
+    # 3. Ownership check: user must be candidate, recruiter, or admin
+    user_id = claims.get("sub") or claims.get("id")
+    user_email = (claims.get("email") or "").lower()
+    user_role = claims.get("role")
+
+    is_dev = allow_dev and user_role == "dev"
+    is_admin = user_role == "admin"
+    is_candidate = (
+        hasattr(session, "application")
+        and session.application
+        and (
+            getattr(session.application, "candidate_id", None) == user_id
+            or (getattr(session.application, "email", None) and session.application.email.lower() == user_email)
+        )
+    )
+    is_recruiter = (
+        hasattr(session, "job")
+        and session.job
+        and getattr(session.job, "recruiter_id", None) == user_id
+    )
+
+    if not (is_candidate or is_recruiter or is_admin or is_dev):
+        logger.warning("User %s is not authorized for session %s", user_id, session_id)
+        await websocket.close(code=4403, reason="Forbidden: Not session owner")
         return
 
     if not script.get("questions"):
         logger.warning("Session %s has no questions in database", session_id)
+        await websocket.accept()
         await websocket.send_json({
             "type": "SessionError",
             "error": "EmptySession",
@@ -106,7 +180,7 @@ async def ws_interview_endpoint(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=4000)
         return
 
-    # 2. Key pool & audio clients
+    # 4. Key pool & audio clients
     key_pool = get_shared_key_pool()
     flux_client = FluxSTTClient(
         key_pool=key_pool,
@@ -122,8 +196,11 @@ async def ws_interview_endpoint(websocket: WebSocket, session_id: str) -> None:
 
     try:
         await flux_client.start()
+        if hasattr(flux_client, "wait_until_ready"):
+            await flux_client.wait_until_ready(timeout=10.0)
     except Exception as e:
         logger.error("Flux STT initialization failed for session %s: %s", session_id, e)
+        await websocket.accept()
         await websocket.send_json({
             "type": "SessionError",
             "error": "STTInitializationFailed",
@@ -132,11 +209,18 @@ async def ws_interview_endpoint(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=4003)
         return
 
-    # 3. Clean up existing runner before attaching new runner
+    # 5. Authorization & Flux readiness succeeded -> Now accept WebSocket!
+    await websocket.accept()
+    logger.info("Client connected to /ws/interview/%s (user=%s)", session_id, user_id)
+
+    # 6. Clean up incumbent runner ONLY after authorization and connection success
     if session_id in ACTIVE_RUNNERS:
         old_runner = ACTIVE_RUNNERS.pop(session_id, None)
         if old_runner:
-            await old_runner.stop()
+            try:
+                await old_runner.stop()
+            except Exception as e:
+                logger.warning("Error stopping incumbent runner: %s", e)
 
     runner = SessionRunner(
         session_id=session_id,
