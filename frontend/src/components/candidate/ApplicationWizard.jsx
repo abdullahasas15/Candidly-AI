@@ -642,20 +642,20 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/80 backdrop-blur-sm animate-fadeIn">
-      <div className="relative w-full max-w-4xl max-h-[92vh] flex flex-col rounded-3xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+      <div className="relative w-full max-w-4xl max-h-[92vh] flex flex-col rounded-3xl bg-[#0A0A0B] border border-white/[0.08] shadow-2xl overflow-hidden">
         
         {/* Top Header */}
-        <div className="px-6 py-4 bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+        <div className="px-6 py-4 bg-[#0A0A0B] border-b border-white/[0.08] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-md">
+            <div className="w-9 h-9 rounded-xl bg-teal-500 text-black font-semibold text-white flex items-center justify-center shadow-md">
               <Briefcase className="w-5 h-5" />
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-1.5">
-                <h2 className="text-base sm:text-lg font-black text-slate-900 dark:text-white">
+                <h2 className="text-base sm:text-lg font-black text-white">
                   Application: {job.job_title}
                 </h2>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800">
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-teal-500/10 text-teal-300 border border-teal-500/20">
                   {formatSeniority(job.seniority_level)}
                 </span>
                 {job.role_display_name && job.role_display_name !== 'Custom Role' && (
@@ -667,7 +667,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                   {job.department}
                 </span>
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
+              <p className="text-xs text-zinc-400">
                 Offered: {formatSalaryRange(job.salary_range_min, job.salary_range_max, job.salary_currency)} · {job.interview_duration_mins}m AI Voice Session
               </p>
             </div>
@@ -675,7 +675,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
           <button
             onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white bg-slate-100 dark:bg-slate-800 transition-colors"
+            className="p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white bg-[#18181B] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -683,13 +683,13 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
         {/* Step Progress Bar */}
         {!submittedSuccessfully && (
-          <div className="flex overflow-x-auto border-b border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 px-6 scrollbar-none">
+          <div className="flex overflow-x-auto border-b border-white/[0.08] bg-[#0A0A0B] px-6 scrollbar-none">
             {stepsList.map((st) => (
               <div
                 key={st.num}
                 className={`flex items-center gap-2 py-3 px-3 text-xs font-bold whitespace-nowrap border-b-2 transition-all ${
                   currentStep === st.num
-                    ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900/60'
+                    ? 'border-teal-400 text-teal-400 bg-[#111113]'
                     : currentStep > st.num
                     ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
                     : 'border-transparent text-slate-400'
@@ -697,7 +697,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               >
                 <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${
                   currentStep === st.num
-                    ? 'bg-indigo-600 text-white'
+                    ? 'bg-teal-500 text-black font-semibold text-white'
                     : currentStep > st.num
                     ? 'bg-emerald-500 text-white'
                     : 'bg-slate-200 dark:bg-slate-800 text-slate-500'
@@ -731,20 +731,20 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               </div>
 
               <div className="space-y-2">
-                <h3 className="text-2xl font-black text-slate-900 dark:text-white">
+                <h3 className="text-2xl font-black text-white">
                   Application Submitted Successfully!
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Your application for <strong className="text-slate-800 dark:text-slate-200">{job.job_title}</strong> has been received and verified.
+                <p className="text-xs text-zinc-400">
+                  Your application for <strong className="text-zinc-200">{job.job_title}</strong> has been received and verified.
                 </p>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 text-[11px] font-mono text-slate-600 dark:text-slate-300">
+                <div className="p-3 rounded-xl bg-[#111113] text-[11px] font-mono text-slate-600 dark:text-slate-300">
                   Reference ID: {applicationId}
                 </div>
               </div>
 
-              <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900/50 text-left space-y-1.5">
-                <div className="font-bold text-indigo-900 dark:text-indigo-200">What Happens Next:</div>
-                <p className="text-indigo-700 dark:text-indigo-300 text-[11px]">
+              <div className="p-4 rounded-2xl bg-teal-500/10 border border-teal-500/20 text-left space-y-1.5">
+                <div className="font-bold text-white">What Happens Next:</div>
+                <p className="text-teal-300 text-[11px]">
                   Your career profile and live ID verification have been calibrated into the recruiter's candidate queue. You can now launch your AI voice evaluation directly from your dashboard.
                 </p>
               </div>
@@ -753,7 +753,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                 <button
                   type="button"
                   onClick={onClose}
-                  className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all"
+                  className="px-6 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-black font-semibold font-bold text-xs shadow-md shadow-teal-500/10 transition-all"
                 >
                   Return to Portal
                 </button>
@@ -767,17 +767,17 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               {currentStep === 1 && (
                 <form onSubmit={handleProceedFromStep1} className="space-y-4">
                   <div className="space-y-1 mb-4">
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    <h3 className="text-sm font-bold text-white">
                       Step 1: Confirm Your Candidate Profile
                     </h3>
-                    <p className="text-slate-500 dark:text-slate-400">
+                    <p className="text-zinc-400">
                       Provide your primary contact coordinates for interview scheduling and identity verification.
                     </p>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      <label className="block font-bold text-zinc-300 mb-1">
                         Full Legal Name <span className="text-rose-500">*</span>
                       </label>
                       <input
@@ -786,12 +786,12 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         placeholder="e.g. Alex Mercer"
                         value={personalDetails.full_name}
                         onChange={(e) => setPersonalDetails({ ...personalDetails, full_name: e.target.value })}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm focus:ring-2 focus:ring-teal-400"
                       />
                     </div>
 
                     <div>
-                      <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      <label className="block font-bold text-zinc-300 mb-1">
                         Email Address <span className="text-rose-500">*</span>
                       </label>
                       <input
@@ -800,12 +800,12 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         placeholder="e.g. alex@example.com"
                         value={personalDetails.email}
                         onChange={(e) => setPersonalDetails({ ...personalDetails, email: e.target.value })}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm focus:ring-2 focus:ring-teal-400"
                       />
                     </div>
 
                     <div>
-                      <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      <label className="block font-bold text-zinc-300 mb-1">
                         Phone Number
                       </label>
                       <input
@@ -813,12 +813,12 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         placeholder="e.g. +1 (555) 234-5678"
                         value={personalDetails.phone}
                         onChange={(e) => setPersonalDetails({ ...personalDetails, phone: e.target.value })}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm"
                       />
                     </div>
 
                     <div>
-                      <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      <label className="block font-bold text-zinc-300 mb-1">
                         LinkedIn Profile URL
                       </label>
                       <input
@@ -826,12 +826,12 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         placeholder="https://linkedin.com/in/username"
                         value={personalDetails.linkedin_url}
                         onChange={(e) => setPersonalDetails({ ...personalDetails, linkedin_url: e.target.value })}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm"
                       />
                     </div>
 
                     <div className="sm:col-span-2">
-                      <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      <label className="block font-bold text-zinc-300 mb-1">
                         Portfolio / GitHub Profile URL
                       </label>
                       <input
@@ -839,16 +839,16 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         placeholder="https://github.com/username or https://portfolio.dev"
                         value={personalDetails.portfolio_url}
                         onChange={(e) => setPersonalDetails({ ...personalDetails, portfolio_url: e.target.value })}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm"
                       />
                     </div>
                   </div>
 
-                  <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex justify-end">
+                  <div className="pt-4 border-t border-white/[0.08] flex justify-end">
                     <button
                       type="submit"
                       disabled={submitting}
-                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all"
+                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-black font-semibold font-bold text-xs shadow-md shadow-teal-500/10 transition-all"
                     >
                       {submitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
                       <span>Continue to Resume Upload</span>
@@ -864,10 +864,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               {currentStep === 2 && (
                 <div className="space-y-5">
                   <div className="space-y-1">
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    <h3 className="text-sm font-bold text-white">
                       Step 2: Upload Your Resume (PDF, DOCX, TXT)
                     </h3>
-                    <p className="text-slate-500 dark:text-slate-400">
+                    <p className="text-zinc-400">
                       Our system extracts your work history intervals, academic credentials, and skills. Scanned PDFs automatically invoke local Apple Vision OCR.
                     </p>
                   </div>
@@ -884,8 +884,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                     }}
                     className={`border-2 border-dashed rounded-3xl p-8 text-center cursor-pointer transition-all ${
                       selectedFile
-                        ? 'border-indigo-500 bg-indigo-50/20 dark:bg-indigo-950/20'
-                        : 'border-slate-300 dark:border-slate-700 hover:border-indigo-500 dark:hover:border-indigo-400 bg-slate-50 dark:bg-slate-900/50'
+                        ? 'border-teal-400 bg-teal-500/10'
+                        : 'border-white/[0.12] hover:border-teal-400 dark:hover:border-indigo-400 bg-[#0A0A0B]/50'
                     }`}
                   >
                     <input
@@ -898,14 +898,14 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       }}
                     />
 
-                    <div className="w-14 h-14 rounded-2xl bg-indigo-100 dark:bg-indigo-950/80 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mx-auto mb-3">
+                    <div className="w-14 h-14 rounded-2xl bg-teal-500/10 text-teal-400 flex items-center justify-center mx-auto mb-3">
                       <UploadCloud className="w-7 h-7" />
                     </div>
 
                     {selectedFile ? (
                       <div className="space-y-1">
-                        <div className="text-sm font-bold text-slate-900 dark:text-white flex items-center justify-center gap-1.5">
-                          <FileText className="w-4 h-4 text-indigo-600" />
+                        <div className="text-sm font-bold text-white flex items-center justify-center gap-1.5">
+                          <FileText className="w-4 h-4 text-teal-400" />
                           <span>{selectedFile.name}</span>
                         </div>
                         <div className="text-slate-400 text-[11px]">
@@ -914,7 +914,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       </div>
                     ) : (
                       <div className="space-y-1">
-                        <div className="text-sm font-bold text-slate-900 dark:text-white">
+                        <div className="text-sm font-bold text-white">
                           Click to browse or drag and drop your resume
                         </div>
                         <p className="text-slate-400 text-[11px]">
@@ -926,22 +926,22 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
                   {/* Parsing progress & status */}
                   {parsingStatus === 'parsing' && (
-                    <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900 space-y-2 text-center">
-                      <div className="flex items-center justify-center gap-2 font-bold text-indigo-900 dark:text-indigo-200">
-                        <RefreshCw className="w-4 h-4 animate-spin text-indigo-600" />
+                    <div className="p-4 rounded-2xl bg-teal-500/10 border border-teal-500/20 space-y-2 text-center">
+                      <div className="flex items-center justify-center gap-2 font-bold text-white">
+                        <RefreshCw className="w-4 h-4 animate-spin text-teal-400" />
                         <span>Extracting career timeline and running discrepancy checks...</span>
                       </div>
-                      <p className="text-[11px] text-indigo-600 dark:text-indigo-400">
+                      <p className="text-[11px] text-teal-400">
                         Computing non-overlapping work intervals and verifying academic threshold compliance.
                       </p>
                     </div>
                   )}
 
-                  <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div className="pt-4 border-t border-white/[0.08] flex items-center justify-between">
                     <button
                       type="button"
                       onClick={() => setCurrentStep(1)}
-                      className="px-4 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
+                      className="px-4 py-2 rounded-xl text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
                     >
                       Back
                     </button>
@@ -950,7 +950,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       type="button"
                       disabled={!selectedFile || parsingStatus === 'parsing'}
                       onClick={handleUploadAndParseResume}
-                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all"
+                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-teal-500 text-black font-semibold hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-teal-500/10 transition-all"
                     >
                       {parsingStatus === 'parsing' ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
                       <span>Upload & Parse Resume</span>
@@ -967,15 +967,15 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                 <div className="space-y-6">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div>
-                      <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                      <h3 className="text-sm font-bold text-white">
                         Step 3: Review & Edit Parsed Career Dossier
                       </h3>
-                      <p className="text-slate-500 dark:text-slate-400">
+                      <p className="text-zinc-400">
                         Information extracted from your resume is pre-populated below. Review and edit any field to ensure maximum signal during your interview.
                       </p>
                     </div>
 
-                    <div className="px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200/60 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 font-bold text-xs flex items-center gap-1.5 self-start sm:self-auto">
+                    <div className="px-3 py-1.5 rounded-xl bg-teal-500/10/60 border border-teal-500/20 text-teal-300 font-bold text-xs flex items-center gap-1.5 self-start sm:self-auto">
                       <Sparkles className="w-3.5 h-3.5" />
                       <span>Timeline: ~{(structuredData.total_experience_years || 0).toFixed(1)} YOE</span>
                     </div>
@@ -988,8 +988,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       onClick={() => setCareerTab('experience')}
                       className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
                         careerTab === 'experience'
-                          ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                          ? 'bg-white dark:bg-slate-800 text-teal-400 shadow-sm'
+                          : 'text-zinc-400 hover:text-slate-900'
                       }`}
                     >
                       <Briefcase className="w-3.5 h-3.5" />
@@ -1001,8 +1001,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       onClick={() => setCareerTab('education')}
                       className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
                         careerTab === 'education'
-                          ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                          ? 'bg-white dark:bg-slate-800 text-teal-400 shadow-sm'
+                          : 'text-zinc-400 hover:text-slate-900'
                       }`}
                     >
                       <GraduationCap className="w-3.5 h-3.5" />
@@ -1014,8 +1014,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       onClick={() => setCareerTab('certifications')}
                       className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
                         careerTab === 'certifications'
-                          ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                          ? 'bg-white dark:bg-slate-800 text-teal-400 shadow-sm'
+                          : 'text-zinc-400 hover:text-slate-900'
                       }`}
                     >
                       <Award className="w-3.5 h-3.5" />
@@ -1027,8 +1027,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       onClick={() => setCareerTab('projects')}
                       className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
                         careerTab === 'projects'
-                          ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                          ? 'bg-white dark:bg-slate-800 text-teal-400 shadow-sm'
+                          : 'text-zinc-400 hover:text-slate-900'
                       }`}
                     >
                       <FolderGit2 className="w-3.5 h-3.5" />
@@ -1040,8 +1040,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       onClick={() => setCareerTab('skills')}
                       className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
                         careerTab === 'skills'
-                          ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-sm'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                          ? 'bg-white dark:bg-slate-800 text-teal-400 shadow-sm'
+                          : 'text-zinc-400 hover:text-slate-900'
                       }`}
                     >
                       <Code2 className="w-3.5 h-3.5" />
@@ -1059,7 +1059,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         <button
                           type="button"
                           onClick={handleAddExperience}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-teal-400 bg-teal-500/10/60 hover:bg-indigo-100"
                         >
                           <Plus className="w-3 h-3" />
                           <span>Add Position</span>
@@ -1067,7 +1067,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       </div>
 
                       {structuredData.work_experience.length === 0 ? (
-                        <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center text-slate-400 text-xs">
+                        <div className="p-6 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] text-center text-slate-400 text-xs">
                           No work experience entries recorded. Click "Add Position" to add your work history.
                         </div>
                       ) : (
@@ -1075,10 +1075,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                           {structuredData.work_experience.map((exp, idx) => (
                             <div
                               key={idx}
-                              className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3 relative group"
+                              className="p-4 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-3 relative group"
                             >
                               <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
+                                <span className="text-[11px] font-bold text-teal-400">
                                   Position #{idx + 1}
                                 </span>
                                 <button
@@ -1098,7 +1098,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={exp.company || ''}
                                     onChange={(e) => handleExperienceChange(idx, 'company', e.target.value)}
                                     placeholder="e.g. Stripe, Google, Acme Corp"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1109,7 +1109,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={exp.role || ''}
                                     onChange={(e) => handleExperienceChange(idx, 'role', e.target.value)}
                                     placeholder="e.g. Senior Software Engineer"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1120,7 +1120,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={exp.start_date || ''}
                                     onChange={(e) => handleExperienceChange(idx, 'start_date', e.target.value)}
                                     placeholder="e.g. Jan 2021"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1131,7 +1131,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={exp.end_date || ''}
                                     onChange={(e) => handleExperienceChange(idx, 'end_date', e.target.value)}
                                     placeholder="e.g. Present or Dec 2023"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1142,7 +1142,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={exp.description || (exp.highlights || []).join('; ')}
                                     onChange={(e) => handleExperienceChange(idx, 'description', e.target.value)}
                                     placeholder="Key technical accomplishments, architectural design, team leadership..."
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
                               </div>
@@ -1163,7 +1163,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         <button
                           type="button"
                           onClick={handleAddEducation}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-teal-400 bg-teal-500/10/60 hover:bg-indigo-100"
                         >
                           <Plus className="w-3 h-3" />
                           <span>Add Degree</span>
@@ -1171,7 +1171,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       </div>
 
                       {structuredData.education.length === 0 ? (
-                        <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center text-slate-400 text-xs">
+                        <div className="p-6 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] text-center text-slate-400 text-xs">
                           No education degrees detected. Click "Add Degree" to specify your academic background.
                         </div>
                       ) : (
@@ -1179,10 +1179,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                           {structuredData.education.map((edu, idx) => (
                             <div
                               key={idx}
-                              className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3 relative group"
+                              className="p-4 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-3 relative group"
                             >
                               <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
+                                <span className="text-[11px] font-bold text-teal-400">
                                   Degree #{idx + 1}
                                 </span>
                                 <button
@@ -1202,7 +1202,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={edu.degree || ''}
                                     onChange={(e) => handleEducationChange(idx, 'degree', e.target.value)}
                                     placeholder="e.g. Bachelor of Science, B.Tech, Master of Science"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1213,7 +1213,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={edu.institution || ''}
                                     onChange={(e) => handleEducationChange(idx, 'institution', e.target.value)}
                                     placeholder="e.g. Stanford University, MIT, IIT Delhi"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1224,7 +1224,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={edu.field || ''}
                                     onChange={(e) => handleEducationChange(idx, 'field', e.target.value)}
                                     placeholder="e.g. Computer Science, Information Systems"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1235,7 +1235,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={edu.graduation_year || ''}
                                     onChange={(e) => handleEducationChange(idx, 'graduation_year', parseInt(e.target.value) || null)}
                                     placeholder="e.g. 2022"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1246,7 +1246,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={edu.gpa || ''}
                                     onChange={(e) => handleEducationChange(idx, 'gpa', e.target.value)}
                                     placeholder="e.g. 3.8 / 4.0 or 8.5 / 10"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1257,7 +1257,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={edu.honors || ''}
                                     onChange={(e) => handleEducationChange(idx, 'honors', e.target.value)}
                                     placeholder="e.g. Magna Cum Laude, Dean's List"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
                               </div>
@@ -1278,7 +1278,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         <button
                           type="button"
                           onClick={handleAddCertification}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-teal-400 bg-teal-500/10/60 hover:bg-indigo-100"
                         >
                           <Plus className="w-3 h-3" />
                           <span>Add Certification</span>
@@ -1286,7 +1286,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       </div>
 
                       {structuredData.certifications.length === 0 ? (
-                        <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center text-slate-400 text-xs">
+                        <div className="p-6 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] text-center text-slate-400 text-xs">
                           No certifications detected. Click "Add Certification" to add your professional credentials.
                         </div>
                       ) : (
@@ -1294,10 +1294,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                           {structuredData.certifications.map((cert, idx) => (
                             <div
                               key={idx}
-                              className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3 relative group"
+                              className="p-4 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-3 relative group"
                             >
                               <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
+                                <span className="text-[11px] font-bold text-teal-400">
                                   Credential #{idx + 1}
                                 </span>
                                 <button
@@ -1317,7 +1317,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={cert.name || ''}
                                     onChange={(e) => handleCertificationChange(idx, 'name', e.target.value)}
                                     placeholder="e.g. AWS Solutions Architect Associate"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1328,7 +1328,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={cert.issuing_org || ''}
                                     onChange={(e) => handleCertificationChange(idx, 'issuing_org', e.target.value)}
                                     placeholder="e.g. Amazon Web Services, Google Cloud, Cisco"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1339,7 +1339,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={cert.issue_year || ''}
                                     onChange={(e) => handleCertificationChange(idx, 'issue_year', parseInt(e.target.value) || null)}
                                     placeholder="e.g. 2023"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1350,7 +1350,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={cert.credential_id || cert.url || ''}
                                     onChange={(e) => handleCertificationChange(idx, 'credential_id', e.target.value)}
                                     placeholder="e.g. AWS-1092837 or verification URL"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
                               </div>
@@ -1371,7 +1371,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         <button
                           type="button"
                           onClick={handleAddProject}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold text-teal-400 bg-teal-500/10/60 hover:bg-indigo-100"
                         >
                           <Plus className="w-3 h-3" />
                           <span>Add Project</span>
@@ -1379,7 +1379,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       </div>
 
                       {structuredData.projects.length === 0 ? (
-                        <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center text-slate-400 text-xs">
+                        <div className="p-6 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] text-center text-slate-400 text-xs">
                           No projects detected. Click "Add Project" to showcase key software or research projects.
                         </div>
                       ) : (
@@ -1387,10 +1387,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                           {structuredData.projects.map((proj, idx) => (
                             <div
                               key={idx}
-                              className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3 relative group"
+                              className="p-4 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-3 relative group"
                             >
                               <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
+                                <span className="text-[11px] font-bold text-teal-400">
                                   Project #{idx + 1}
                                 </span>
                                 <button
@@ -1410,7 +1410,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={proj.title || ''}
                                     onChange={(e) => handleProjectChange(idx, 'title', e.target.value)}
                                     placeholder="e.g. Real-Time Distributed Voice Engine"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1421,7 +1421,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={proj.role || ''}
                                     onChange={(e) => handleProjectChange(idx, 'role', e.target.value)}
                                     placeholder="e.g. Lead Engineer / Creator"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1432,7 +1432,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={(proj.technologies || []).join(', ')}
                                     onChange={(e) => handleProjectTechChange(idx, e.target.value)}
                                     placeholder="e.g. Python, FastAPI, WebSockets, PostgreSQL, Docker"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1443,7 +1443,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={proj.url || ''}
                                     onChange={(e) => handleProjectChange(idx, 'url', e.target.value)}
                                     placeholder="e.g. https://github.com/user/project"
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
 
@@ -1454,7 +1454,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     value={proj.description || ''}
                                     onChange={(e) => handleProjectChange(idx, 'description', e.target.value)}
                                     placeholder="Explain the architectural challenge, scale achieved, and key algorithms implemented..."
-                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    className="w-full px-3 py-2 rounded-xl border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                   />
                                 </div>
                               </div>
@@ -1480,8 +1480,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       {['Languages', 'Frameworks', 'Databases', 'Cloud & DevOps', 'Tools'].map((cat) => {
                         const catSkills = structuredData.skills_by_category?.[cat] || [];
                         return (
-                          <div key={cat} className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
-                            <div className="flex items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-300">
+                          <div key={cat} className="p-3.5 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-2">
+                            <div className="flex items-center justify-between text-xs font-bold text-zinc-300">
                               <span>{cat} ({catSkills.length})</span>
                               <div className="flex items-center gap-1.5">
                                 <input
@@ -1495,12 +1495,12 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                     }
                                   }}
                                   placeholder={`Add to ${cat}...`}
-                                  className="px-2.5 py-1 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                  className="px-2.5 py-1 text-xs rounded-lg border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                                 />
                                 <button
                                   type="button"
                                   onClick={() => handleAddCategorizedSkill(cat, categorizedSkillInputs[cat] || '')}
-                                  className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px]"
+                                  className="px-2 py-1 rounded-lg bg-teal-500 hover:bg-teal-400 text-black font-semibold font-bold text-[11px]"
                                 >
                                   Add
                                 </button>
@@ -1514,7 +1514,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                 catSkills.map((s, sIdx) => (
                                   <span
                                     key={sIdx}
-                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-semibold text-xs"
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-white/[0.12] text-zinc-200 font-semibold text-xs"
                                   >
                                     <span>{s}</span>
                                     <button
@@ -1533,7 +1533,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       })}
 
                       {/* General Flat Skills */}
-                      <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                      <div className="pt-2 border-t border-white/[0.08] space-y-2">
                         <div className="flex items-center justify-between">
                           <span className="font-bold uppercase tracking-wider text-slate-500 text-[11px]">
                             All Detected Skills ({structuredData.skills.length})
@@ -1550,23 +1550,23 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                                 }
                               }}
                               placeholder="Add general skill..."
-                              className="px-2.5 py-1 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                              className="px-2.5 py-1 text-xs rounded-lg border border-white/[0.12] bg-white dark:bg-slate-800 text-white"
                             />
                             <button
                               type="button"
                               onClick={() => handleAddSkill(newSkillInput)}
-                              className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px]"
+                              className="px-2 py-1 rounded-lg bg-teal-500 hover:bg-teal-400 text-black font-semibold font-bold text-[11px]"
                             >
                               Add
                             </button>
                           </div>
                         </div>
 
-                        <div className="flex flex-wrap gap-1.5 p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                        <div className="flex flex-wrap gap-1.5 p-3 rounded-2xl bg-[#0A0A0B] border border-white/[0.08]">
                           {structuredData.skills.map((skill, sIdx) => (
                             <span
                               key={sIdx}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-semibold text-xs"
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 border border-white/[0.12] text-zinc-200 font-semibold text-xs"
                             >
                               <span>{skill}</span>
                               <button
@@ -1584,11 +1584,11 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                   )}
 
                   {/* Navigation Buttons for Step 3 */}
-                  <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div className="pt-4 border-t border-white/[0.08] flex items-center justify-between">
                     <button
                       type="button"
                       onClick={() => setCurrentStep(2)}
-                      className="px-4 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold text-xs"
+                      className="px-4 py-2 rounded-xl text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold text-xs"
                     >
                       Back to Upload
                     </button>
@@ -1597,7 +1597,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       type="button"
                       disabled={submitting}
                       onClick={handleSaveResumeCorrections}
-                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all"
+                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-black font-semibold font-bold text-xs shadow-md shadow-teal-500/10 transition-all"
                     >
                       {submitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
                       <span>Save & Continue to Compensation</span>
@@ -1613,10 +1613,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               {currentStep === 4 && (
                 <div className="space-y-6">
                   <div className="space-y-1">
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    <h3 className="text-sm font-bold text-white">
                       Step 4: Role Fit Pitch & Compensation Expectations
                     </h3>
-                    <p className="text-slate-500 dark:text-slate-400">
+                    <p className="text-zinc-400">
                       State your total years of experience, why you are a fit, and your desired compensation.
                     </p>
                   </div>
@@ -1629,14 +1629,14 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         {job.salary_range_min ? `${formatMoney(job.salary_range_min, job.salary_currency)} - ${formatMoney(job.salary_range_max, job.salary_currency)}` : 'Competitive'}
                       </div>
                     </div>
-                    <div className="text-xs text-slate-500 dark:text-slate-400">
-                      Required Experience: <strong className="text-slate-800 dark:text-slate-200">{job.total_experience_years}+ Years</strong>
+                    <div className="text-xs text-zinc-400">
+                      Required Experience: <strong className="text-zinc-200">{job.total_experience_years}+ Years</strong>
                     </div>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      <label className="block font-bold text-zinc-300 mb-1">
                         Self-Reported Experience (Years) <span className="text-rose-500">*</span>
                       </label>
                       <input
@@ -1646,7 +1646,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         max="50"
                         value={fitData.self_reported_experience_years}
                         onChange={(e) => setFitData({ ...fitData, self_reported_experience_years: parseFloat(e.target.value) || 0 })}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm"
                       />
                       <span className="text-[11px] text-slate-400 mt-1 block">
                         Resume derived timeline: ~{structuredData.total_experience_years.toFixed(1)} years.
@@ -1654,7 +1654,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                     </div>
 
                     <div>
-                      <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      <label className="block font-bold text-zinc-300 mb-1">
                         Expected Annual Salary
                       </label>
                       <div className="flex gap-2">
@@ -1664,12 +1664,12 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                           placeholder="e.g. 150000"
                           value={fitData.expected_salary}
                           onChange={(e) => setFitData({ ...fitData, expected_salary: parseFloat(e.target.value) || 0 })}
-                          className="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                          className="flex-1 px-3.5 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm"
                         />
                         <select
                           value={fitData.expected_salary_currency}
                           onChange={(e) => setFitData({ ...fitData, expected_salary_currency: e.target.value })}
-                          className="px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm font-semibold"
+                          className="px-3 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm font-semibold"
                         >
                           <option value="USD">USD</option>
                           <option value="EUR">EUR</option>
@@ -1682,7 +1682,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                     </div>
 
                     <div className="sm:col-span-2">
-                      <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      <label className="block font-bold text-zinc-300 mb-1">
                         Why are you a fit for this role? <span className="text-slate-400 font-normal">(Fit Pitch)</span>
                       </label>
                       <textarea
@@ -1690,16 +1690,16 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         placeholder="Briefly highlight your relevant engineering background, architectural designs you have built, or distributed systems experience..."
                         value={fitData.fit_pitch}
                         onChange={(e) => setFitData({ ...fitData, fit_pitch: e.target.value })}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-white/[0.12] bg-[#0A0A0B] text-white text-sm focus:ring-2 focus:ring-teal-400"
                       />
                     </div>
                   </div>
 
-                  <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div className="pt-4 border-t border-white/[0.08] flex items-center justify-between">
                     <button
                       type="button"
                       onClick={() => setCurrentStep(3)}
-                      className="px-4 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
+                      className="px-4 py-2 rounded-xl text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
                     >
                       Back
                     </button>
@@ -1710,7 +1710,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         setCurrentStep(5);
                         startWebcam();
                       }}
-                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all"
+                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-black font-semibold font-bold text-xs shadow-md shadow-teal-500/10 transition-all"
                     >
                       <span>Continue to Live ID Verification</span>
                       <ArrowRight className="w-3.5 h-3.5" />
@@ -1725,10 +1725,10 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               {currentStep === 5 && (
                 <div className="space-y-6">
                   <div className="space-y-1">
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    <h3 className="text-sm font-bold text-white">
                       Step 5: Live Identity Verification & Proctoring Baseline
                     </h3>
-                    <p className="text-slate-500 dark:text-slate-400">
+                    <p className="text-zinc-400">
                       Take a real-time webcam photo snapshot to establish your biometric interview baseline.
                     </p>
                   </div>
@@ -1743,7 +1743,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* Live Webcam Box */}
                     <div className="space-y-3">
-                      <div className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center justify-between">
+                      <div className="text-xs font-bold text-zinc-300 flex items-center justify-between">
                         <span>Webcam Snapshot</span>
                         {liveSnapshot && (
                           <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
@@ -1778,7 +1778,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                           <button
                             type="button"
                             onClick={retakeSnapshot}
-                            className="flex-1 py-2 px-3 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                            className="flex-1 py-2 px-3 rounded-xl border border-white/[0.12] text-xs font-bold text-zinc-300 hover:bg-slate-100 dark:hover:bg-slate-800"
                           >
                             Retake Photo
                           </button>
@@ -1786,7 +1786,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                           <button
                             type="button"
                             onClick={captureSnapshot}
-                            className="flex-1 py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-600/20 flex items-center justify-center gap-2"
+                            className="flex-1 py-2.5 px-3 rounded-xl bg-teal-500 hover:bg-teal-400 text-black font-semibold text-xs font-bold shadow-md shadow-teal-500/10 flex items-center justify-center gap-2"
                           >
                             <Camera className="w-4 h-4" />
                             <span>Capture Photo Snapshot</span>
@@ -1797,12 +1797,12 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
                     {/* Government ID Document (Optional) */}
                     <div className="space-y-3">
-                      <div className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center justify-between">
+                      <div className="text-xs font-bold text-zinc-300 flex items-center justify-between">
                         <span>Government ID (Optional)</span>
                         <span className="text-[10px] text-slate-400 font-normal">Passport / Driver's License</span>
                       </div>
 
-                      <div className="aspect-video rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 flex flex-col items-center justify-center p-4 text-center bg-slate-50 dark:bg-slate-900/40 relative overflow-hidden">
+                      <div className="aspect-video rounded-2xl border-2 border-dashed border-white/[0.12] flex flex-col items-center justify-center p-4 text-center bg-[#0A0A0B]/40 relative overflow-hidden">
                         {govIdPreview ? (
                           <img src={govIdPreview} alt="Gov ID preview" className="w-full h-full object-contain" />
                         ) : (
@@ -1811,7 +1811,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                             <div className="text-[11px] text-slate-500">
                               Upload a photo of your ID for accelerated verification
                             </div>
-                            <label className="inline-block px-3 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-bold text-indigo-600 dark:text-indigo-400 cursor-pointer hover:bg-slate-50">
+                            <label className="inline-block px-3 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-white/[0.12] text-xs font-bold text-teal-400 cursor-pointer hover:bg-slate-50">
                               <span>Choose ID File</span>
                               <input
                                 type="file"
@@ -1833,7 +1833,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                             setGovIdFile(null);
                             setGovIdPreview(null);
                           }}
-                          className="w-full py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] text-slate-500 hover:text-rose-600"
+                          className="w-full py-1.5 rounded-lg border border-white/[0.12] text-[11px] text-slate-500 hover:text-rose-600"
                         >
                           Remove ID Document
                         </button>
@@ -1841,14 +1841,14 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                     </div>
                   </div>
 
-                  <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div className="pt-4 border-t border-white/[0.08] flex items-center justify-between">
                     <button
                       type="button"
                       onClick={() => {
                         stopWebcam();
                         setCurrentStep(4);
                       }}
-                      className="px-4 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
+                      className="px-4 py-2 rounded-xl text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
                     >
                       Back
                     </button>
@@ -1857,7 +1857,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       type="button"
                       disabled={!liveSnapshot || submitting}
                       onClick={handleSaveVerification}
-                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all"
+                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-teal-500 text-black font-semibold hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-teal-500/10 transition-all"
                     >
                       {submitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
                       <span>Save & Final Review</span>
@@ -1873,26 +1873,26 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               {currentStep === 6 && (
                 <div className="space-y-6">
                   <div className="space-y-1">
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    <h3 className="text-sm font-bold text-white">
                       Step 6: Review & Confirm Application Submission
                     </h3>
-                    <p className="text-slate-500 dark:text-slate-400">
+                    <p className="text-zinc-400">
                       Verify your application summary before confirming your entry into the candidate queue.
                     </p>
                   </div>
 
                   {/* Summary Cards */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
+                    <div className="p-4 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-2">
                       <div className="text-[11px] font-bold uppercase text-slate-400">Candidate</div>
-                      <div className="font-bold text-slate-900 dark:text-white text-sm">{personalDetails.full_name}</div>
+                      <div className="font-bold text-white text-sm">{personalDetails.full_name}</div>
                       <div className="text-slate-500 text-[11px]">{personalDetails.email}</div>
                       {personalDetails.phone && <div className="text-slate-500 text-[11px]">{personalDetails.phone}</div>}
                     </div>
 
-                    <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
+                    <div className="p-4 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-2">
                       <div className="text-[11px] font-bold uppercase text-slate-400">Experience & Pitch</div>
-                      <div className="text-slate-800 dark:text-slate-200 font-bold">
+                      <div className="text-zinc-200 font-bold">
                         Stated: {fitData.self_reported_experience_years} YOE
                       </div>
                       <div className="text-slate-500 text-[11px]">
@@ -1903,7 +1903,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                       </div>
                     </div>
 
-                    <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2 flex flex-col items-center justify-center text-center">
+                    <div className="p-4 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-2 flex flex-col items-center justify-center text-center">
                       <div className="text-[11px] font-bold uppercase text-slate-400">Identity Baseline</div>
                       {liveSnapshot ? (
                         <div className="w-16 h-16 rounded-xl overflow-hidden border border-emerald-500/50 shadow-sm">
@@ -1936,9 +1936,9 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
                   {/* Pitch preview */}
                   {fitData.fit_pitch && (
-                    <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
+                    <div className="p-4 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-1.5">
                       <div className="font-bold text-slate-500 uppercase text-[10px]">Your Fit Pitch</div>
-                      <p className="text-slate-700 dark:text-slate-300 text-xs italic">
+                      <p className="text-zinc-300 text-xs italic">
                         "{fitData.fit_pitch}"
                       </p>
                     </div>
@@ -1946,7 +1946,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
 
                   {/* Career Credentials Overview */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1">
+                    <div className="p-3.5 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-1">
                       <div className="flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400">
                         <GraduationCap className="w-3.5 h-3.5 text-indigo-500" />
                         <span>Education ({structuredData.education.length})</span>
@@ -1955,14 +1955,14 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         <div className="text-slate-400 text-[11px]">None listed</div>
                       ) : (
                         structuredData.education.slice(0, 2).map((edu, idx) => (
-                          <div key={idx} className="font-semibold text-slate-800 dark:text-slate-200 truncate text-[11px]">
+                          <div key={idx} className="font-semibold text-zinc-200 truncate text-[11px]">
                             {edu.degree} · <span className="text-slate-500">{edu.institution}</span>
                           </div>
                         ))
                       )}
                     </div>
 
-                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1">
+                    <div className="p-3.5 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-1">
                       <div className="flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400">
                         <FolderGit2 className="w-3.5 h-3.5 text-indigo-500" />
                         <span>Key Projects ({structuredData.projects.length})</span>
@@ -1971,14 +1971,14 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         <div className="text-slate-400 text-[11px]">None listed</div>
                       ) : (
                         structuredData.projects.slice(0, 2).map((proj, idx) => (
-                          <div key={idx} className="font-semibold text-slate-800 dark:text-slate-200 truncate text-[11px]">
+                          <div key={idx} className="font-semibold text-zinc-200 truncate text-[11px]">
                             {proj.title} <span className="text-slate-500 text-[10px]">({(proj.technologies || []).slice(0, 2).join(', ')})</span>
                           </div>
                         ))
                       )}
                     </div>
 
-                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1">
+                    <div className="p-3.5 rounded-2xl bg-[#0A0A0B] border border-white/[0.08] space-y-1">
                       <div className="flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400">
                         <Award className="w-3.5 h-3.5 text-indigo-500" />
                         <span>Certifications ({structuredData.certifications.length})</span>
@@ -1987,7 +1987,7 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                         <div className="text-slate-400 text-[11px]">None listed</div>
                       ) : (
                         structuredData.certifications.slice(0, 2).map((c, idx) => (
-                          <div key={idx} className="font-semibold text-slate-800 dark:text-slate-200 truncate text-[11px]">
+                          <div key={idx} className="font-semibold text-zinc-200 truncate text-[11px]">
                             {c.name} · <span className="text-slate-500">{c.issuing_org}</span>
                           </div>
                         ))
@@ -1995,11 +1995,11 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
                     </div>
                   </div>
 
-                  <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div className="pt-4 border-t border-white/[0.08] flex items-center justify-between">
                     <button
                       type="button"
                       onClick={() => setCurrentStep(5)}
-                      className="px-4 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
+                      className="px-4 py-2 rounded-xl text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold"
                     >
                       Back
                     </button>

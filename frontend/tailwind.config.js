@@ -1,3 +1,5 @@
+import colors from 'tailwindcss/colors';
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [
@@ -8,22 +10,76 @@ export default {
   theme: {
     extend: {
       colors: {
-        brand: {
-          50: '#EEF2FF',
-          100: '#E0E7FF',
-          200: '#C7D2FE',
-          300: '#A5B4FC',
-          400: '#818CF8',
-          500: '#6366F1',
-          600: '#4F46E5',
-          700: '#4338CA',
-          800: '#3730A3',
-          900: '#312E81',
-          950: '#1E1B4B',
+        // Global palette override: slate/gray/zinc 950..800 -> near-black neutrals
+        // (#000, #0A0A0B, #111113, #18181B, #27272A)
+        slate: {
+          ...colors.slate,
+          950: '#000000',
+          900: '#0A0A0B',
+          850: '#111113',
+          800: '#18181B',
+          750: '#18181B',
+          700: '#27272A',
         },
+        gray: {
+          ...colors.gray,
+          950: '#000000',
+          900: '#0A0A0B',
+          850: '#111113',
+          800: '#18181B',
+          750: '#18181B',
+          700: '#27272A',
+        },
+        zinc: {
+          ...colors.zinc,
+          950: '#000000',
+          900: '#0A0A0B',
+          850: '#111113',
+          800: '#18181B',
+          750: '#18181B',
+          700: '#27272A',
+        },
+        // indigo and brand -> teal (400 #2DD4BF, 500 #14B8A6, 600 #0D9488 ...)
+        indigo: {
+          50: '#F0FDFA',
+          100: '#CCFBF1',
+          200: '#99F6E4',
+          300: '#5EEAD4',
+          400: '#2DD4BF',
+          500: '#14B8A6',
+          600: '#0D9488',
+          700: '#0F766E',
+          800: '#115E59',
+          900: '#134E4A',
+          950: '#042F2E',
+        },
+        brand: {
+          50: '#F0FDFA',
+          100: '#CCFBF1',
+          200: '#99F6E4',
+          300: '#5EEAD4',
+          400: '#2DD4BF',
+          500: '#14B8A6',
+          600: '#0D9488',
+          700: '#0F766E',
+          800: '#115E59',
+          900: '#134E4A',
+          950: '#042F2E',
+        },
+        // Preserve status colors explicitly
+        emerald: colors.emerald,
+        amber: colors.amber,
+        rose: colors.rose,
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        display: ['"Instrument Serif"', 'Georgia', 'serif'],
+      },
+      backgroundImage: {
+        'dots': 'radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px)',
+      },
+      backgroundSize: {
+        'dots': '24px 24px',
       },
       animation: {
         'pulse-subtle': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
@@ -40,5 +96,4 @@ export default {
     },
   },
   plugins: [],
-}
-
+};

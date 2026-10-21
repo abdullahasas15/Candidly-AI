@@ -11,6 +11,7 @@ import hmac
 import re
 import time
 from dotenv import load_dotenv
+load_dotenv(override=True)
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
@@ -3575,4 +3576,14 @@ async def regenerate_interview_plan(
 
     run = await generate_for_application(application_id, db, force=True)
     return await get_application_interview_plan(application_id, current_user=current_user, db=db)
+
+
+# Mount Voice Gateway Router (Deepgram Flux STT, Aura-2 TTS & Dev Cockpit)
+from backend.app.services.voice.gateway import router as voice_gateway_router
+app.include_router(voice_gateway_router)
+
+# Mount Interview v2 Conductor & Fast Reply Router (/dev/interview & /ws/interview/{session_id})
+from backend.app.services.interview_v2.router import router as interview_v2_router
+app.include_router(interview_v2_router)
+
 

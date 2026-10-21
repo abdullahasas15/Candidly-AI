@@ -5,6 +5,7 @@ import {
   X, Filter, Building2, BookOpen
 } from 'lucide-react';
 import { formatSalaryRange } from '../../utils/currency';
+import { Badge } from '../ui';
 
 const SENIORITY_MAP = {
   entry: 'Entry-Level (L2-L3)',
@@ -39,7 +40,6 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
       const res = await fetch('/api/jobs');
       if (!res.ok) throw new Error('Failed to retrieve open positions');
       const data = await res.json();
-      // Only show active jobs to candidates
       const activeJobs = data.filter((j) => (j.status || 'active').toLowerCase() === 'active');
       setJobs(activeJobs);
     } catch (err) {
@@ -53,7 +53,6 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
     fetchJobs();
   }, []);
 
-  // Filtered jobs
   const departments = ['All', ...new Set(jobs.map((j) => j.department).filter(Boolean))];
   const workplaces = ['All', 'Remote', 'Hybrid', 'On-site'];
   const seniorities = ['All', ...new Set(jobs.map((j) => j.seniority_level).filter(Boolean))];
@@ -78,41 +77,42 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
       {/* Header Strip */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800 mb-1.5">
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Open Verified Positions</span>
+          <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-mono text-teal-400 bg-teal-500/10 border border-teal-500/20 mb-2">
+            <Sparkles className="w-3 h-3" />
+            <span>Open Engineering Roles</span>
           </div>
-          <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+          <h2 className="text-xl sm:text-2xl font-bold font-display text-white tracking-tight">
             Explore Open Engineering Positions
           </h2>
-          <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400">
-            Review the role description, requirements, compensation, and skills before applying.
+          <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">
+            Review calibrated competencies, role expectations, and compensation bands.
           </p>
         </div>
 
-        <div className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 self-start sm:self-auto">
+        <div className="text-xs font-mono px-3 py-1.5 rounded-lg bg-[#111113] border border-white/[0.08] text-zinc-300 self-start sm:self-auto">
           {filteredJobs.length} {filteredJobs.length === 1 ? 'Role' : 'Roles'} Available
         </div>
       </div>
 
       {/* Filter & Search Bar */}
-      <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col md:flex-row items-center gap-3">
+      <div className="p-4 rounded-xl bg-[#0A0A0B] border border-white/[0.08] flex flex-col md:flex-row items-center gap-3">
         <div className="relative flex-1 w-full">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+          <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-2.5" />
           <input
             type="text"
             placeholder="Search by role title, department, or technical skill..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="w-full pl-9 pr-4 py-2 rounded-lg border border-white/[0.12] bg-[#111113] text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-teal-400"
           />
         </div>
 
+        {/* Filter Pills */}
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
           <select
             value={selectedDept}
             onChange={(e) => setSelectedDept(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300"
+            className="px-3 py-1.5 rounded-lg border border-white/[0.12] bg-[#111113] text-xs font-medium text-zinc-300 focus:outline-none focus:border-teal-400"
           >
             {departments.map((d) => (
               <option key={d} value={d}>Dept: {d}</option>
@@ -122,7 +122,7 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
           <select
             value={selectedWorkplace}
             onChange={(e) => setSelectedWorkplace(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300"
+            className="px-3 py-1.5 rounded-lg border border-white/[0.12] bg-[#111113] text-xs font-medium text-zinc-300 focus:outline-none focus:border-teal-400"
           >
             {workplaces.map((w) => (
               <option key={w} value={w}>Location: {w}</option>
@@ -132,7 +132,7 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
           <select
             value={selectedSeniority}
             onChange={(e) => setSelectedSeniority(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300"
+            className="px-3 py-1.5 rounded-lg border border-white/[0.12] bg-[#111113] text-xs font-medium text-zinc-300 focus:outline-none focus:border-teal-400"
           >
             {seniorities.map((s) => (
               <option key={s} value={s}>Level: {s}</option>
@@ -141,105 +141,104 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
         </div>
       </div>
 
-      {/* Roles Grid */}
+      {/* Clean Roles Grid */}
       {loading ? (
-        <div className="py-20 text-center space-y-3">
-          <div className="w-8 h-8 rounded-full border-2 border-indigo-600 border-t-transparent animate-spin mx-auto" />
-          <p className="text-xs text-slate-500 dark:text-slate-400">Loading open roles from database...</p>
+        <div className="py-20 text-center space-y-2">
+          <div className="w-6 h-6 rounded-full border-2 border-teal-400 border-t-transparent animate-spin mx-auto" />
+          <p className="text-xs text-zinc-400">Loading open positions...</p>
         </div>
       ) : error ? (
-        <div className="p-6 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-center space-y-3">
-          <p className="text-xs font-bold text-rose-700 dark:text-rose-300">{error}</p>
+        <div className="p-6 rounded-xl bg-rose-500/10 border border-rose-500/20 text-center space-y-3">
+          <p className="text-xs font-medium text-rose-300">{error}</p>
           <button
             onClick={fetchJobs}
-            className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700"
+            className="px-4 py-1.5 rounded-lg text-xs font-semibold text-black bg-teal-500 hover:bg-teal-400"
           >
             Retry
           </button>
         </div>
       ) : filteredJobs.length === 0 ? (
-        <div className="p-12 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center space-y-3">
-          <Briefcase className="w-8 h-8 text-slate-400 mx-auto" />
-          <h3 className="text-sm font-bold text-slate-900 dark:text-white">No active roles match your filters</h3>
-          <p className="text-xs text-slate-500">Try adjusting your keywords or clearing the department filters.</p>
+        <div className="p-12 rounded-xl bg-[#0A0A0B] border border-white/[0.08] text-center space-y-3">
+          <Briefcase className="w-8 h-8 text-zinc-600 mx-auto" />
+          <h3 className="text-sm font-semibold text-white">No active roles match your filters</h3>
+          <p className="text-xs text-zinc-500">Try adjusting your keywords or clearing the department filters.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           {filteredJobs.map((job) => (
             <div
               key={job.id}
-              className="p-6 rounded-3xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 hover:border-indigo-500/60 dark:hover:border-indigo-500/60 shadow-sm hover:shadow-xl transition-all flex flex-col justify-between space-y-5"
+              className="p-6 rounded-xl bg-[#0A0A0B] border border-white/[0.08] hover:border-white/[0.16] shadow-sm transition-all flex flex-col justify-between space-y-5 group"
             >
               <div className="space-y-3">
-                {/* Badges */}
-                <div className="flex items-center justify-between">
+                {/* Badges: Seniority & Salary */}
+                <div className="flex items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800">
+                    {/* Seniority Badge */}
+                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-white/[0.05] text-zinc-300 border border-white/[0.08]">
                       {formatSeniority(job.seniority_level)}
                     </span>
-                    {job.role_display_name && job.role_display_name !== 'Custom Role' && (
-                      <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200/60 dark:border-purple-800">
-                        {job.role_display_name}
-                      </span>
-                    )}
-                    <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-                      {job.department}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300">
+
+                    {/* Workplace Badge */}
+                    <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-white/[0.03] text-zinc-400 border border-white/[0.06]">
                       {job.workplace_model}
+                    </span>
+
+                    <span className="px-2 py-0.5 rounded text-[11px] font-medium text-zinc-400">
+                      {job.department}
                     </span>
                   </div>
 
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/[0.05] text-zinc-400 border border-white/[0.06]">
                     {job.interview_duration_mins}m Session
                   </span>
                 </div>
 
-                {/* Title */}
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+                {/* Job Title */}
+                <h3 className="text-lg font-bold text-white group-hover:text-teal-400 transition-colors">
                   {job.job_title}
                 </h3>
 
-                {/* Compensation Banner */}
-                <div className="p-3 rounded-2xl bg-gradient-to-r from-emerald-500/10 via-indigo-500/10 to-transparent border border-emerald-500/20 flex items-center justify-between">
+                {/* Salary Badge Banner */}
+                <div className="p-3 rounded-lg bg-[#111113] border border-white/[0.06] flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <DollarSign className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <DollarSign className="w-4 h-4 text-emerald-400" />
                     <div>
-                      <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Offered Salary Band</div>
-                      <div className="text-xs font-black text-emerald-700 dark:text-emerald-300">
+                      <div className="text-[10px] uppercase font-mono text-zinc-500 tracking-wider">Salary Band</div>
+                      <div className="text-xs font-semibold text-emerald-400">
                         {formatSalaryRange(job.salary_range_min, job.salary_range_max, job.salary_currency)}
                       </div>
                     </div>
                   </div>
-                  <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400 text-right">
-                    {job.total_experience_years}+ YOE Bar
+                  <div className="text-[11px] font-mono text-zinc-400 text-right">
+                    {job.total_experience_years}+ yrs YOE
                   </div>
                 </div>
 
-                {/* Location string */}
+                {/* Locations */}
                 {job.permitted_locations && job.permitted_locations.length > 0 && (
-                  <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-                    <MapPin className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                  <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+                    <MapPin className="w-3.5 h-3.5 text-teal-400 shrink-0" />
                     <span className="truncate">{job.permitted_locations.join(' · ')}</span>
                   </div>
                 )}
 
-                {/* Skills strip */}
-                <div className="space-y-1 pt-2 border-t border-slate-100 dark:border-slate-800">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    Skills Needed ({job.skills?.length || 0})
+                {/* Skills tags */}
+                <div className="space-y-1.5 pt-2 border-t border-white/[0.06]">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                    Required Competencies ({job.skills?.length || 0})
                   </div>
                   <div className="flex flex-wrap gap-1.5">
                     {job.skills?.slice(0, 4).map((s, idx) => (
                       <span
                         key={idx}
-                        className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
+                        className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/[0.03] text-zinc-300 border border-white/[0.06]"
                       >
                         {s.name}
                       </span>
                     ))}
                     {(job.skills?.length || 0) > 4 && (
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-500">
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/[0.03] text-zinc-500 border border-white/[0.06]">
                         +{job.skills.length - 4} more
                       </span>
                     )}
@@ -248,19 +247,19 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
               </div>
 
               {/* Action Buttons */}
-              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center gap-3">
+              <div className="pt-3 border-t border-white/[0.06] flex items-center gap-2.5">
                 <button
                   type="button"
                   onClick={() => setInspectingJob(job)}
-                  className="flex-1 py-2.5 px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                  className="flex-1 py-2 px-3 rounded-lg border border-white/[0.12] text-xs font-medium text-zinc-300 hover:text-white hover:bg-white/[0.05] transition-colors"
                 >
-                  View Role Details
+                  Role Details
                 </button>
                 {job.accepts_applications ? (
                   <button
                     type="button"
                     onClick={() => onSelectJobForApplication(job)}
-                    className="flex-1 py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-600/20 hover:-translate-y-0.5 transition-all flex items-center justify-center gap-1.5"
+                    className="flex-1 py-2 px-3 rounded-lg bg-teal-500 hover:bg-teal-400 text-black text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
                   >
                     <span>Apply Now</span>
                     <ArrowRight className="w-3.5 h-3.5" />
@@ -269,11 +268,11 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                   <button
                     type="button"
                     disabled
-                    title="This position is not accepting applications yet (pending interview blueprint approval)."
-                    className="flex-1 py-2.5 px-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 text-xs font-bold cursor-not-allowed flex items-center justify-center gap-1.5"
+                    title="This position is not accepting applications yet."
+                    className="flex-1 py-2 px-3 rounded-lg bg-white/[0.05] text-zinc-500 text-xs font-medium cursor-not-allowed flex items-center justify-center gap-1.5 border border-white/[0.06]"
                   >
                     <Clock className="w-3.5 h-3.5" />
-                    <span>Not accepting applications yet</span>
+                    <span>Applications Pending</span>
                   </button>
                 )}
               </div>
@@ -284,39 +283,34 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
 
       {/* Role Details Modal */}
       {inspectingJob && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/75 backdrop-blur-sm animate-fadeIn">
-          <div className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-3xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-sm animate-fadeIn">
+          <div className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl bg-[#0A0A0B] border border-white/[0.08] shadow-2xl overflow-hidden">
             
             {/* Modal Header */}
-            <div className="p-6 bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between">
+            <div className="p-6 bg-[#0A0A0B] border-b border-white/[0.08] flex items-start justify-between">
               <div className="space-y-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-white/[0.05] text-zinc-300 border border-white/[0.08]">
                     {formatSeniority(inspectingJob.seniority_level)}
                   </span>
-                  {inspectingJob.role_display_name && inspectingJob.role_display_name !== 'Custom Role' && (
-                    <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
-                      {inspectingJob.role_display_name}
-                    </span>
-                  )}
-                  <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-white/[0.03] text-zinc-400 border border-white/[0.06]">
                     {inspectingJob.department}
                   </span>
-                  <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300">
+                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-white/[0.03] text-zinc-400">
                     {inspectingJob.workplace_model} · {inspectingJob.employment_type}
                   </span>
                 </div>
-                <h3 className="text-2xl font-black text-slate-900 dark:text-white">
+                <h3 className="text-2xl font-bold font-display text-white mt-1">
                   {inspectingJob.job_title}
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {inspectingJob.interview_duration_mins} minute session
+                <p className="text-xs font-mono text-zinc-400">
+                  {inspectingJob.interview_duration_mins} minute voice evaluation
                 </p>
               </div>
 
               <button
                 onClick={() => setInspectingJob(null)}
-                className="p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white bg-slate-100 dark:bg-slate-800 transition-colors"
+                className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/[0.05] transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -326,75 +320,56 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
             <div className="p-6 overflow-y-auto flex-1 space-y-6 text-xs">
               
               {/* Compensation Callout */}
-              <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-500/10 via-indigo-500/10 to-slate-100 dark:to-slate-800 border border-emerald-500/30 flex items-center justify-between">
+              <div className="p-4 rounded-xl bg-[#111113] border border-white/[0.08] flex items-center justify-between">
                 <div>
-                  <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Target Compensation</div>
-                  <div className="text-lg font-black text-emerald-700 dark:text-emerald-300 mt-0.5">
+                  <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Target Compensation</div>
+                  <div className="text-base font-semibold text-emerald-400 mt-0.5">
                     {formatSalaryRange(inspectingJob.salary_range_min, inspectingJob.salary_range_max, inspectingJob.salary_currency)}
                   </div>
                 </div>
                 <div className="text-right">
-                  <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Required Experience</div>
-                  <div className="text-sm font-bold text-slate-800 dark:text-slate-200 mt-0.5">
-                    {inspectingJob.total_experience_years}+ Years Total ({inspectingJob.domain_experience_years} Years Domain)
+                  <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Required Experience</div>
+                  <div className="text-xs font-medium text-zinc-200 mt-0.5">
+                    {inspectingJob.total_experience_years}+ Years Total
                   </div>
                 </div>
               </div>
 
-              {/* Full Job Description Section (Workday / LinkedIn Standard) */}
-              <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2.5 shadow-sm">
+              {/* Description */}
+              <div className="p-5 rounded-xl bg-[#111113] border border-white/[0.08] space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white">
-                    <Briefcase className="w-4 h-4 text-indigo-600" />
-                    <span>Job Description & Role Overview</span>
+                  <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-zinc-400">
+                    <Briefcase className="w-3.5 h-3.5 text-teal-400" />
+                    <span>Role Overview & Expectations</span>
                   </div>
-                  <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                    Role Specification
-                  </span>
                 </div>
                 {inspectingJob.job_description && inspectingJob.job_description !== 'N/A' ? (
-                  <div className="text-slate-700 dark:text-slate-300 whitespace-pre-line leading-relaxed text-xs">
+                  <div className="text-zinc-300 whitespace-pre-line leading-relaxed text-xs">
                     {inspectingJob.job_description}
                   </div>
                 ) : (
-                  <p className="text-slate-400 italic text-xs">
+                  <p className="text-zinc-500 italic text-xs">
                     No custom narrative job description provided. Please review the competencies, academic criteria, and interview duration benchmarks below.
                   </p>
                 )}
               </div>
 
-              {/* Custom Screening Questions notice */}
-              {inspectingJob.custom_questions && inspectingJob.custom_questions.length > 0 && (
-                <div className="p-4 rounded-2xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50 space-y-2">
-                  <div className="flex items-center gap-2 text-xs font-bold text-indigo-900 dark:text-indigo-300">
-                    <ShieldCheck className="w-4 h-4 text-indigo-600" />
-                    <span>Employer Application Screening Questions ({inspectingJob.custom_questions.length})</span>
-                  </div>
-                  <p className="text-[11px] text-indigo-700/80 dark:text-indigo-300/80">
-                    This role includes {inspectingJob.custom_questions.length} custom question(s) that you will complete during your application.
-                  </p>
-                </div>
-              )}
-
-              {/* Education & Academic Criteria */}
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
-                <div className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white">
-                  <BookOpen className="w-4 h-4 text-indigo-600" />
-                  <span>Academic & Degree Requirements</span>
+              {/* Education */}
+              <div className="p-4 rounded-xl bg-[#111113] border border-white/[0.08] space-y-3">
+                <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-zinc-400">
+                  <BookOpen className="w-3.5 h-3.5 text-teal-400" />
+                  <span>Academic & Degree Criteria</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
-                    <span className="text-slate-400 block">Minimum Degree:</span>
-                    <strong className="text-slate-800 dark:text-slate-200">{inspectingJob.min_degree_level}</strong>
-                    <div className="text-[11px] text-indigo-600 dark:text-indigo-400 mt-0.5">
-                      Enforcement: {inspectingJob.degree_enforcement_type}
-                    </div>
+                    <span className="text-zinc-500 block">Minimum Degree:</span>
+                    <strong className="text-zinc-200">{inspectingJob.min_degree_level}</strong>
                   </div>
                   <div>
-                    <span className="text-slate-400 block">Accepted Fields of Study:</span>
+                    <span className="text-zinc-500 block">Accepted Fields of Study:</span>
                     <div className="flex flex-wrap gap-1 mt-1">
                       {inspectingJob.accepted_majors?.map((major, idx) => (
-                        <span key={idx} className="px-2 py-0.5 rounded bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 font-medium">
+                        <span key={idx} className="px-2 py-0.5 rounded bg-black/40 border border-white/[0.08] text-zinc-300 font-mono text-[10px]">
                           {major}
                         </span>
                       ))}
@@ -403,27 +378,21 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                 </div>
               </div>
 
-              {/* Skills needed for the role; recruiter-only rubric anchors are intentionally omitted. */}
+              {/* Skills */}
               <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white">
-                    <Layers className="w-4 h-4 text-indigo-600" />
-                    <span>Skills Needed for This Role</span>
-                  </div>
+                <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-zinc-400">
+                  <Layers className="w-3.5 h-3.5 text-teal-400" />
+                  <span>Assessed Skills</span>
                 </div>
 
-                <div className="space-y-3">
+                <div className="space-y-2">
                   {inspectingJob.skills?.map((skill, idx) => (
                     <div
                       key={idx}
-                      className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800"
+                      className="p-3 rounded-lg bg-[#111113] border border-white/[0.08] flex items-center justify-between"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-slate-900 dark:text-white text-sm">{skill.name}</span>
-                          <span className="text-slate-400">({skill.category})</span>
-                        </div>
-                      </div>
+                      <span className="font-semibold text-white text-xs">{skill.name}</span>
+                      <span className="text-zinc-500 text-[11px] font-mono">{skill.category}</span>
                     </div>
                   ))}
                 </div>
@@ -431,11 +400,11 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
             </div>
 
             {/* Modal Footer */}
-            <div className="p-4 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+            <div className="p-4 bg-[#0A0A0B] border-t border-white/[0.08] flex items-center justify-between">
               <button
                 type="button"
                 onClick={() => setInspectingJob(null)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="px-4 py-1.5 rounded-lg text-xs font-medium text-zinc-400 hover:text-white bg-white/[0.05] border border-white/[0.08]"
               >
                 Close
               </button>
@@ -447,7 +416,7 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                     setInspectingJob(null);
                     onSelectJobForApplication(target);
                   }}
-                  className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition-all"
+                  className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-teal-500 hover:bg-teal-400 text-black font-semibold text-xs shadow-md transition-all cursor-pointer"
                 >
                   <span>Proceed to Apply</span>
                   <ArrowRight className="w-3.5 h-3.5" />
@@ -456,11 +425,10 @@ export default function CandidateJobListing({ onSelectJobForApplication }) {
                 <button
                   type="button"
                   disabled
-                  title="This position is not accepting applications yet."
-                  className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-500 font-bold text-xs cursor-not-allowed"
+                  className="inline-flex items-center gap-2 px-4 py-1.5 rounded-lg bg-white/[0.05] text-zinc-500 font-medium text-xs cursor-not-allowed border border-white/[0.06]"
                 >
                   <Clock className="w-3.5 h-3.5" />
-                  <span>Not accepting applications yet</span>
+                  <span>Applications Pending</span>
                 </button>
               )}
             </div>

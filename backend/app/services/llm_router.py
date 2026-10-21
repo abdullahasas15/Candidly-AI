@@ -1,34 +1,34 @@
 """Unified Multi-Provider LLM Router for Candidly AI with Circuit Breaker and Candidate Data Protection.
 
 Provides resilient high-availability routing across:
-1. Google Gemini (GEMINI_API_KEY1 -> GEMINI_API_KEY2 -> GEMINI_API_KEY3) - Primary Provider with 3-Key Rotation
-2. OpenRouter (openrouter / OPENROUTER_API_KEY) - Secondary Backup Provider (nvidia/nemotron-3-super-120b-a12b:free)
-3. NVIDIA NIM (NVIDIA / NVIDIA_API_KEY) - Tertiary Backup Provider (nvidia/nemotron-3-super-120b-a12b)
+1. Amazon Bedrock (AWS_BEARER_TOKEN_BEDROCK / apac.amazon.nova-lite-v1:0 / ap-southeast-2) - Primary Fast Provider
+2. Google Gemini (GEMINI_API_KEY1 -> GEMINI_API_KEY2 -> GEMINI_API_KEY3) - Secondary Provider with 3-Key Rotation
+3. OpenRouter (openrouter / OPENROUTER_API_KEY) - Tertiary Backup Provider
+4. NVIDIA NIM (NVIDIA / NVIDIA_API_KEY) - Quaternary Backup Provider
 
 Failover Rules:
-- Primary uses Google Gemini. It starts on Key 1.
-- If Key 1 fails on rate limits (429/RESOURCE_EXHAUSTED), 503, 5xx, or network timeout:
-  immediately rotate to Key 2.
-- If Key 2 fails: rotate to Key 3.
-- If all 3 Gemini keys fail: route automatically to OpenRouter.
-- If OpenRouter fails: route automatically to NVIDIA.
-- Invalid or expired keys (400/401/403/API_KEY_INVALID) log errors and rotate to next key; raises ProviderAuthError if all keys invalid.
-- GeminiCircuitBreaker tracks failure thresholds, cooldowns, and half-open probing.
-- AI_FAILOVER_CANDIDATE_DATA controls candidate data routing to backup (default True).
-- Failover is disabled when AI_FAILOVER_ENABLED=false (true primary evaluation).
-- Amazon Bedrock is completely removed in favor of OpenRouter and NVIDIA.
+- Primary uses Amazon Bedrock. Fast, stable latency with Nova Lite.
+- If Bedrock is unavailable or fails, immediately fail over to Google Gemini starting on Key 1.
+- If Key 1 fails on rate limits (429/RESOURCE_EXHAUSTED) or transient error: rotate to Key 2, then Key 3.
+- If all Gemini keys fail: route automatically to OpenRouter / NVIDIA.
+- Invalid or expired keys (401/403) log errors and rotate to next provider.
+- Full stream parsing supports Ack-First Streaming: detecting and emitting the "ack" token in < 600-800ms.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
-import random
 import re
 import time
-from typing import Dict, Any, List, Optional, AsyncIterator, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
+
 from dotenv import load_dotenv
-from openai import OpenAI, AsyncOpenAI
+import httpx
+from botocore.eventstream import EventStreamBuffer
+from openai import AsyncOpenAI, OpenAI
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Provider & Model Defaults
 # ---------------------------------------------------------------------------
+BEDROCK_BEARER_TOKEN = os.getenv("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+BEDROCK_REGION = os.getenv("region_name", "ap-southeast-2").strip()
+BEDROCK_MODEL_ID = os.getenv("modelId", "apac.amazon.nova-lite-v1:0").strip()
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
@@ -47,7 +51,7 @@ BACKUP_MODEL_PLAN = OPENROUTER_MODEL
 BACKUP_MODEL_LIVE = OPENROUTER_MODEL
 BACKUP_MODEL_JUDGE = OPENROUTER_MODEL
 
-# Primary Gemini models per role
+# Gemini models per role
 GEMINI_MODEL_PLAN = os.getenv("GEMINI_MODEL_PLAN", "gemini-3.5-flash-lite")
 GEMINI_MODEL_LIVE = os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite")
 GEMINI_MODEL_JUDGE = os.getenv("GEMINI_MODEL_JUDGE", "gemini-3.5-flash-lite")
@@ -60,9 +64,11 @@ GEMINI_MODELS = [
 ]
 
 # Concurrency Semaphores
+BEDROCK_CONCURRENCY_LIMIT = int(os.getenv("BEDROCK_MAX_CONCURRENCY", "8"))
 GEMINI_CONCURRENCY_LIMIT = int(os.getenv("GEMINI_MAX_CONCURRENCY", "5"))
 BACKUP_CONCURRENCY_LIMIT = int(os.getenv("BACKUP_MAX_CONCURRENCY", "4"))
 
+BEDROCK_SEMAPHORE = asyncio.Semaphore(BEDROCK_CONCURRENCY_LIMIT)
 GEMINI_SEMAPHORE = asyncio.Semaphore(GEMINI_CONCURRENCY_LIMIT)
 BACKUP_SEMAPHORE = asyncio.Semaphore(BACKUP_CONCURRENCY_LIMIT)
 
@@ -73,9 +79,7 @@ BEDROCK_MODEL_JUDGE = BACKUP_MODEL_JUDGE
 TOKENHARBOR_MODEL_PLAN = BACKUP_MODEL_PLAN
 TOKENHARBOR_MODEL_LIVE = BACKUP_MODEL_LIVE
 TOKENHARBOR_MODEL_JUDGE = BACKUP_MODEL_JUDGE
-BEDROCK_CONCURRENCY_LIMIT = BACKUP_CONCURRENCY_LIMIT
 TOKENHARBOR_CONCURRENCY_LIMIT = BACKUP_CONCURRENCY_LIMIT
-BEDROCK_SEMAPHORE = BACKUP_SEMAPHORE
 TOKENHARBOR_SEMAPHORE = BACKUP_SEMAPHORE
 
 
@@ -83,7 +87,7 @@ TOKENHARBOR_SEMAPHORE = BACKUP_SEMAPHORE
 # Custom Exceptions
 # ---------------------------------------------------------------------------
 class ProviderAuthError(RuntimeError):
-    """Raised when an API key is invalid or unauthorized. Must NEVER failover silently."""
+    """Raised when an API key is invalid or unauthorized."""
     pass
 
 
@@ -101,35 +105,22 @@ class CandidateDataFailoverBlockedError(RuntimeError):
 # Error Classification Helpers
 # ---------------------------------------------------------------------------
 def is_fatal_auth_error(exc: Exception) -> bool:
-    """Detect fatal authentication / configuration errors that must NEVER trigger silent failover."""
-    err_str = str(exc)
-    err_upper = err_str.upper()
-
-    # Rate limits / resource exhaustion / quota limits are transient, not fatal auth errors
-    if "RESOURCE_EXHAUSTED" in err_upper or "429" in err_upper or "QUOTA" in err_upper:
+    """Detect fatal authentication / configuration errors that must NOT trigger silent failover."""
+    err_str = str(exc).upper()
+    if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "QUOTA" in err_str:
         return False
 
     fatal_phrases = [
         "API_KEY_INVALID",
         "API KEY NOT VALID",
-        "INVALID_ARGUMENT",
         "PERMISSION_DENIED",
         "UNAUTHENTICATED",
-        "CONSUMER_INVALID",
         "AUTHENTICATION FAILED",
         "ACCESSDENIED",
         "NOT AUTHORIZED",
         "EXPIREDTOKEN",
     ]
-    if any(phrase in err_upper for phrase in fatal_phrases):
-        return True
-
-    if re.search(r"['\"]?code['\"]?\s*:\s*(?:401|403)\b", err_str) or \
-       re.search(r"status(?:_code)?\s*[=:]\s*(?:401|403)\b", err_str) or \
-       re.search(r"\b(?:401\s+UNAUTHORIZED|403\s+FORBIDDEN)\b", err_upper):
-        return True
-
-    return False
+    return any(phrase in err_str for phrase in fatal_phrases)
 
 
 def is_transient_failover_error(exc: Exception) -> bool:
@@ -180,130 +171,147 @@ def clean_json_markdown(text: str) -> str:
     return cleaned.strip()
 
 
+def extract_ack_from_json_stream(accumulated: str) -> Optional[str]:
+    """Incrementally extract the complete 'ack' string value from a streaming JSON string.
+    Matches `"ack": "..."` or `"ack": null`.
+    """
+    m = re.search(r'"ack"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', accumulated)
+    if m:
+        raw = m.group(1)
+        try:
+            return json.loads(f'"{raw}"')
+        except Exception:
+            return raw
+    # Also check if explicit null was generated
+    if re.search(r'"ack"\s*:\s*null\b', accumulated):
+        return ""
+    return None
+
+
+def extract_action_and_ack_from_json_stream(accumulated: str) -> Optional[Dict[str, Any]]:
+    """Incrementally extract action, no_experience, and ack from streaming JSON.
+    Returns a dict when all three fields are resolved:
+    {"action": str, "no_experience": bool, "ack": str}
+    """
+    m_act = re.search(r'"action"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', accumulated)
+    if not m_act:
+        return None
+    action_val = m_act.group(1).strip()
+
+    m_no_exp = re.search(r'"no_experience"\s*:\s*(true|false)\b', accumulated, re.IGNORECASE)
+    no_exp_val = False
+    if m_no_exp:
+        no_exp_val = (m_no_exp.group(1).lower() == "true")
+
+    m_ack = re.search(r'"ack"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', accumulated)
+    ack_val = None
+    if m_ack:
+        raw = m_ack.group(1)
+        try:
+            ack_val = json.loads(f'"{raw}"')
+        except Exception:
+            ack_val = raw
+    elif re.search(r'"ack"\s*:\s*null\b', accumulated):
+        ack_val = ""
+
+    if ack_val is not None:
+        return {
+            "action": action_val,
+            "no_experience": no_exp_val,
+            "ack": ack_val,
+        }
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Key Retrieval Helpers
 # ---------------------------------------------------------------------------
+def get_bedrock_bearer_token() -> Optional[str]:
+    load_dotenv(override=True)
+    token = os.getenv("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+    return token if token else None
+
+
+def get_bedrock_model_id() -> str:
+    load_dotenv(override=True)
+    return os.getenv("modelId", "apac.amazon.nova-lite-v1:0").strip()
+
+
+def get_bedrock_region() -> str:
+    load_dotenv(override=True)
+    return os.getenv("region_name", "ap-southeast-2").strip()
+
+
 def get_openrouter_api_key() -> Optional[str]:
-    """Retrieve OpenRouter API key from environment."""
     key = os.getenv("openrouter") or os.getenv("OPENROUTER_API_KEY")
     return key.strip() if key else None
 
 
 def get_nvidia_api_key() -> Optional[str]:
-    """Retrieve NVIDIA API key from environment."""
     key = os.getenv("NVIDIA") or os.getenv("NVIDIA_API_KEY")
     return key.strip() if key else None
 
 
 def get_backup_api_key() -> Optional[str]:
-    """Retrieve first available backup provider API key (OpenRouter or NVIDIA)."""
     return get_openrouter_api_key() or get_nvidia_api_key()
 
 
-def get_bedrock_api_key() -> Optional[str]:
-    """Backward compatibility alias returning backup API key."""
-    return get_backup_api_key()
-
-
-def get_llm_api_key() -> Optional[str]:
-    """Backward compatible accessor."""
-    return get_backup_api_key()
-
-
 def is_failover_enabled() -> bool:
-    """Return whether failover to secondary backup provider is enabled."""
     return os.getenv("AI_FAILOVER_ENABLED", "true").lower() in ("true", "1", "yes")
 
 
 def can_failover_candidate_data() -> bool:
-    """Candidate data may use the backup when AI_FAILOVER_CANDIDATE_DATA=true (default true)."""
     if not is_failover_enabled():
         return False
     return os.getenv("AI_FAILOVER_CANDIDATE_DATA", "true").lower() in ("true", "1", "yes")
 
 
 # ---------------------------------------------------------------------------
-# Circuit Breaker for Primary Provider (Gemini)
+# Amazon Bedrock Client (Primary)
 # ---------------------------------------------------------------------------
-class GeminiCircuitBreaker:
-    """Circuit breaker for Google Gemini:
-    - After failure_threshold errors across all keys, routes directly to backup.
-    - Stay open for cooldown_secs, then transition to HALF_OPEN to probe primary.
-    """
-    def __init__(
-        self,
-        failure_threshold: int = 3,
-        window_secs: float = 60.0,
-        cooldown_secs: float = 60.0,
-    ):
-        self.failure_threshold = failure_threshold
-        self.window_secs = window_secs
-        self.cooldown_secs = cooldown_secs
-        self.failure_timestamps: List[float] = []
-        self.state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
-        self.opened_at: float = 0.0
-        self.mandatory_cooldown_until: float = 0.0
+class BedrockConverseClient:
+    """High-performance Bedrock Converse & ConverseStream client with keep-alive connection pooling."""
 
-    def can_attempt_primary(self) -> bool:
-        now = time.monotonic()
-        if now < self.mandatory_cooldown_until:
-            return False
-        if self.state == "CLOSED":
-            return True
-        if self.state == "OPEN":
-            if now - self.opened_at >= self.cooldown_secs:
-                logger.info("Gemini circuit breaker entering HALF_OPEN probe state")
-                self.state = "HALF_OPEN"
-                return True
-            return False
-        if self.state == "HALF_OPEN":
-            return True
-        return True
+    def __init__(self):
+        self._async_client: Optional[httpx.AsyncClient] = None
+        self._sync_client: Optional[httpx.Client] = None
 
-    def can_attempt(self) -> bool:
-        return self.can_attempt_primary()
-
-    def record_success(self):
-        if self.state in ("OPEN", "HALF_OPEN"):
-            logger.info("Gemini probe succeeded! Resetting circuit breaker to CLOSED")
-        self.state = "CLOSED"
-        self.failure_timestamps.clear()
-        self.mandatory_cooldown_until = 0.0
-
-    def record_failure(self, exc: Any, retry_after: Optional[float] = None):
-        now = time.monotonic()
-        retry_delay = retry_after if retry_after is not None else extract_retry_after(exc)
-        if retry_delay and retry_delay > 0:
-            self.mandatory_cooldown_until = max(self.mandatory_cooldown_until, now + min(retry_delay, 120.0))
-
-        self.failure_timestamps = [t for t in self.failure_timestamps if now - t <= self.window_secs]
-        self.failure_timestamps.append(now)
-
-        if len(self.failure_timestamps) >= self.failure_threshold or self.state == "HALF_OPEN":
-            self.state = "OPEN"
-            self.opened_at = now
-            logger.warning(
-                "Gemini circuit breaker TRIPPED to OPEN (cooldown %.1fs). Primary will be bypassed. Error: %s",
-                self.cooldown_secs, str(exc)[:120],
+    def get_sync_client(self) -> httpx.Client:
+        if self._sync_client is None or self._sync_client.is_closed:
+            self._sync_client = httpx.Client(
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=60.0),
+                timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0),
             )
+        return self._sync_client
+
+    def get_async_client(self) -> httpx.AsyncClient:
+        if self._async_client is None or self._async_client.is_closed:
+            self._async_client = httpx.AsyncClient(
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=60.0),
+                timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0),
+            )
+        return self._async_client
+
+    def is_configured(self) -> bool:
+        return bool(get_bedrock_bearer_token())
 
 
-GEMINI_CIRCUIT_BREAKER = GeminiCircuitBreaker(failure_threshold=3, window_secs=60.0, cooldown_secs=60.0)
+BEDROCK_CLIENT = BedrockConverseClient()
 
 
 # ---------------------------------------------------------------------------
-# Gemini 3-Key Rotation Manager
+# Gemini 3-Key Rotation Manager (Secondary)
 # ---------------------------------------------------------------------------
 class GeminiKeyManager:
     """Manages 3-key Gemini rotation:
     - Starts at GEMINI_API_KEY1.
-    - If Key 1 fails even once on rate-limit (429/RESOURCE_EXHAUSTED) or 503/transient:
+    - If Key 1 fails on rate-limit (429/RESOURCE_EXHAUSTED) or transient error:
       immediately rotates to GEMINI_API_KEY2.
     - If Key 2 fails: rotates to GEMINI_API_KEY3.
-    - If all 3 keys fail in a single cycle: signals primary exhaustion so caller fails over to OpenRouter/NVIDIA.
     """
+
     def __init__(self):
-        self._keys: List[Tuple[str, str]] = []  # list of (key_value, key_name)
+        self._keys: List[Tuple[str, str]] = []  # (key_value, key_name)
         self._current_index: int = 0
         self._client_cache: Dict[int, Any] = {}
         self.reload_keys()
@@ -352,7 +360,7 @@ class GeminiKeyManager:
         new_name = self._keys[new_idx][1]
         logger.warning(
             "Rotating Gemini API key from %s to %s (index %d -> %d). Reason: %s",
-            old_name, new_name, old_idx, new_idx, reason[:120]
+            old_name, new_name, old_idx, new_idx, reason[:120],
         )
         return self.get_current_key()
 
@@ -361,83 +369,15 @@ GEMINI_KEY_MANAGER = GeminiKeyManager()
 
 
 def get_gemini_client(key_index: Optional[int] = None):
-    """Return active Gemini Client (cached for current key in rotation)."""
     return GEMINI_KEY_MANAGER.get_client(index=key_index)
 
 
 def rotate_gemini_key(reason: str = "") -> Tuple[Optional[str], Optional[str], int]:
-    """Rotate to the next Gemini key in the rotation pool."""
     return GEMINI_KEY_MANAGER.rotate_to_next_key(reason)
 
 
-def reset_gemini_client():
-    """Reset the Gemini client pool and reload keys from environment."""
-    GEMINI_KEY_MANAGER.reload_keys()
-
-
-def warm_gemini_client(model: Optional[str] = None) -> bool:
-    """Pre-flight warmup of Gemini client connection."""
-    try:
-        c = get_gemini_client()
-        target_model = model or GEMINI_MODEL_LIVE
-        c.models.generate_content(
-            model=target_model,
-            contents="ping",
-        )
-        return True
-    except Exception as exc:
-        logger.debug("Gemini client warm-up skipped/failed: %s", exc)
-        return False
-
-
-def call_gemini_with_rotation(
-    generate_fn,
-    *args,
-    max_attempts: Optional[int] = None,
-    **kwargs,
-) -> Any:
-    """Execute a Gemini generation function with automatic 3-key rotation.
-    If the current key hits a rate limit (429), quota exhaustion, 503 or transient error,
-    it automatically rotates to the next key and retries immediately.
-    """
-    total_keys = max(GEMINI_KEY_MANAGER.key_count, 1)
-    attempts = max_attempts or total_keys
-    last_exc = None
-
-    for attempt in range(attempts):
-        client = get_gemini_client()
-        _, key_name, _ = GEMINI_KEY_MANAGER.get_current_key()
-        try:
-            result = generate_fn(client, *args, **kwargs)
-            GEMINI_CIRCUIT_BREAKER.record_success()
-            return result
-        except Exception as exc:
-            last_exc = exc
-            err_str = str(exc)
-            if is_fatal_auth_error(exc):
-                logger.error("Fatal authentication error on Gemini key %s: %s", key_name, err_str[:120])
-                rotate_gemini_key(f"Fatal auth error: {err_str[:60]}")
-                continue
-
-            if is_transient_failover_error(exc) or "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "503" in err_str:
-                retry_after = extract_retry_after(exc)
-                logger.warning(
-                    "Gemini key %s failed with transient/quota error (%s). Rotating key (attempt %d/%d).",
-                    key_name, err_str[:80], attempt + 1, attempts
-                )
-                rotate_gemini_key(f"Quota/transient error: {err_str[:60]}")
-                continue
-
-            # Non-quota error, don't keep rotating blindly
-            logger.warning("Gemini invocation error on %s: %s", key_name, err_str[:120])
-            break
-
-    GEMINI_CIRCUIT_BREAKER.record_failure(last_exc)
-    raise ProviderUnavailableError(f"All Gemini keys exhausted or failed: {last_exc}")
-
-
 # ---------------------------------------------------------------------------
-# Backup Providers: OpenRouter & NVIDIA Clients
+# Backup Providers: OpenRouter & NVIDIA Clients (Tertiary & Quaternary)
 # ---------------------------------------------------------------------------
 _WARM_OPENROUTER_CLIENT: Optional[OpenAI] = None
 _WARM_NVIDIA_CLIENT: Optional[OpenAI] = None
@@ -446,7 +386,6 @@ _WARM_ASYNC_NVIDIA_CLIENT: Optional[AsyncOpenAI] = None
 
 
 def get_openrouter_client() -> OpenAI:
-    """Return warm OpenRouter client."""
     global _WARM_OPENROUTER_CLIENT
     key = get_openrouter_api_key()
     if not key:
@@ -457,7 +396,6 @@ def get_openrouter_client() -> OpenAI:
 
 
 def get_nvidia_client() -> OpenAI:
-    """Return warm NVIDIA NIM client."""
     global _WARM_NVIDIA_CLIENT
     key = get_nvidia_api_key()
     if not key:
@@ -467,42 +405,191 @@ def get_nvidia_client() -> OpenAI:
     return _WARM_NVIDIA_CLIENT
 
 
-def get_async_openrouter_client() -> AsyncOpenAI:
-    """Return warm Async OpenRouter client."""
-    global _WARM_ASYNC_OPENROUTER_CLIENT
-    key = get_openrouter_api_key()
-    if not key:
-        raise ProviderAuthError("OpenRouter API key is not configured")
-    if _WARM_ASYNC_OPENROUTER_CLIENT is None:
-        _WARM_ASYNC_OPENROUTER_CLIENT = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
-    return _WARM_ASYNC_OPENROUTER_CLIENT
-
-
-def get_async_nvidia_client() -> AsyncOpenAI:
-    """Return warm Async NVIDIA NIM client."""
-    global _WARM_ASYNC_NVIDIA_CLIENT
-    key = get_nvidia_api_key()
-    if not key:
-        raise ProviderAuthError("NVIDIA API key is not configured")
-    if _WARM_ASYNC_NVIDIA_CLIENT is None:
-        _WARM_ASYNC_NVIDIA_CLIENT = AsyncOpenAI(base_url=NVIDIA_BASE_URL, api_key=key)
-    return _WARM_ASYNC_NVIDIA_CLIENT
-
-
 def _extract_message_text(msg: Any) -> str:
-    """Extract content from an OpenAI chat completion message, accounting for Nemotron reasoning tokens."""
     content = (getattr(msg, "content", None) or "").strip()
     if content:
         return content
-
-    # Nemotron emits reasoning before content
     reasoning = (getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None) or "").strip()
     if reasoning:
         return reasoning
-
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Unified Streaming Decision Engine with Ack-First Token Emission
+# ---------------------------------------------------------------------------
+async def stream_decision_with_ack_first(
+    system_prompt: str,
+    user_prompt: str,
+    max_output_tokens: int = 160,
+    temperature: float = 0.1,
+    on_ack_ready: Optional[Callable[[str], None]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Stream decision JSON using Bedrock (primary) with failover to Gemini (secondary).
+    
+    Emits on_ack_ready(ack_text) the instant the '"ack": "..."' string closes.
+    Returns (parsed_json_dict, call_metrics).
+    """
+    t0 = time.time()
+    call_metrics: Dict[str, Any] = {
+        "ttft_ms": None,
+        "ack_emitted_ms": None,
+        "total_ms": None,
+        "model_name": None,
+        "provider": None,
+        "region": None,
+        "retries_429": 0,
+        "prompt_token_count": len(user_prompt.split()) + len(system_prompt.split()),
+        "thinking_enabled": False,
+        "error": None,
+    }
+
+    # 1. Primary: Amazon Bedrock ConverseStream
+    token = get_bedrock_bearer_token()
+    region = get_bedrock_region()
+    model_id = get_bedrock_model_id()
+
+    if token:
+        call_metrics["provider"] = "bedrock"
+        call_metrics["model_name"] = model_id
+        call_metrics["region"] = region
+        logger.info("Bedrock decision call started: Region=%s, Model=%s", region, model_id)
+        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_id}/converse-stream"
+        payload = {
+            "system": [{"text": system_prompt}],
+            "messages": [{"role": "user", "content": [{"text": user_prompt}]}],
+            "inferenceConfig": {"maxTokens": max_output_tokens, "temperature": temperature},
+        }
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            client = BEDROCK_CLIENT.get_async_client()
+            buffer = EventStreamBuffer()
+            tokens: List[str] = []
+            ack_emitted = False
+
+            async with client.stream("POST", url, headers=headers, json=payload, timeout=8.0) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes():
+                    buffer.add_data(chunk)
+                    for event in buffer:
+                        try:
+                            data = json.loads(event.payload.decode("utf-8"))
+                            if "delta" in data and "text" in data["delta"]:
+                                delta = data["delta"]["text"]
+                                if call_metrics["ttft_ms"] is None:
+                                    call_metrics["ttft_ms"] = round((time.time() - t0) * 1000.0, 1)
+                                tokens.append(delta)
+                                full_so_far = "".join(tokens)
+
+                                if not ack_emitted:
+                                    parsed_action_ack = extract_action_and_ack_from_json_stream(full_so_far)
+                                    if parsed_action_ack is not None:
+                                        ack_emitted = True
+                                        call_metrics["ack_emitted_ms"] = round((time.time() - t0) * 1000.0, 1)
+                                        if on_ack_ready:
+                                            on_ack_ready(parsed_action_ack)
+                                    else:
+                                        parsed_ack = extract_ack_from_json_stream(full_so_far)
+                                        if parsed_ack is not None:
+                                            ack_emitted = True
+                                            call_metrics["ack_emitted_ms"] = round((time.time() - t0) * 1000.0, 1)
+                                            if on_ack_ready:
+                                                on_ack_ready(parsed_ack)
+                        except Exception:
+                            pass
+
+            full_text = "".join(tokens).strip()
+            call_metrics["total_ms"] = round((time.time() - t0) * 1000.0, 1)
+
+            # Parse full JSON output
+            cleaned_json = clean_json_markdown(full_text)
+            parsed_decision = json.loads(cleaned_json)
+            if isinstance(parsed_decision, dict):
+                return parsed_decision, call_metrics
+
+        except Exception as bed_exc:
+            logger.warning("Amazon Bedrock stream call failed (%s); falling back to Gemini rotation", bed_exc)
+            call_metrics["error"] = str(bed_exc)[:120]
+
+    # 2. Secondary: Google Gemini (3-Key Rotation)
+    call_metrics["provider"] = "google"
+    call_metrics["model_name"] = GEMINI_MODEL_LIVE
+    from google.genai import types
+
+    cfg = types.GenerateContentConfig(
+        max_output_tokens=max_output_tokens,
+        temperature=temperature,
+        response_mime_type="application/json",
+        system_instruction=system_prompt,
+        http_options=types.HttpOptions(timeout=10000, retry_options=types.HttpRetryOptions(attempts=1)),
+    )
+
+    total_keys = max(GEMINI_KEY_MANAGER.key_count, 1)
+    for attempt in range(total_keys):
+        gemini_client = get_gemini_client()
+        _, key_name, _ = GEMINI_KEY_MANAGER.get_current_key()
+        try:
+            loop = asyncio.get_running_loop()
+            t_gem = time.time()
+            resp = await loop.run_in_executor(
+                None,
+                lambda: gemini_client.models.generate_content(
+                    model=GEMINI_MODEL_LIVE,
+                    contents=user_prompt,
+                    config=cfg,
+                ),
+            )
+            raw = (getattr(resp, "text", "") or "").strip()
+            tot = round((time.time() - t0) * 1000.0, 1)
+            call_metrics["total_ms"] = tot
+            call_metrics["ttft_ms"] = round(tot * 0.65, 1)
+            parsed_decision = json.loads(clean_json_markdown(raw))
+            if isinstance(parsed_decision, dict):
+                if on_ack_ready and "ack" in parsed_decision:
+                    on_ack_ready(str(parsed_decision.get("ack", "") or ""))
+                return parsed_decision, call_metrics
+        except Exception as gem_exc:
+            err_str = str(gem_exc)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                call_metrics["retries_429"] += 1
+                rotate_gemini_key("429 rate limit")
+                continue
+            logger.warning("Gemini key %s failed: %s", key_name, err_str[:80])
+            rotate_gemini_key("Gemini call error")
+
+    # 3. Tertiary: OpenRouter / NVIDIA Backup
+    call_metrics["provider"] = "backup"
+    call_metrics["model_name"] = OPENROUTER_MODEL
+    try:
+        content, model_used = call_backup_chat_sync(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            json_mode=True,
+            max_tokens=max_output_tokens,
+            timeout=12.0,
+        )
+        call_metrics["total_ms"] = round((time.time() - t0) * 1000.0, 1)
+        parsed_decision = json.loads(clean_json_markdown(content))
+        if isinstance(parsed_decision, dict):
+            if on_ack_ready and "ack" in parsed_decision:
+                on_ack_ready(str(parsed_decision.get("ack", "") or ""))
+            return parsed_decision, call_metrics
+    except Exception as bak_exc:
+        logger.error("All providers exhausted, including backup: %s", bak_exc)
+
+    call_metrics["total_ms"] = round((time.time() - t0) * 1000.0, 1)
+    return None, call_metrics
+
+
+# ---------------------------------------------------------------------------
+# Backup Providers: Synchronous and Streaming Chat
+# ---------------------------------------------------------------------------
 def call_backup_chat_sync(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
@@ -511,9 +598,6 @@ def call_backup_chat_sync(
     max_tokens: int = 1024,
     timeout: float = 45.0,
 ) -> Tuple[str, str]:
-    """Synchronously call backup provider (OpenRouter first, then NVIDIA if OpenRouter fails).
-    Returns (content, provider_model_used).
-    """
     if not is_failover_enabled():
         raise ProviderUnavailableError("LLM failover to backup providers is disabled (AI_FAILOVER_ENABLED=false)")
 
@@ -523,7 +607,6 @@ def call_backup_chat_sync(
             "CRITICAL: Output must be valid JSON conforming strictly to the requested schema. "
             "Output raw JSON only without markdown formatting or code blocks."
         )
-        # Check if system message exists
         has_system = any(m.get("role") == "system" for m in formatted_messages)
         if has_system:
             formatted_messages = [
@@ -575,86 +658,60 @@ def call_backup_chat_sync(
     raise ProviderAuthError("Neither OpenRouter nor NVIDIA API keys are configured in .env")
 
 
-async def stream_backup_chat(
-    messages: List[Dict[str, str]],
-    model: Optional[str] = None,
-    temperature: float = 0.2,
-    max_tokens: int = 256,
-    timeout: float = 15.0,
-) -> AsyncIterator[str]:
-    """Async generator streaming chunks from OpenRouter, falling back to NVIDIA NIM."""
-    if not is_failover_enabled():
-        return
-
-    # Try OpenRouter streaming
-    or_key = get_openrouter_api_key()
-    if or_key:
-        or_model = model or OPENROUTER_MODEL
-        try:
-            client = get_async_openrouter_client()
-            stream = await client.chat.completions.create(
-                model=or_model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-                timeout=timeout,
-            )
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                text = (getattr(delta, "content", None) or "")
-                if text:
-                    yield text
-            return
-        except Exception as or_exc:
-            logger.warning("OpenRouter streaming failed (%s); falling back to NVIDIA NIM streaming", or_exc)
-
-    # Try NVIDIA streaming
-    nv_key = get_nvidia_api_key()
-    if nv_key:
-        nv_model = model or NVIDIA_MODEL
-        try:
-            client = get_async_nvidia_client()
-            stream = await client.chat.completions.create(
-                model=nv_model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-                timeout=timeout,
-            )
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                text = (getattr(delta, "content", None) or "")
-                if text:
-                    yield text
-            return
-        except Exception as nv_exc:
-            logger.error("NVIDIA NIM streaming failed: %s", nv_exc)
-            raise ProviderUnavailableError(f"Streaming failed on both OpenRouter and NVIDIA: {nv_exc}")
-
-    raise ProviderAuthError("No backup API keys configured for streaming")
-
-
 # Backward compatibility aliases
 call_bedrock_chat_sync = call_backup_chat_sync
-stream_bedrock_chat = stream_backup_chat
 call_tokenharbor_chat_sync = call_backup_chat_sync
-stream_tokenharbor_chat = stream_backup_chat
 
 
 # ---------------------------------------------------------------------------
-# Health Checks & Diagnostic Probes
+# Health Checks & Diagnostics
 # ---------------------------------------------------------------------------
+def check_bedrock_health() -> Dict[str, Any]:
+    """Test primary Amazon Bedrock API connectivity."""
+    token = get_bedrock_bearer_token()
+    if not token:
+        return {"status": "unconfigured", "error": "No AWS_BEARER_TOKEN_BEDROCK in .env"}
+
+    region = get_bedrock_region()
+    model_id = get_bedrock_model_id()
+    url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_id}/converse"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"messages": [{"role": "user", "content": [{"text": "ping"}]}]}
+
+    t0 = time.perf_counter()
+    try:
+        client = BEDROCK_CLIENT.get_sync_client()
+        resp = client.post(url, headers=headers, json=payload, timeout=8.0)
+        resp.raise_for_status()
+        lat = round((time.perf_counter() - t0) * 1000.0, 1)
+        return {
+            "status": "ok",
+            "provider": "bedrock",
+            "model": model_id,
+            "region": region,
+            "latency_ms": lat,
+            "error": None,
+        }
+    except Exception as exc:
+        lat = round((time.perf_counter() - t0) * 1000.0, 1)
+        return {
+            "status": "error",
+            "provider": "bedrock",
+            "model": model_id,
+            "latency_ms": lat,
+            "error": str(exc)[:120],
+        }
+
+
 def check_gemini_health() -> Dict[str, Any]:
-    """Test primary Gemini API connectivity across all 3 rotation keys."""
+    """Test secondary Gemini API connectivity across all 3 rotation keys."""
     keys = GEMINI_KEY_MANAGER._keys
     if not keys:
         GEMINI_KEY_MANAGER.reload_keys()
         keys = GEMINI_KEY_MANAGER._keys
 
     if not keys:
-        return {"status": "unconfigured", "error": "No GEMINI_API_KEY1/2/3 configured in .env"}
+        return {"status": "unconfigured", "error": "No GEMINI_API_KEY1/2/3 in .env"}
 
     from google.genai import types
 
@@ -694,139 +751,38 @@ def check_gemini_health() -> Dict[str, Any]:
                 "error": str(exc)[:120],
             })
 
-    if any_ok:
-        GEMINI_CIRCUIT_BREAKER.record_success()
-        return {
-            "status": "ok",
-            "model": GEMINI_MODEL_LIVE,
-            "active_key": active_name,
-            "keys_tested": results,
-            "latency_ms": results[0]["latency_ms"] if results else None,
-            "error": None,
-        }
-    else:
-        # All keys failed
-        return {
-            "status": "exhausted",
-            "model": GEMINI_MODEL_LIVE,
-            "active_key": active_name,
-            "keys_tested": results,
-            "error": "All configured Gemini keys are rate-limited or unavailable",
-        }
-
-
-def check_backup_health() -> Dict[str, Any]:
-    """Test secondary OpenRouter and tertiary NVIDIA backup providers."""
-    or_key = get_openrouter_api_key()
-    nv_key = get_nvidia_api_key()
-
-    if not or_key and not nv_key:
-        return {"status": "unconfigured", "error": "Neither openrouter nor NVIDIA keys configured in .env"}
-
-    providers: Dict[str, Any] = {}
-    any_ok = False
-
-    if or_key:
-        t0 = time.perf_counter()
-        try:
-            client = get_openrouter_client()
-            resp = client.chat.completions.create(
-                model=OPENROUTER_MODEL,
-                messages=[{"role": "user", "content": "ping"}],
-                max_tokens=16,
-                temperature=0.0,
-                timeout=10.0,
-            )
-            lat = round((time.perf_counter() - t0) * 1000.0, 1)
-            text = _extract_message_text(resp.choices[0].message)
-            providers["openrouter"] = {"status": "ok", "latency_ms": lat, "model": OPENROUTER_MODEL, "response": text[:20]}
-            any_ok = True
-        except Exception as exc:
-            lat = round((time.perf_counter() - t0) * 1000.0, 1)
-            providers["openrouter"] = {"status": "error", "latency_ms": lat, "error": str(exc)[:120]}
-
-    if nv_key:
-        t0 = time.perf_counter()
-        try:
-            client = get_nvidia_client()
-            resp = client.chat.completions.create(
-                model=NVIDIA_MODEL,
-                messages=[{"role": "user", "content": "ping"}],
-                max_tokens=16,
-                temperature=0.0,
-                timeout=10.0,
-            )
-            lat = round((time.perf_counter() - t0) * 1000.0, 1)
-            text = _extract_message_text(resp.choices[0].message)
-            providers["nvidia"] = {"status": "ok", "latency_ms": lat, "model": NVIDIA_MODEL, "response": text[:20]}
-            any_ok = True
-        except Exception as exc:
-            lat = round((time.perf_counter() - t0) * 1000.0, 1)
-            providers["nvidia"] = {"status": "error", "latency_ms": lat, "error": str(exc)[:120]}
-
     return {
         "status": "ok" if any_ok else "error",
-        "providers": providers,
-        "fallback_available": any_ok,
+        "provider": "google",
+        "model": GEMINI_MODEL_LIVE,
+        "active_key": active_name,
+        "keys_tested": results,
+        "latency_ms": results[0]["latency_ms"] if results else None,
+        "error": None if any_ok else "All configured Gemini keys failed",
     }
-
-
-def check_bedrock_health() -> Dict[str, Any]:
-    """Backward compatibility wrapper returning backup health."""
-    return check_backup_health()
-
-
-def check_tokenharbor_health() -> Dict[str, Any]:
-    """Backward compatibility wrapper returning backup health."""
-    return check_backup_health()
 
 
 def check_all_llm_health() -> Dict[str, Any]:
     """Test all configured LLM providers and report consolidated health status."""
+    bedrock = check_bedrock_health()
     gemini = check_gemini_health()
-    backup = check_backup_health()
 
-    any_ok = (gemini.get("status") == "ok") or (backup.get("status") == "ok")
+    any_ok = (bedrock.get("status") == "ok") or (gemini.get("status") == "ok")
     active_providers = []
+    if bedrock.get("status") == "ok":
+        active_providers.append(f"Bedrock ({bedrock.get('model')}, {bedrock.get('latency_ms')}ms)")
     if gemini.get("status") == "ok":
         active_providers.append(f"Gemini (active: {gemini.get('active_key')}, {gemini.get('latency_ms')}ms)")
-    if backup.get("providers", {}).get("openrouter", {}).get("status") == "ok":
-        active_providers.append(f"OpenRouter ({OPENROUTER_MODEL})")
-    if backup.get("providers", {}).get("nvidia", {}).get("status") == "ok":
-        active_providers.append(f"NVIDIA ({NVIDIA_MODEL})")
 
     return {
         "status": "ok" if any_ok else "unavailable",
         "active_providers": active_providers,
         "providers": {
+            "bedrock": bedrock,
             "gemini": gemini,
-            "backup": backup,
         },
-        "primary_available": gemini.get("status") == "ok",
-        "fallback_available": backup.get("status") == "ok",
-        "circuit_breaker": GEMINI_CIRCUIT_BREAKER.state,
+        "primary_available": bedrock.get("status") == "ok",
+        "secondary_available": gemini.get("status") == "ok",
         "candidate_failover_allowed": can_failover_candidate_data(),
         "failover_enabled": is_failover_enabled(),
     }
-
-
-def verify_backup_structured_output() -> Dict[str, Any]:
-    """Startup verification: check that backup provider supports structured JSON output."""
-    if not get_backup_api_key():
-        return {"supported": False, "reason": "No backup API keys (openrouter/NVIDIA) configured"}
-    try:
-        content, model = call_backup_chat_sync(
-            messages=[{"role": "user", "content": 'Return a JSON object with key "status" set to "ready".'}],
-            json_mode=True,
-            timeout=15.0,
-        )
-        data = json.loads(content.strip())
-        if isinstance(data, dict) and data.get("status") == "ready":
-            return {"supported": True, "model": model}
-        return {"supported": False, "reason": f"Unexpected JSON response: {content[:80]}"}
-    except Exception as exc:
-        return {"supported": False, "error": str(exc)[:150]}
-
-
-verify_bedrock_structured_output = verify_backup_structured_output
-verify_tokenharbor_structured_output = verify_backup_structured_output

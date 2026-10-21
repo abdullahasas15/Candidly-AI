@@ -836,19 +836,19 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/75 backdrop-blur-sm animate-fadeIn">
-      <div className="relative w-full max-w-5xl max-h-[92vh] flex flex-col rounded-3xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+      <div className="relative w-full max-w-5xl max-h-[92vh] flex flex-col rounded-3xl bg-[#0A0A0B] border border-white/[0.08] shadow-2xl overflow-hidden">
         
         {/* Header */}
-        <div className="px-6 py-4 bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+        <div className="px-6 py-4 bg-[#111113] border-b border-white/[0.08] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-md">
+            <div className="w-10 h-10 rounded-xl bg-teal-500 text-black text-white flex items-center justify-center shadow-md">
               <Sparkles className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+              <h2 className="text-xl font-extrabold text-white tracking-tight">
                 Configure Autonomous Job & Interview Blueprint
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
+              <p className="text-xs text-zinc-400">
                 Ground interview delivery in calibrated role templates, seniority-tuned rubrics, and predictable budgeting.
               </p>
             </div>
@@ -856,14 +856,14 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
 
           <button
             onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white bg-slate-100 dark:bg-slate-800 transition-colors"
+            className="p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white bg-[#18181B] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Step Navigation Bar */}
-        <div className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/90 p-2 sm:px-6">
+        <div className="border-b border-white/[0.08] bg-[#0A0A0B] p-2 sm:px-6">
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5">
             {steps.map((step) => {
               const Icon = step.icon;
@@ -876,10 +876,10 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   onClick={() => setActiveStep(step.num)}
                   className={`flex items-center gap-2 py-2 px-2.5 rounded-xl text-xs font-semibold transition-all text-left ${
                     isActive
-                      ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-500'
+                      ? 'bg-teal-500 text-black text-white shadow-sm ring-1 ring-teal-400'
                       : isPast
                       ? 'bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200/50 dark:border-emerald-800/40 hover:bg-emerald-100/60'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
+                      : 'text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
                   }`}
                 >
                   <span className={`w-5 h-5 rounded-lg flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
@@ -887,7 +887,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       ? 'bg-white/20 text-white'
                       : isPast
                       ? 'bg-emerald-600 text-white'
-                      : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                      : 'bg-slate-200 dark:bg-slate-800 text-zinc-400'
                   }`}>
                     {isPast ? <CheckCircle2 className="w-3 h-3" /> : step.num}
                   </span>
@@ -915,7 +915,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
               
               {/* Template Picker Cards */}
               <div>
-                <label className="block font-bold text-slate-900 dark:text-white text-sm mb-2">
+                <label className="block font-bold text-white text-sm mb-2">
                   Select Calibrated Role Template
                 </label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
@@ -934,8 +934,8 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                         onClick={() => handleSelectTemplate(tpl)}
                         className={`p-4 rounded-2xl border cursor-pointer transition-all flex flex-col justify-between ${
                           isSelected
-                            ? 'border-indigo-600 bg-indigo-50/50 dark:bg-indigo-950/40 ring-2 ring-indigo-500/30'
-                            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 hover:border-slate-300 dark:hover:border-slate-700'
+                            ? 'border-teal-400 bg-teal-500/10 ring-2 ring-teal-400/30'
+                            : 'border-white/[0.08] bg-[#111113] hover:border-slate-300 dark:hover:border-slate-700'
                         }`}
                       >
                         <div className="space-y-2">
@@ -943,11 +943,11 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                             <div className={`w-8 h-8 rounded-lg bg-gradient-to-br ${meta.color} text-white flex items-center justify-center shadow-sm`}>
                               <Icon className="w-4 h-4" />
                             </div>
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#18181B] text-zinc-400">
                               {meta.tag}
                             </span>
                           </div>
-                          <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                          <h4 className="font-bold text-white text-xs">
                             {tpl.display_name}
                           </h4>
                           <p className="text-[11px] text-slate-500 line-clamp-2">
@@ -957,7 +957,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                         <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px] text-slate-400">
                           <span>{tpl.skills?.length || 5} Competencies</span>
                           {isSelected && (
-                            <span className="text-indigo-600 dark:text-indigo-400 font-bold flex items-center gap-1">
+                            <span className="text-teal-400 font-bold flex items-center gap-1">
                               <CheckCircle2 className="w-3.5 h-3.5" /> Selected
                             </span>
                           )}
@@ -971,15 +971,15 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     onClick={() => handleSelectTemplate(null)}
                     className={`p-4 rounded-2xl border cursor-pointer transition-all flex flex-col justify-between ${
                       formData.role_key === 'custom'
-                        ? 'border-indigo-600 bg-indigo-50/50 dark:bg-indigo-950/40 ring-2 ring-indigo-500/30'
-                        : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 hover:border-slate-300 dark:hover:border-slate-700'
+                        ? 'border-teal-400 bg-teal-500/10 ring-2 ring-teal-400/30'
+                        : 'border-white/[0.08] bg-[#111113] hover:border-slate-300 dark:hover:border-slate-700'
                     }`}
                   >
                     <div className="space-y-2">
                       <div className="w-8 h-8 rounded-lg bg-slate-700 text-white flex items-center justify-center">
                         <Plus className="w-4 h-4" />
                       </div>
-                      <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                      <h4 className="font-bold text-white text-xs">
                         Custom Role
                       </h4>
                       <p className="text-[11px] text-slate-500 line-clamp-2">
@@ -988,7 +988,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     </div>
                     <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 text-[10px] text-slate-400">
                       {formData.role_key === 'custom' ? (
-                        <span className="text-indigo-600 dark:text-indigo-400 font-bold flex items-center gap-1">
+                        <span className="text-teal-400 font-bold flex items-center gap-1">
                           <CheckCircle2 className="w-3.5 h-3.5" /> Selected
                         </span>
                       ) : (
@@ -1001,7 +1001,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
 
               {/* Seniority Level Picker */}
               <div>
-                <label className="block font-bold text-slate-900 dark:text-white mb-1.5">
+                <label className="block font-bold text-white mb-1.5">
                   Target Seniority Level
                 </label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
@@ -1014,8 +1014,8 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                         onClick={() => handleSelectSeniority(opt.value)}
                         className={`py-2 px-3 rounded-xl border text-left transition-all ${
                           isSelected
-                            ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-bold shadow-sm'
-                            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:border-slate-300'
+                            ? 'border-teal-400 bg-teal-500/10 text-teal-300 font-bold shadow-sm'
+                            : 'border-white/[0.08] bg-[#0A0A0B] text-zinc-300 hover:border-slate-300'
                         }`}
                       >
                         <div className="text-xs">{opt.label}</div>
@@ -1039,7 +1039,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
               {/* Basic Fields */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Job Title <span className="text-rose-500">*</span>
                   </label>
                   <input
@@ -1048,13 +1048,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     placeholder="e.g. Software Development Engineer (Entry)"
                     value={formData.job_title}
                     onChange={(e) => setFormData({ ...formData, job_title: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm focus:ring-2 focus:ring-teal-400"
                   />
                   <span className="text-[11px] text-slate-400 mt-1 block">Injected into the AI interviewer persona prompt.</span>
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Department / Business Unit <span className="text-rose-500">*</span>
                   </label>
                   <input
@@ -1063,12 +1063,12 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     placeholder="e.g. Core Platform Infrastructure, Payments"
                     value={formData.department}
                     onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm focus:ring-2 focus:ring-teal-400"
                   />
                 </div>
 
                 <div className="md:col-span-2">
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Job Description
                   </label>
                   <textarea
@@ -1076,7 +1076,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     placeholder="Describe role mission, team responsibilities, and expected competencies."
                     value={formData.job_description}
                     onChange={(e) => setFormData({ ...formData, job_description: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-indigo-500 resize-y font-mono text-xs leading-relaxed"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm focus:ring-2 focus:ring-teal-400 resize-y font-mono text-xs leading-relaxed"
                   />
                   <span className="text-[11px] text-slate-400 mt-1 block">
                     Pre-populated with calibrated role mission, responsibilities, qualifications, and technology stack. Fully editable.
@@ -1084,13 +1084,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Employment Type
                   </label>
                   <select
                     value={formData.employment_type}
                     onChange={(e) => setFormData({ ...formData, employment_type: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                   >
                     <option>Full-Time</option>
                     <option>Part-Time</option>
@@ -1100,13 +1100,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Workplace Model
                   </label>
                   <select
                     value={formData.workplace_model}
                     onChange={(e) => setFormData({ ...formData, workplace_model: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                   >
                     <option>Remote</option>
                     <option>Hybrid</option>
@@ -1115,7 +1115,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 </div>
 
                 <div className="md:col-span-2">
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Permitted Locations / Timezones
                   </label>
                   <input
@@ -1123,24 +1123,24 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     placeholder="e.g. Global Remote, United States, India"
                     value={formData.permitted_locations_str}
                     onChange={(e) => setFormData({ ...formData, permitted_locations_str: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                   />
                   <span className="text-[11px] text-slate-400 mt-1 block">Comma-separated list of approved regions.</span>
                 </div>
               </div>
 
               {/* Compensation & Salary Band */}
-              <div className="pt-4 border-t border-slate-200 dark:border-slate-800">
+              <div className="pt-4 border-t border-white/[0.08]">
                 <div className="flex items-center justify-between mb-3">
                   <div>
-                    <h4 className="font-bold text-slate-900 dark:text-white text-sm">Target Annual Compensation Band</h4>
+                    <h4 className="font-bold text-white text-sm">Target Annual Compensation Band</h4>
                     <p className="text-[11px] text-slate-400">Displayed transparently to prospective candidates.</p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-semibold text-zinc-300 mb-1">
                       Min Annual Salary
                     </label>
                     <input
@@ -1148,12 +1148,12 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       step="1000"
                       value={formData.salary_range_min || ''}
                       onChange={(e) => setFormData({ ...formData, salary_range_min: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     />
                   </div>
 
                   <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-semibold text-zinc-300 mb-1">
                       Max Annual Salary
                     </label>
                     <input
@@ -1161,18 +1161,18 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       step="1000"
                       value={formData.salary_range_max || ''}
                       onChange={(e) => setFormData({ ...formData, salary_range_max: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     />
                   </div>
 
                   <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-semibold text-zinc-300 mb-1">
                       Currency
                     </label>
                     <select
                       value={formData.salary_currency}
                       onChange={(e) => setFormData({ ...formData, salary_currency: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     >
                       <option value="USD">USD ($)</option>
                       <option value="EUR">EUR (€)</option>
@@ -1192,18 +1192,18 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
               
               {/* Academic Thresholds */}
               <div>
-                <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-2">
+                <h3 className="text-sm font-bold text-white mb-2">
                   Academic & Educational Criteria
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-bold text-zinc-300 mb-1">
                       Minimum Degree Level Required
                     </label>
                     <select
                       value={formData.min_degree_level}
                       onChange={(e) => setFormData({ ...formData, min_degree_level: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     >
                       <option>High School Diploma / GED</option>
                       <option>Associate Degree</option>
@@ -1214,13 +1214,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-bold text-zinc-300 mb-1">
                       Degree Requirement Enforcement Type
                     </label>
                     <select
                       value={formData.degree_enforcement_type}
                       onChange={(e) => setFormData({ ...formData, degree_enforcement_type: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     >
                       <option>Mandatory (Hard Knockout)</option>
                       <option>Preferred (Bonus Score)</option>
@@ -1229,27 +1229,27 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   </div>
 
                   <div className="md:col-span-2">
-                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-bold text-zinc-300 mb-1">
                       Accepted Fields of Study (Majors)
                     </label>
                     <input
                       type="text"
                       value={formData.accepted_majors_str}
                       onChange={(e) => setFormData({ ...formData, accepted_majors_str: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     />
                     <span className="text-[11px] text-slate-400 mt-1 block">Comma-separated majors matched semantically against candidate transcripts.</span>
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-bold text-zinc-300 mb-1">
                       Minimum CGPA / GPA Threshold
                     </label>
                     <input
                       type="text"
                       value={formData.min_cgpa}
                       onChange={(e) => setFormData({ ...formData, min_cgpa: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     />
                   </div>
 
@@ -1259,15 +1259,15 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       id="cgpa_strict"
                       checked={formData.cgpa_strict_filter}
                       onChange={(e) => setFormData({ ...formData, cgpa_strict_filter: e.target.checked })}
-                      className="w-4 h-4 text-indigo-600 rounded"
+                      className="w-4 h-4 text-teal-400 rounded"
                     />
-                    <label htmlFor="cgpa_strict" className="text-slate-700 dark:text-slate-300 font-semibold cursor-pointer">
+                    <label htmlFor="cgpa_strict" className="text-zinc-300 font-semibold cursor-pointer">
                       Enforce CGPA as strict knockout filter
                     </label>
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-bold text-zinc-300 mb-1">
                       Graduation Year (Earliest)
                     </label>
                     <input
@@ -1275,13 +1275,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       placeholder="e.g. 2020"
                       value={formData.grad_year_start}
                       onChange={(e) => setFormData({ ...formData, grad_year_start: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     />
                     <span className="text-[11px] text-slate-400 mt-1 block">Earliest eligible cohort graduation year.</span>
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-bold text-zinc-300 mb-1">
                       Graduation Year (Latest)
                     </label>
                     <input
@@ -1289,7 +1289,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       placeholder="e.g. 2026"
                       value={formData.grad_year_end}
                       onChange={(e) => setFormData({ ...formData, grad_year_end: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     />
                     <span className="text-[11px] text-slate-400 mt-1 block">Latest eligible cohort graduation year.</span>
                   </div>
@@ -1297,13 +1297,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
               </div>
 
               {/* Professional Experience Metrics */}
-              <div className="pt-4 border-t border-slate-200 dark:border-slate-800">
-                <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-2">
+              <div className="pt-4 border-t border-white/[0.08]">
+                <h3 className="text-sm font-bold text-white mb-2">
                   Experience Metrics
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-bold text-zinc-300 mb-1">
                       Total Experience (Years)
                     </label>
                     <input
@@ -1311,12 +1311,12 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       step="0.5"
                       value={formData.total_experience_years}
                       onChange={(e) => setFormData({ ...formData, total_experience_years: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     />
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    <label className="block font-bold text-zinc-300 mb-1">
                       Domain / Role Experience (Years)
                     </label>
                     <input
@@ -1324,23 +1324,23 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       step="0.5"
                       value={formData.domain_experience_years}
                       onChange={(e) => setFormData({ ...formData, domain_experience_years: e.target.value })}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                     />
                   </div>
 
-                  <div className="md:col-span-2 flex items-center gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                  <div className="md:col-span-2 flex items-center gap-3 p-3.5 rounded-xl bg-[#111113] border border-white/[0.08]">
                     <input
                       type="checkbox"
                       id="leadership"
                       checked={formData.leadership_required}
                       onChange={(e) => setFormData({ ...formData, leadership_required: e.target.checked })}
-                      className="w-4 h-4 text-indigo-600 rounded"
+                      className="w-4 h-4 text-teal-400 rounded"
                     />
                     <div>
-                      <label htmlFor="leadership" className="font-bold text-slate-900 dark:text-white cursor-pointer block">
+                      <label htmlFor="leadership" className="font-bold text-white cursor-pointer block">
                         Leadership & Project Ownership Required
                       </label>
-                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                      <span className="text-[11px] text-zinc-400">
                         Allocates behavioral scenario probe on system ownership and stakeholder alignment.
                       </span>
                     </div>
@@ -1349,10 +1349,10 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
               </div>
 
               {/* Certifications Matrix */}
-              <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+              <div className="pt-4 border-t border-white/[0.08] space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    <h3 className="text-sm font-bold text-white">
                       Suggested Certifications & Accreditations
                     </h3>
                     <p className="text-[11px] text-slate-500">
@@ -1362,7 +1362,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   <button
                     type="button"
                     onClick={handleAddCert}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-teal-500/10 text-teal-300 border border-teal-500/20 hover:bg-indigo-100"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>Add Certification</span>
@@ -1378,7 +1378,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     {formData.certifications.map((c, idx) => (
                       <div
                         key={idx}
-                        className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center"
+                        className="p-3 rounded-xl bg-[#111113]/60 border border-white/[0.08] grid grid-cols-1 sm:grid-cols-12 gap-3 items-center"
                       >
                         <div className="sm:col-span-4">
                           <label className="text-[10px] text-slate-400 uppercase font-bold block mb-1">Certification Name</label>
@@ -1416,9 +1416,9 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                             id={`cert_v_${idx}`}
                             checked={c.verification_required}
                             onChange={(e) => handleUpdateCert(idx, 'verification_required', e.target.checked)}
-                            className="w-3.5 h-3.5 text-indigo-600 rounded"
+                            className="w-3.5 h-3.5 text-teal-400 rounded"
                           />
-                          <label htmlFor={`cert_v_${idx}`} className="text-[11px] text-slate-600 dark:text-slate-400 cursor-pointer">
+                          <label htmlFor={`cert_v_${idx}`} className="text-[11px] text-zinc-400 cursor-pointer">
                             Verify Credential
                           </label>
                         </div>
@@ -1444,7 +1444,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
             <div className="space-y-6 text-xs">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  <h3 className="text-sm font-bold text-white">
                     Role Competencies & 5-Level Behavioral Rubrics
                   </h3>
                   <p className="text-[11px] text-slate-500">
@@ -1455,7 +1455,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   <button
                     type="button"
                     onClick={handleAddSkill}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-teal-500/10 text-teal-300 border border-teal-500/20 hover:bg-indigo-100"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>Add Competency</span>
@@ -1464,9 +1464,9 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
               </div>
 
               {/* Weight & Duration Fit Summary Bar */}
-              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div className="p-3.5 rounded-2xl bg-[#111113]/60 border border-white/[0.08] flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
-                  <span className="font-bold text-slate-700 dark:text-slate-300">Total Weight:</span>
+                  <span className="font-bold text-zinc-300">Total Weight:</span>
                   <span className={`px-2.5 py-0.5 rounded-full font-bold text-xs ${
                     Math.round(totalWeight) === 100
                       ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-300'
@@ -1492,15 +1492,15 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       key={idx}
                       className={`rounded-2xl border transition-all ${
                         isExpanded
-                          ? 'border-indigo-500/50 bg-white dark:bg-slate-900/70 shadow-md'
-                          : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/30'
+                          ? 'border-teal-400/50 bg-[#0A0A0B]/70 shadow-md'
+                          : 'border-white/[0.08] bg-slate-50/50 dark:bg-slate-900/30'
                       }`}
                     >
                       {/* Skill Header */}
                       <div className="p-3.5 flex flex-wrap items-center justify-between gap-3">
                         <div className="flex items-center gap-2 flex-1 min-w-[200px]">
                           <span className={`w-6 h-6 rounded-lg flex items-center justify-center font-bold text-xs ${
-                            isP0 ? 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300' : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                            isP0 ? 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300' : 'bg-slate-200 dark:bg-slate-800 text-zinc-400'
                           }`}>
                             {skill.priority_tier}
                           </span>
@@ -1509,7 +1509,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                             value={skill.name}
                             placeholder="Competency name (e.g. Core CS Fundamentals)"
                             onChange={(e) => handleUpdateSkill(idx, 'name', e.target.value)}
-                            className="font-bold text-slate-900 dark:text-white bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 text-sm focus:outline-none flex-1"
+                            className="font-bold text-white bg-transparent border-b border-transparent hover:border-slate-300 focus:border-teal-400 text-sm focus:outline-none flex-1"
                           />
                         </div>
 
@@ -1526,7 +1526,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
 
                           {/* Source */}
                           {skill.source && (
-                            <span className="text-[10px] px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-[#18181B] text-slate-500">
                               {skill.source}
                             </span>
                           )}
@@ -1639,13 +1639,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
             <div className="space-y-4 text-xs">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Interview Session Duration
                   </label>
                   <select
                     value={formData.interview_duration_mins}
                     onChange={(e) => setFormData({ ...formData, interview_duration_mins: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm font-semibold"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm font-semibold"
                   >
                     <option value={15}>15 Minutes (~5-6 Expectations)</option>
                     <option value={20}>20 Minutes (~7-8 Expectations)</option>
@@ -1656,13 +1656,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Max Follow-Up Depth per Core Question
                   </label>
                   <select
                     value={formData.max_followup_depth}
                     onChange={(e) => setFormData({ ...formData, max_followup_depth: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                   >
                     <option value={1}>1 Follow-up (Standard)</option>
                     <option value={2}>2 Follow-ups (Deep probe)</option>
@@ -1670,13 +1670,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Pacing Strictness
                   </label>
                   <select
                     value={formData.pacing_strictness}
                     onChange={(e) => setFormData({ ...formData, pacing_strictness: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                   >
                     <option>Relaxed (Allows candidate to elaborate freely)</option>
                     <option>Balanced (Gently keeps candidate on track)</option>
@@ -1685,13 +1685,13 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Integrity Policy Tier
                   </label>
                   <select
                     value={formData.integrity_policy_tier}
                     onChange={(e) => setFormData({ ...formData, integrity_policy_tier: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                   >
                     <option>Basic (Presence & tab tracking)</option>
                     <option>Moderate (Multiple faces & gaze tracking)</option>
@@ -1699,33 +1699,33 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   </select>
                 </div>
 
-                <div className="md:col-span-2 flex items-center gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                <div className="md:col-span-2 flex items-center gap-3 p-3.5 rounded-xl bg-[#111113] border border-white/[0.08]">
                   <input
                     type="checkbox"
                     id="grace"
                     checked={formData.allow_grace_extension}
                     onChange={(e) => setFormData({ ...formData, allow_grace_extension: e.target.checked })}
-                    className="w-4 h-4 text-indigo-600 rounded"
+                    className="w-4 h-4 text-teal-400 rounded"
                   />
                   <div>
-                    <label htmlFor="grace" className="font-bold text-slate-900 dark:text-white cursor-pointer block">
+                    <label htmlFor="grace" className="font-bold text-white cursor-pointer block">
                       Enable Optional +5 Minute Grace Period Extension
                     </label>
-                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                    <span className="text-[11px] text-zinc-400">
                       Offers candidate extra time if answering a deep architectural question at session close.
                     </span>
                   </div>
                 </div>
 
                 <div className="md:col-span-2">
-                  <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-bold text-zinc-300 mb-1">
                     Interviewer Conversational Tone & Persona Prompt
                   </label>
                   <textarea
                     rows={2}
                     value={formData.interviewer_tone}
                     onChange={(e) => setFormData({ ...formData, interviewer_tone: e.target.value })}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-[#111113] text-white text-sm"
                   />
                 </div>
               </div>
@@ -1737,7 +1737,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
             <div className="space-y-4 text-xs">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  <h3 className="text-sm font-bold text-white">
                     Application Screening Questions (Optional)
                   </h3>
                   <p className="text-[11px] text-slate-500">
@@ -1747,7 +1747,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 <button
                   type="button"
                   onClick={handleAddQuestion}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-teal-500/10 text-teal-300 border border-teal-500/20 hover:bg-indigo-100"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Add Question</span>
@@ -1763,7 +1763,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   {formData.custom_questions.map((q, idx) => (
                     <div
                       key={idx}
-                      className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-3"
+                      className="p-4 rounded-2xl bg-[#111113]/60 border border-white/[0.08] space-y-3"
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1">
@@ -1819,9 +1819,9 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                             id={`q_req_${idx}`}
                             checked={q.is_required !== false}
                             onChange={(e) => handleUpdateQuestion(idx, 'is_required', e.target.checked)}
-                            className="w-4 h-4 text-indigo-600 rounded"
+                            className="w-4 h-4 text-teal-400 rounded"
                           />
-                          <label htmlFor={`q_req_${idx}`} className="text-slate-700 dark:text-slate-300 font-semibold cursor-pointer">
+                          <label htmlFor={`q_req_${idx}`} className="text-zinc-300 font-semibold cursor-pointer">
                             Required to submit
                           </label>
                         </div>
@@ -1850,15 +1850,15 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
           {activeStep === 6 && (
             <div className="space-y-6 text-xs">
               {!createdJob ? (
-                <div className="p-8 text-center space-y-5 bg-slate-50 dark:bg-slate-900/60 rounded-3xl border border-slate-200 dark:border-slate-800">
-                  <div className="w-14 h-14 rounded-2xl bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mx-auto shadow-sm">
+                <div className="p-8 text-center space-y-5 bg-[#111113]/60 rounded-3xl border border-white/[0.08]">
+                  <div className="w-14 h-14 rounded-2xl bg-teal-500/10 text-teal-400 flex items-center justify-center mx-auto shadow-sm">
                     <Sparkles className="w-7 h-7" />
                   </div>
                   <div className="max-w-md mx-auto space-y-1">
-                    <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                    <h3 className="text-base font-extrabold text-white">
                       Synthesize Role Interview Blueprint
                     </h3>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                    <p className="text-xs text-zinc-400">
                       Save calibrated role parameters to synthesize anchor questions, escalation challenges, probes, and live time budgeting.
                     </p>
                   </div>
@@ -1866,7 +1866,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     type="button"
                     disabled={submitting}
                     onClick={handleSubmit}
-                    className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md shadow-indigo-600/20 hover:-translate-y-0.5 transition-all disabled:opacity-50"
+                    className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-teal-500 hover:bg-teal-400 text-black font-semibold font-bold text-xs shadow-md shadow-indigo-600/20 hover:-translate-y-0.5 transition-all disabled:opacity-50"
                   >
                     {submitting ? (
                       <>
@@ -1894,11 +1894,11 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
           )}
 
           {/* Footer Controls */}
-          <div className="pt-6 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="pt-6 border-t border-white/[0.08] flex items-center justify-between">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              className="px-4 py-2.5 rounded-xl text-xs font-semibold text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800"
             >
               Cancel
             </button>
@@ -1908,7 +1908,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 <button
                   type="button"
                   onClick={() => setActiveStep((prev) => prev - 1)}
-                  className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200"
+                  className="px-4 py-2.5 rounded-xl text-xs font-semibold text-zinc-300 bg-[#18181B] hover:bg-slate-200"
                 >
                   Previous
                 </button>
@@ -1918,7 +1918,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                 <button
                   type="button"
                   onClick={() => setActiveStep((prev) => prev + 1)}
-                  className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm"
+                  className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-teal-500 text-black hover:bg-indigo-700 shadow-sm"
                 >
                   <span>Next Step</span>
                   <ArrowRight className="w-3.5 h-3.5" />
@@ -1934,7 +1934,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                       handleSubmit();
                     }
                   }}
-                  className="flex items-center gap-1.5 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-md shadow-indigo-600/20"
+                  className="flex items-center gap-1.5 px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-teal-500 text-black hover:bg-indigo-700 shadow-md shadow-indigo-600/20"
                 >
                   {submitting ? (
                     <>
@@ -1971,12 +1971,12 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
       {/* Confirmation Modal when changing template or seniority after custom edits */}
       {pendingTemplateChange && (
         <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4">
+          <div className="bg-[#0A0A0B] rounded-3xl p-6 max-w-md w-full border border-white/[0.08] shadow-2xl space-y-4">
             <div className="w-12 h-12 rounded-2xl bg-amber-50 dark:bg-amber-950/60 text-amber-600 flex items-center justify-center">
               <AlertTriangle className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="font-extrabold text-base text-slate-900 dark:text-white">
+              <h3 className="font-extrabold text-base text-white">
                 Reset Role Competencies?
               </h3>
               <p className="text-xs text-slate-500 mt-1">
@@ -1987,7 +1987,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
               <button
                 type="button"
                 onClick={() => setPendingTemplateChange(null)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-400 hover:bg-slate-100 dark:hover:bg-slate-800"
               >
                 Keep Current Edits
               </button>

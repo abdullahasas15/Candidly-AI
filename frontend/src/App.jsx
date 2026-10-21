@@ -11,9 +11,27 @@ import DemoModal from './components/DemoModal';
 import AuthModal from './components/auth/AuthModal';
 import RecruiterDashboard from './components/recruiter/RecruiterDashboard';
 import CandidateDashboard from './components/candidate/CandidateDashboard';
+import InterviewPreviewGallery from './components/candidate/interview/InterviewPreviewGallery';
 
 export default function App() {
-  const [viewMode, setViewMode] = useState('landing'); // 'landing' | 'recruiter' | 'candidate'
+  // Check for developer/preview gallery mode in URL
+  const isPreviewMode =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('preview') === 'interview';
+
+  if (isPreviewMode) {
+    return <InterviewPreviewGallery />;
+  }
+
+  const [viewMode, setViewMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const paramView = new URLSearchParams(window.location.search).get('view');
+      if (paramView === 'recruiter' || paramView === 'candidate') {
+        return paramView;
+      }
+    }
+    return 'landing';
+  }); // 'landing' | 'recruiter' | 'candidate'
 
   const [authUser, setAuthUser] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -33,30 +51,11 @@ export default function App() {
     role: 'recruiter' // 'recruiter' | 'candidate'
   });
 
-  const [theme, setTheme] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const savedTheme = localStorage.getItem('candidly-theme');
-      if (savedTheme) return savedTheme;
-      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
-    return 'dark';
-  });
-
   const [demoModalOpen, setDemoModalOpen] = useState(false);
 
   useEffect(() => {
-    const root = document.documentElement;
-    if (theme === 'dark') {
-      root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
-    }
-    localStorage.setItem('candidly-theme', theme);
-  }, [theme]);
-
-  const toggleTheme = () => {
-    setTheme((prevTheme) => (prevTheme === 'dark' ? 'light' : 'dark'));
-  };
+    document.documentElement.classList.add('dark');
+  }, []);
 
   const handleOpenDemo = () => {
     setDemoModalOpen(true);
@@ -150,16 +149,15 @@ export default function App() {
 
   // Default: Landing Page
   return (
-    <div className="min-h-screen flex flex-col bg-[#F8FAFC] dark:bg-[#0B0F19] text-slate-900 dark:text-slate-100 selection:bg-indigo-500 selection:text-white transition-colors duration-300">
+    <div className="min-h-screen flex flex-col bg-black text-slate-100 selection:bg-teal-500 selection:text-white transition-colors duration-300">
       {/* Sticky Header with Recruiter, Candidate & Account Buttons */}
       <Header
-        theme={theme}
-        toggleTheme={toggleTheme}
         onRequestDemo={handleOpenDemo}
         authUser={authUser}
         onOpenAuth={handleOpenAuth}
         onOpenDashboard={handleOpenDashboard}
         onSignOut={handleSignOut}
+        currentView={viewMode}
       />
 
       {/* Main Single-Page Content */}
