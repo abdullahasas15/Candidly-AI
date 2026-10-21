@@ -147,8 +147,10 @@ export default function PreFlightCheckModal({
   const recordTimerRef = useRef(null);
   const hardStopTimerRef = useRef(null);
   const recordStartRef = useRef(0);
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
+    isMountedRef.current = true;
     if (isOpen) {
       runAllChecks();
       setSpeechState('idle');
@@ -161,6 +163,7 @@ export default function PreFlightCheckModal({
       cleanupSpeechRecording();
     }
     return () => {
+      isMountedRef.current = false;
       cleanupMedia();
       cleanupSpeechRecording();
     };
@@ -370,9 +373,11 @@ export default function PreFlightCheckModal({
         }
       });
 
+      if (!isMountedRef.current) return;
       setNetworkRtt(rtt || 24);
       setNetStatus('passed');
     } catch (err) {
+      if (!isMountedRef.current) return;
       console.error('WebSocket network check error:', err);
       setNetStatus('failed');
       setNetError(

@@ -284,5 +284,15 @@ describe('CandidateDashboard Integration & Room Contract', () => {
     await act(async () => {
       resolvePracticeCall();
     });
+
+    // P2-1: Verify that LiveInterviewRoom in practice mode receives practice title and 5m duration, not the job title
+    await waitFor(() => {
+      expect(screen.getByTestId('mock-live-interview-room')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('room-practice-flag')).toHaveTextContent('practice');
+    expect(screen.getByTestId('room-job-title')).toHaveTextContent('Practice Interview (General Warm-Up)');
+    const latestProps = mockLiveRoomProps[mockLiveRoomProps.length - 1];
+    expect(latestProps.durationMins).toBe(5);
+    expect(latestProps.isPractice).toBe(true);
   });
 });

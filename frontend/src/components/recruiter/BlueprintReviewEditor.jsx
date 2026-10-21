@@ -26,6 +26,7 @@ export default function BlueprintReviewEditor({
   const [confirmWarningModal, setConfirmWarningModal] = useState(false);
   const [budgetPreview, setBudgetPreview] = useState(null);
   const [taskState, setTaskState] = useState(null);
+  const [pollEpoch, setPollEpoch] = useState(0);
 
   // Fetch blueprint and budget preview on mount
   const fetchBlueprint = async () => {
@@ -123,7 +124,7 @@ export default function BlueprintReviewEditor({
       isSubscribed = false;
       if (timer) clearTimeout(timer);
     };
-  }, [job?.id]);
+  }, [job?.id, pollEpoch]);
 
   // Launch background blueprint generation
   const handleGenerateBlueprint = async () => {
@@ -148,6 +149,8 @@ export default function BlueprintReviewEditor({
 
       const accepted = await res.json();
       setTaskState(accepted);
+      // Restart/resume polling immediately for the accepted run
+      setPollEpoch((prev) => prev + 1);
     } catch (err) {
       setGenerating(false);
       setErrorMsg(err.message);
@@ -489,6 +492,8 @@ export default function BlueprintReviewEditor({
     );
   }
 
+  const isLive = blueprint?.status === 'approved' && !blueprint?.is_stale && validatorErrors.length === 0;
+
   return (
     <div className="space-y-6">
       {/* Top Banner / Status Strip */}
@@ -523,10 +528,17 @@ export default function BlueprintReviewEditor({
               </span>
             )}
 
-            {blueprint.status === 'approved' && !blueprint.is_stale && (
-              <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 flex items-center gap-1.5">
+            {isLive && (
+              <span data-testid="live-status-badge" className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 flex items-center gap-1.5">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                 <span>Active & Accepting Applications</span>
+              </span>
+            )}
+
+            {blueprint.status === 'approved' && validatorErrors.length > 0 && (
+              <span data-testid="blocked-status-badge" className="px-3 py-1 rounded-full text-xs font-bold bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-800 flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
+                <span>Blocked by Validation Errors</span>
               </span>
             )}
           </div>
@@ -1075,7 +1087,7 @@ export default function BlueprintReviewEditor({
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
               <span>Saving changes (Copy-on-write)...</span>
             </span>
-          ) : blueprint.status === 'approved' && !blueprint.is_stale && validatorErrors.length === 0 ? (
+          ) : isLive ? (
             <span className="text-emerald-400 font-semibold flex items-center gap-1">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
               <span>Approved & Live for Applications</span>

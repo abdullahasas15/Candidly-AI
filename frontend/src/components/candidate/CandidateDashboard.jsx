@@ -270,9 +270,17 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
       <LiveInterviewRoom
         sessionId={interviewSession.id}
         session={interviewSession}
-        jobTitle={currentApp?.job?.job_title || interviewSession.job_title || 'Technical Interview'}
+        jobTitle={
+          isPracticeMode
+            ? (interviewSession.job_title || 'Practice Interview')
+            : (currentApp?.job?.job_title || interviewSession.job_title || 'Technical Interview')
+        }
         candidateName={authUser?.full_name || 'Candidate'}
-        durationMins={currentApp?.job?.interview_duration_mins || interviewSession.duration_planned_mins || 20}
+        durationMins={
+          isPracticeMode
+            ? (interviewSession.duration_mins || interviewSession.duration_planned_mins || 5)
+            : (currentApp?.job?.interview_duration_mins || interviewSession.duration_planned_mins || 20)
+        }
         token={getCandidateToken()}
         onExit={() => {
           setInterviewStarted(false);
