@@ -59,6 +59,7 @@ export default function LiveInterviewRoom({
   // Interview state from conductor
   const [phase, setPhase] = useState(mockState?.phase || 'welcome');
   const [status, setStatus] = useState(mockState?.status || 'waiting_for_ready'); // 'listening' | 'thinking' | 'speaking' | 'waiting_for_ready' | 'preparing_audio' | 'completed' | 'failed'
+  const statusRef = useRef(status);
   const [currentSection, setCurrentSection] = useState(mockState?.currentSection || 1);
   const [totalSections, setTotalSections] = useState(mockState?.totalSections || 5);
   const [skillName, setSkillName] = useState(mockState?.skillName || '');
@@ -74,10 +75,24 @@ export default function LiveInterviewRoom({
 
   // Hardware & Audio state
   const [isMicMuted, setIsMicMuted] = useState(mockState?.isMicMuted || false);
+  const isMicMutedRef = useRef(isMicMuted);
   const [isVideoOff, setIsVideoOff] = useState(mockState?.isVideoOff || false);
   const [micLevel, setMicLevel] = useState(mockState?.micLevel || 0); // 0 to 1
   const [botLevel, setBotLevel] = useState(mockState?.botLevel || 0); // 0 to 1
   const [audioLevel, setAudioLevel] = useState(mockState?.audioLevel || 0); // Combined for visualizer
+
+  const updateStatus = useCallback((newStatus) => {
+    statusRef.current = newStatus;
+    setStatus(newStatus);
+  }, []);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  useEffect(() => {
+    isMicMutedRef.current = isMicMuted;
+  }, [isMicMuted]);
 
   // Device selectors
   const [audioInputDevices, setAudioInputDevices] = useState([]);
@@ -260,31 +275,33 @@ export default function LiveInterviewRoom({
           micStream: micStreamRef.current,
           onPcmChunk: (buffer) => {
             // Microphone gate: never transmit candidate PCM until startup handshake completes and bot is listening
+            const currentStatus = statusRef.current;
+            const isGateOpen = currentStatus === 'listening' || currentStatus === 'talking';
             if (
               wsRef.current &&
               wsRef.current.readyState === WebSocket.OPEN &&
-              !isMicMuted &&
+              !isMicMutedRef.current &&
               isHandshakeCompleteRef.current &&
-              (status === 'listening' || status === 'talking')
+              isGateOpen
             ) {
               wsRef.current.send(buffer);
             }
           },
           onPlaybackStarted: (speechId) => {
-            setStatus('speaking');
+            updateStatus('speaking');
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               wsRef.current.send(JSON.stringify({ type: 'playback_started', speech_id: speechId }));
             }
           },
           onPlaybackEnded: (speechId) => {
-            setStatus('listening');
+            updateStatus('listening');
             setBotLevel(0);
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               wsRef.current.send(JSON.stringify({ type: 'playback_ended', speech_id: speechId }));
             }
           },
           onMicLevel: (lvl) => {
-            setMicLevel(isMicMuted ? 0 : lvl);
+            setMicLevel(isMicMutedRef.current ? 0 : lvl);
           },
           onBotLevel: (lvl) => {
             setBotLevel(lvl);
@@ -351,16 +368,16 @@ export default function LiveInterviewRoom({
           } else if (msg.type === 'SessionReady') {
             isHandshakeCompleteRef.current = true;
             setConnectionState('connected');
-            setStatus('waiting_for_ready');
+            updateStatus('waiting_for_ready');
           } else if (msg.type === 'SessionError') {
             setConnectionState('error');
             setErrorMessage(msg.detail || msg.error || 'Interview session error');
-            setStatus('failed');
+            updateStatus('failed');
           } else if (msg.type === 'SessionEnded') {
             handleTerminalCleanup();
           } else if (msg.type === 'TTSError') {
             // TTS failure recovered: transition out of stuck speaking
-            setStatus('listening');
+            updateStatus('listening');
             setBotLevel(0);
           } else if (msg.type === 'UIStatus') {
             const newStatus = msg.status;
@@ -371,9 +388,9 @@ export default function LiveInterviewRoom({
 
             // Map UI status
             if (newStatus === 'waiting_for_ready') {
-              setStatus('waiting_for_ready');
+              updateStatus('waiting_for_ready');
             } else if (newStatus === 'completed') {
-              setStatus('completed');
+              updateStatus('completed');
               setConnectionState('completed');
               handleTerminalCleanup();
             } else if (newStatus === 'uncommitted') {
@@ -382,7 +399,7 @@ export default function LiveInterviewRoom({
                 setCandidateLiveTranscript(msg.payload.answer);
               }
             } else {
-              setStatus(newStatus || 'listening');
+              updateStatus(newStatus || 'listening');
             }
 
             // Update captions if question text received
@@ -406,7 +423,7 @@ export default function LiveInterviewRoom({
             }
           } else if (msg.type === 'TTSStarted') {
             currentSpeechIdRef.current = msg.speech_id;
-            setStatus('speaking');
+            updateStatus('speaking');
             if (msg.text) {
               const newText = msg.text.trim();
               setCurrentBotCaption((prev) => {
@@ -422,7 +439,7 @@ export default function LiveInterviewRoom({
             if (audioPipelineRef.current) {
               audioPipelineRef.current.flushPlayback();
             }
-            setStatus('listening');
+            updateStatus('listening');
             setBotLevel(0);
           } else if (msg.type === 'InterimCaption' || msg.type === 'Update') {
             const text = msg.text || '';
@@ -462,7 +479,7 @@ export default function LiveInterviewRoom({
       setConnectionState('error');
       setErrorMessage(err.message || 'Failed to establish WebSocket connection');
     }
-  }, [canonicalSessionId, isMicMuted, selectedMicId, status, sendClientReadyIfReady, handleTerminalCleanup]);
+  }, [canonicalSessionId, selectedMicId, sendClientReadyIfReady, handleTerminalCleanup, updateStatus]);
 
   // Initial startup
   useEffect(() => {
@@ -501,6 +518,7 @@ export default function LiveInterviewRoom({
   const toggleMicMute = useCallback(() => {
     setIsMicMuted((prev) => {
       const next = !prev;
+      isMicMutedRef.current = next;
       if (micStreamRef.current) {
         micStreamRef.current.getAudioTracks().forEach((track) => {
           track.enabled = !next;
@@ -515,8 +533,8 @@ export default function LiveInterviewRoom({
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'ready_button' }));
     }
-    setStatus('listening');
-  }, []);
+    updateStatus('listening');
+  }, [updateStatus]);
 
   // Handle Test Speakers
   const playTestSpeakerChime = useCallback(() => {

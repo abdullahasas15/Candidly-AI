@@ -4,6 +4,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import LiveInterviewRoom from '../LiveInterviewRoom';
 import AudioDomeVisualizer from '../AudioDomeVisualizer';
 
+let capturedOnPcmChunk = null;
+vi.mock('../audioWorklet', () => ({
+  initAudioPipeline: vi.fn(async (options) => {
+    capturedOnPcmChunk = options?.onPcmChunk;
+    return {
+      captureNode: { port: { postMessage: vi.fn() }, connect: vi.fn() },
+      playbackNode: { port: { postMessage: vi.fn() }, connect: vi.fn() },
+      micSource: { connect: vi.fn() },
+      feedPlaybackChunk: vi.fn(),
+      flushPlayback: vi.fn(),
+    };
+  }),
+}));
+
 // Mock WebSocket
 class MockWebSocket {
   static instances = [];
@@ -390,5 +404,91 @@ describe('LiveInterviewRoom Component', () => {
     });
 
     expect(onExitMock).toHaveBeenCalled();
+  });
+
+  it('transmits PCM chunk only after ready gate is open, blocks while speaking or muted (P0-1 regression)', async () => {
+    render(
+      <LiveInterviewRoom
+        sessionId="test-session-pcm"
+        jobTitle="Technical Interview"
+      />
+    );
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    expect(ws).toBeDefined();
+    expect(capturedOnPcmChunk).toBeTypeOf('function');
+
+    // Startup: server sends SessionConnected then SessionReady
+    act(() => {
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionConnected', question_count: 5 }) });
+      ws.onmessage({ data: JSON.stringify({ type: 'SessionReady' }) });
+    });
+
+    // Helper to get all transmitted binary audio buffers
+    const getSentBuffers = () => ws.send.mock.calls.filter((c) => c[0] instanceof ArrayBuffer).map((c) => c[0]);
+
+    // 1. Before clicking ready (status is waiting_for_ready), PCM should NOT transmit
+    const testChunk1 = new Uint8Array([10, 11, 12]).buffer;
+    act(() => {
+      capturedOnPcmChunk(testChunk1);
+    });
+    expect(getSentBuffers()).toHaveLength(0);
+
+    // 2. Click "I'm ready" button -> status transitions to listening
+    const readyBtn = screen.getByTestId('ready-gate-button');
+    expect(readyBtn).toBeInTheDocument();
+    act(() => {
+      fireEvent.click(readyBtn);
+    });
+
+    // Ready message sent to WS
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'ready_button' }));
+
+    // Now PCM transmits through open gate
+    const testChunk2 = new Uint8Array([20, 21, 22]).buffer;
+    act(() => {
+      capturedOnPcmChunk(testChunk2);
+    });
+    expect(getSentBuffers()).toHaveLength(1);
+    expect(getSentBuffers()[0]).toBe(testChunk2);
+
+    // 3. Bot starts speaking -> status becomes speaking -> gate must close
+    act(() => {
+      ws.onmessage({ data: JSON.stringify({ type: 'UIStatus', status: 'speaking', phase: 'skill_anchor' }) });
+    });
+
+    const testChunk3 = new Uint8Array([30, 31, 32]).buffer;
+    act(() => {
+      capturedOnPcmChunk(testChunk3);
+    });
+    expect(getSentBuffers()).toHaveLength(1); // Still 1, testChunk3 dropped
+
+    // 4. Bot finishes speaking -> back to listening -> gate re-opens
+    act(() => {
+      ws.onmessage({ data: JSON.stringify({ type: 'UIStatus', status: 'listening' }) });
+    });
+
+    const testChunk4 = new Uint8Array([40, 41, 42]).buffer;
+    act(() => {
+      capturedOnPcmChunk(testChunk4);
+    });
+    expect(getSentBuffers()).toHaveLength(2);
+    expect(getSentBuffers()[1]).toBe(testChunk4);
+
+    // 5. Mute microphone -> gate must close even if listening
+    const muteBtn = screen.getByTestId('pill-mic-toggle');
+    act(() => {
+      fireEvent.click(muteBtn);
+    });
+
+    const testChunk5 = new Uint8Array([50, 51, 52]).buffer;
+    act(() => {
+      capturedOnPcmChunk(testChunk5);
+    });
+    expect(getSentBuffers()).toHaveLength(2); // Still 2, testChunk5 dropped
   });
 });
