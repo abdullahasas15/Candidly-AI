@@ -98,3 +98,10 @@ review/
 
 # SwiftPM build artifacts (Apple STT helper) — regenerable via scripts/build_apple_stt.sh
 native/apple_stt/.build/
+CLAUDE.md
+INTERVIEW_ENGINE_CONTEXT.md
+ARCHITECTURE_AND_CODEBASE_DOSSIER.md
+tests/
+scripts/
+docs/
+

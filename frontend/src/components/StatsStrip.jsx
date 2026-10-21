@@ -6,14 +6,14 @@ export default function StatsStrip() {
     {
       icon: Clock,
       value: '20 min',
-      label: 'Average Calibrated Interview',
+      label: 'Calibrated Duration',
       subtext: 'Focused, complete evaluation without screening fatigue',
     },
     {
       icon: Scale,
       value: '100%',
       label: 'Uniform Rubric Rigor',
-      subtext: 'Every candidate measured by the identical competency criteria',
+      subtext: 'Every candidate measured by identical competency criteria',
     },
     {
       icon: Zap,
@@ -25,28 +25,28 @@ export default function StatsStrip() {
       icon: ShieldCheck,
       value: 'Zero',
       label: 'Black-Box Ratings',
-      subtext: 'Every score justified with verbatim timestamped quotes',
+      subtext: 'Every score anchored to verbatim timestamped quotes',
     },
   ];
 
   return (
-    <section className="py-12 bg-indigo-600 text-white dark:bg-indigo-950/90 dark:border-y dark:border-indigo-900/60">
+    <section className="py-12 bg-[#0A0A0B] text-white border-y border-white/[0.08]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-8 lg:gap-6">
           {stats.map((stat, idx) => {
             const Icon = stat.icon;
             return (
               <div key={idx} className="space-y-2 text-center sm:text-left">
-                <div className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/15 text-white mb-1">
+                <div className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-teal-500/10 text-teal-400 border border-teal-500/20 mb-1">
                   <Icon className="w-4 h-4" />
                 </div>
-                <div className="text-3xl sm:text-4xl font-black tracking-tight text-white">
+                <div className="font-display text-3xl sm:text-4xl font-normal tracking-tight text-white">
                   {stat.value}
                 </div>
-                <div className="text-sm font-bold text-indigo-100">
+                <div className="text-xs font-semibold text-zinc-200 uppercase font-mono tracking-wider">
                   {stat.label}
                 </div>
-                <div className="text-xs text-indigo-200/90 leading-normal">
+                <div className="text-xs text-zinc-400 leading-normal">
                   {stat.subtext}
                 </div>
               </div>
@@ -57,4 +57,3 @@ export default function StatsStrip() {
     </section>
   );
 }
-

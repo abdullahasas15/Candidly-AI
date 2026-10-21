@@ -24,42 +24,42 @@ export default function ProctoringIntegrity() {
   ];
 
   return (
-    <section id="proctoring" className="py-20 md:py-28 bg-slate-50/70 dark:bg-[#0B0F19]/60 border-y border-slate-200/60 dark:border-slate-800/60 scroll-mt-20">
+    <section id="proctoring" className="py-20 md:py-28 bg-black border-b border-white/[0.08] scroll-mt-20">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-center">
           
           {/* Left: Copy & Pillars */}
           <div className="lg:col-span-6 space-y-6 text-center lg:text-left">
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-xs font-mono text-emerald-400">
               <ShieldCheck className="w-3.5 h-3.5" />
               <span>Session Authenticity & Trust</span>
             </div>
 
-            <h2 className="text-3xl sm:text-4xl font-extrabold text-slate-900 dark:text-white tracking-tight leading-tight">
+            <h2 className="font-display text-4xl sm:text-5xl font-normal text-white tracking-tight leading-tight">
               Fairness protected for every candidate.
             </h2>
 
-            <p className="text-base sm:text-lg text-slate-600 dark:text-slate-300 leading-relaxed">
+            <p className="text-base sm:text-lg text-zinc-300 leading-relaxed">
               True meritocracy requires trust. Our continuous verification runs calmly in the background, safeguarding honest candidates by ensuring that every submitted interview represents authentic, independent work.
             </p>
 
-            <div className="space-y-4 pt-2">
+            <div className="space-y-3 pt-2">
               {integrityPillars.map((pillar, idx) => {
                 const Icon = pillar.icon;
                 return (
                   <div
                     key={idx}
-                    className="p-4 rounded-xl bg-white dark:bg-[#111827] border border-slate-200/80 dark:border-slate-800 flex items-start gap-4 shadow-sm"
+                    className="p-4 rounded-xl bg-[#0A0A0B] border border-white/[0.08] flex items-start gap-4 shadow-sm"
                   >
-                    <div className="w-10 h-10 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <div className="w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center justify-center shrink-0 mt-0.5">
                       <Icon className="w-5 h-5" />
                     </div>
                     <div className="space-y-1">
-                      <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                      <h3 className="text-sm font-semibold text-white">
                         {pillar.title}
                       </h3>
-                      <p className="text-xs text-slate-600 dark:text-slate-300 leading-normal">
+                      <p className="text-xs text-zinc-400 leading-normal">
                         {pillar.description}
                       </p>
                     </div>
@@ -71,66 +71,63 @@ export default function ProctoringIntegrity() {
 
           {/* Right: Calm, Trustworthy Integrity Dashboard Visual */}
           <div className="lg:col-span-6">
-            <div className="relative mx-auto max-w-md rounded-2xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 shadow-xl p-6 sm:p-8 space-y-6">
+            <div className="relative mx-auto max-w-md rounded-2xl bg-[#0A0A0B] border border-white/[0.08] shadow-2xl p-6 sm:p-8 space-y-6">
               
               {/* Header */}
-              <div className="flex items-center justify-between pb-4 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center justify-between pb-4 border-b border-white/[0.06]">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-xl bg-emerald-100 dark:bg-emerald-950/80 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
                     <Lock className="w-4 h-4" />
                   </div>
                   <div>
-                    <div className="text-xs font-bold text-slate-900 dark:text-white">
+                    <div className="text-xs font-semibold text-white">
                       Integrity Audit Overview
                     </div>
-                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    <div className="text-[11px] font-mono text-zinc-500">
                       Standard Session Protocol
                     </div>
                   </div>
                 </div>
-                <span className="px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 text-xs font-semibold border border-emerald-200/60 dark:border-emerald-800/60">
-                  Verified · Normal
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 text-xs font-mono border border-emerald-500/20">
+                  Verified · Optimal
                 </span>
               </div>
 
               {/* Integrity Score Radial/Gauge representation */}
-              <div className="text-center py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl border border-slate-100 dark:border-slate-800">
-                <div className="text-3xl font-black text-slate-900 dark:text-white">
-                  98 <span className="text-sm font-normal text-slate-500 dark:text-slate-400">/ 100</span>
+              <div className="text-center py-4 bg-[#111113] rounded-xl border border-white/[0.06]">
+                <div className="font-display text-4xl font-normal text-white">
+                  98 <span className="text-sm font-mono text-zinc-500">/ 100</span>
                 </div>
-                <div className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 mt-1 flex items-center justify-center gap-1">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>Optimal Session Confidence</span>
-                </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 px-4 mt-1">
-                  Session meets all enterprise security and merit-protection criteria.
-                </p>
-              </div>
-
-              {/* Chronological Confidence Timeline */}
-              <div className="space-y-3">
-                <div className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                  Continuous Verification Timeline
-                </div>
-
-                <div className="space-y-2 text-xs">
-                  <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between">
-                    <span className="text-slate-700 dark:text-slate-300 font-medium">Pre-Flight Hardware Check</span>
-                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Passed [00:00]</span>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between">
-                    <span className="text-slate-700 dark:text-slate-300 font-medium">Participant Identity Consistency</span>
-                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Continuous [100%]</span>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between">
-                    <span className="text-slate-700 dark:text-slate-300 font-medium">Environmental Audio Clarity</span>
-                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Uninterrupted</span>
-                  </div>
+                <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 mt-1">
+                  Confidence Score: High
                 </div>
               </div>
 
-              <div className="pt-2 text-center text-[11px] text-slate-500 dark:text-slate-400 italic">
-                “Candidate dignity and privacy are respected at every moment.”
+              {/* Verification Checklist */}
+              <div className="space-y-2.5 text-xs">
+                <div className="flex items-center justify-between text-zinc-300 p-2 rounded-lg bg-black/40 border border-white/[0.04]">
+                  <span className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <span>Single Face In-Frame</span>
+                  </span>
+                  <span className="text-[11px] font-mono text-zinc-500">Continuous</span>
+                </div>
+
+                <div className="flex items-center justify-between text-zinc-300 p-2 rounded-lg bg-black/40 border border-white/[0.04]">
+                  <span className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <span>Focus Continuity</span>
+                  </span>
+                  <span className="text-[11px] font-mono text-zinc-500">No Tab Deviations</span>
+                </div>
+
+                <div className="flex items-center justify-between text-zinc-300 p-2 rounded-lg bg-black/40 border border-white/[0.04]">
+                  <span className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <span>Acoustic Isolation</span>
+                  </span>
+                  <span className="text-[11px] font-mono text-zinc-500">Clean Audio Feed</span>
+                </div>
               </div>
 
             </div>
@@ -142,4 +139,3 @@ export default function ProctoringIntegrity() {
     </section>
   );
 }
-

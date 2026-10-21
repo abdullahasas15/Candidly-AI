@@ -14,20 +14,20 @@ export default function Logo({ className = "w-10 h-10", size = 40 }) {
         <defs>
           {/* Main Gradient */}
           <linearGradient id="candidlyGrad" x1="4" y1="4" x2="44" y2="44" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stopColor="#6366F1" />
-            <stop offset="50%" stopColor="#4F46E5" />
-            <stop offset="100%" stopColor="#7C3AED" />
+            <stop offset="0%" stopColor="#14B8A6" />
+            <stop offset="50%" stopColor="#0D9488" />
+            <stop offset="100%" stopColor="#0F766E" />
           </linearGradient>
 
           {/* Core Spark Gradient */}
           <linearGradient id="sparkGrad" x1="20" y1="18" x2="28" y2="30" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stopColor="#38BDF8" />
-            <stop offset="100%" stopColor="#818CF8" />
+            <stop offset="0%" stopColor="#2DD4BF" />
+            <stop offset="100%" stopColor="#14B8A6" />
           </linearGradient>
 
           {/* Subtle Glow Filter */}
           <filter id="glowFilter" x="-20%" y="-20%" width="140%" height="140%">
-            <feDropShadow dx="0" dy="2" stdDeviation="3" floodColor="#6366F1" floodOpacity="0.3" />
+            <feDropShadow dx="0" dy="2" stdDeviation="3" floodColor="#14B8A6" floodOpacity="0.35" />
           </filter>
         </defs>
 
@@ -62,4 +62,3 @@ export default function Logo({ className = "w-10 h-10", size = 40 }) {
     </div>
   );
 }
-

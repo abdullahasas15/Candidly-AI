@@ -2,22 +2,22 @@ import React, { useState, useEffect } from 'react';
 import {
   X, Award, Clock, ShieldCheck, CheckCircle2, ChevronRight, Layers,
   FileText, AlertCircle, Users, DollarSign, AlertTriangle, Eye, ArrowRight,
-  RefreshCw, Check, Sparkles
+  RefreshCw, Check, Sparkles, Filter, Calendar
 } from 'lucide-react';
 import ApplicantDetailModal from './ApplicantDetailModal';
 import BlueprintReviewEditor from './BlueprintReviewEditor';
+import { Badge, Card } from '../ui';
 import { formatMoney } from '../../utils/currency';
 
-export default function JobDetailModal({ job, isOpen, onClose }) {
+export default function JobDetailModal({ job, isOpen, onClose, onJobUpdated }) {
   if (!isOpen || !job) return null;
 
-  const [activeTab, setActiveTab] = useState('applicants');
+  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'blueprint' | 'applicants'
   const [applicants, setApplicants] = useState([]);
   const [loadingApplicants, setLoadingApplicants] = useState(false);
   const [selectedApplicant, setSelectedApplicant] = useState(null);
-  const [sortBy, setSortBy] = useState('score_desc'); // 'score_desc' | 'date_desc' | 'name_asc'
+  const [sortBy, setSortBy] = useState('score_desc');
   const [filterVerdict, setFilterVerdict] = useState('all');
-  const [filterDecision, setFilterDecision] = useState('all');
 
   const fetchApplicants = async () => {
     if (!job?.id) return;
@@ -25,7 +25,7 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
     try {
       const token = localStorage.getItem('candidly-auth-token');
       const res = await fetch(`/api/jobs/${job.id}/applications`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (res.ok) {
         const data = await res.json();
@@ -48,568 +48,394 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
     );
   };
 
-  const getStatusBadge = (status) => {
-    switch (status) {
-      case 'ready_for_interview':
-        return 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800';
-      case 'under_review':
-        return 'bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800';
-      case 'interviewed':
-        return 'bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800';
-      case 'hired':
-        return 'bg-teal-50 dark:bg-teal-950 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800';
-      case 'rejected':
-        return 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800';
-      default:
-        return 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700';
-    }
+  const sortedApplicants = [...applicants]
+    .filter((app) => {
+      if (filterVerdict !== 'all') {
+        const v = app.evaluation?.verdict || '';
+        if (filterVerdict === 'HIRE' && (!v.includes('HIRE') || v.includes('NO'))) return false;
+        if (filterVerdict === 'BORDERLINE' && v !== 'BORDERLINE') return false;
+        if (filterVerdict === 'NO_HIRE' && !v.includes('NO')) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      if (sortBy === 'score_desc') {
+        const sa = a.evaluation?.overall_score ?? -1;
+        const sb = b.evaluation?.overall_score ?? -1;
+        return sb - sa;
+      }
+      return new Date(b.applied_at) - new Date(a.applied_at);
+    });
+
+  // Circular score ring component
+  const ScoreRing = ({ score }) => {
+    const hasScore = score !== undefined && score !== null;
+    const val = hasScore ? Math.round(score) : 0;
+    const strokeDash = 2 * Math.PI * 18;
+    const strokeOffset = strokeDash - (strokeDash * val) / 100;
+    const colorClass =
+      val >= 80 ? 'text-teal-400 stroke-teal-400' : val >= 60 ? 'text-amber-400 stroke-amber-400' : 'text-rose-400 stroke-rose-400';
+
+    return (
+      <div className="relative flex h-12 w-12 shrink-0 items-center justify-center">
+        <svg className="h-12 w-12 -rotate-90 transform" viewBox="0 0 44 44">
+          <circle
+            cx="22"
+            cy="22"
+            r="18"
+            className="stroke-white/[0.08]"
+            strokeWidth="3.5"
+            fill="transparent"
+          />
+          {hasScore && (
+            <circle
+              cx="22"
+              cy="22"
+              r="18"
+              className={colorClass}
+              strokeWidth="3.5"
+              strokeDasharray={strokeDash}
+              strokeDashoffset={strokeOffset}
+              strokeLinecap="round"
+              fill="transparent"
+            />
+          )}
+        </svg>
+        <span className="absolute font-mono text-[11px] font-bold text-white">
+          {hasScore ? val : '—'}
+        </span>
+      </div>
+    );
   };
 
-  const unresolvedFlagsCount = applicants.reduce((acc, app) => {
-    return acc + (app.discrepancy_flags?.filter((f) => !f.reviewed_by_recruiter).length || 0);
-  }, 0);
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/70 backdrop-blur-sm animate-fadeIn">
-      <div className="relative w-full max-w-5xl max-h-[92vh] flex flex-col rounded-3xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-md animate-in fade-in duration-150">
+      <div className="relative w-full max-w-5xl max-h-[92vh] flex flex-col rounded-3xl bg-[#0A0A0B] border border-white/[0.08] shadow-2xl overflow-hidden">
         
-        {/* Header */}
-        <div className="p-6 bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between">
-          <div className="space-y-1">
+        {/* Modal Header */}
+        <div className="p-6 border-b border-white/[0.08] bg-[#0A0A0B] flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800">
-                {job.seniority_level}
-              </span>
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                {job.department}
-              </span>
-              <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300">
-                {job.workplace_model} · {job.employment_type}
-              </span>
+              <Badge variant="teal">{job.seniority_level}</Badge>
+              <Badge variant="neutral">{job.department}</Badge>
+              <Badge variant="outline">{job.workplace_model || 'Remote'}</Badge>
               {job.salary_range_min && (
-                <span className="px-2 py-0.5 rounded-md text-xs font-bold bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
+                <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1">
                   <DollarSign className="w-3 h-3" />
-                  <span>{formatMoney(job.salary_range_min, job.salary_currency)} - {formatMoney(job.salary_range_max, job.salary_currency)}</span>
+                  <span>
+                    {formatMoney(job.salary_range_min, job.salary_currency)} - {formatMoney(job.salary_range_max, job.salary_currency)}
+                  </span>
                 </span>
               )}
             </div>
-            <h2 className="text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+            
+            <h2 className="font-display text-2xl sm:text-3xl font-normal text-white tracking-tight">
               {job.job_title}
             </h2>
-            <div className="flex flex-wrap items-center gap-4 text-xs text-slate-500 dark:text-slate-400">
+
+            <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
               <span className="flex items-center gap-1">
-                <Clock className="w-3.5 h-3.5 text-indigo-500" />
-                Duration: {job.interview_duration_mins} mins
+                <Clock className="w-3.5 h-3.5 text-zinc-500" />
+                <span>{job.interview_duration_mins} mins</span>
               </span>
               <span>•</span>
-              <span className="flex items-center gap-1">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-                Integrity Tier: {job.integrity_policy_tier}
-              </span>
+              <span>Integrity: Tier {job.integrity_policy_tier}</span>
               <span>•</span>
-              <span>Pacing: {job.pacing_strictness}</span>
-              <span>•</span>
-              <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+              <span className="text-teal-400 font-semibold">
                 {applicants.length} Total Applicants
               </span>
             </div>
           </div>
 
           <button
+            type="button"
             onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white bg-slate-100 dark:bg-slate-800 transition-colors"
+            className="p-2 rounded-xl text-zinc-400 hover:text-white bg-[#18181B] border border-white/[0.08] hover:border-white/[0.16] transition-colors"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="flex overflow-x-auto border-b border-slate-200 dark:border-slate-800 px-6 bg-slate-50/50 dark:bg-slate-900/40 text-xs font-bold scrollbar-none">
+        {/* 3 Main Tabs: Overview / Blueprint / Applicants */}
+        <div className="flex border-b border-white/[0.08] px-6 bg-[#000000]/40 text-xs font-bold">
           <button
+            type="button"
+            onClick={() => setActiveTab('overview')}
+            className={`py-3.5 px-4 border-b-2 transition-all flex items-center gap-2 ${
+              activeTab === 'overview'
+                ? 'border-teal-400 text-teal-300'
+                : 'border-transparent text-zinc-400 hover:text-white'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Overview</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('blueprint')}
+            className={`py-3.5 px-4 border-b-2 transition-all flex items-center gap-2 ${
+              activeTab === 'blueprint'
+                ? 'border-teal-400 text-teal-300'
+                : 'border-transparent text-zinc-400 hover:text-white'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>Blueprint & Rubric</span>
+            {job.blueprint_status === 'approved' && (
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            )}
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab('applicants')}
-            className={`py-3 px-4 border-b-2 transition-all flex items-center gap-1.5 whitespace-nowrap ${
+            className={`py-3.5 px-4 border-b-2 transition-all flex items-center gap-2 ${
               activeTab === 'applicants'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900/60'
-                : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
+                ? 'border-teal-400 text-teal-300'
+                : 'border-transparent text-zinc-400 hover:text-white'
             }`}
           >
             <Users className="w-3.5 h-3.5" />
             <span>Applicants ({applicants.length})</span>
-            {unresolvedFlagsCount > 0 && (
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('skills')}
-            className={`py-3 px-4 border-b-2 transition-all whitespace-nowrap ${
-              activeTab === 'skills'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900/60'
-                : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            Competencies & Rubrics ({job.skills?.length || 0})
-          </button>
-
-          <button
-            onClick={() => setActiveTab('plan')}
-            className={`py-3 px-4 border-b-2 transition-all whitespace-nowrap flex items-center gap-1.5 ${
-              activeTab === 'plan'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900/60'
-                : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
-            <span>Interview Blueprint</span>
-            {(!job.active_blueprint_id || job.blueprint_status !== 'approved' || job.blueprint_is_stale) && (
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('criteria')}
-            className={`py-3 px-4 border-b-2 transition-all whitespace-nowrap ${
-              activeTab === 'criteria'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900/60'
-                : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            Academic & Experience Criteria
-          </button>
-
-          <button
-            onClick={() => setActiveTab('custom')}
-            className={`py-3 px-4 border-b-2 transition-all whitespace-nowrap ${
-              activeTab === 'custom'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-white dark:bg-slate-900/60'
-                : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            Custom Questions ({job.custom_questions?.length || 0})
           </button>
         </div>
 
-        {/* Tab Content Body (Scrollable) */}
-        <div className="p-6 overflow-y-auto flex-1 space-y-6 text-xs">
+        {/* Tab Content Body */}
+        <div className="p-6 overflow-y-auto flex-1 text-xs space-y-6">
           
-          {/* TAB: APPLICANTS PIPELINE */}
-          {activeTab === 'applicants' && (
-            <div className="space-y-4">
-              
-              {/* Summary Stats Strip */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-0.5">
-                  <div className="text-slate-400 text-[10px] uppercase font-bold">Total Applicants</div>
-                  <div className="text-xl font-black text-slate-900 dark:text-white">{applicants.length}</div>
-                </div>
-
-                <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-0.5">
-                  <div className="text-slate-400 text-[10px] uppercase font-bold">Ready for Interview</div>
-                  <div className="text-xl font-black text-emerald-600 dark:text-emerald-400">
-                    {applicants.filter((a) => a.status === 'ready_for_interview').length}
-                  </div>
-                </div>
-
-                <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-0.5">
-                  <div className="text-slate-400 text-[10px] uppercase font-bold">Under Review</div>
-                  <div className="text-xl font-black text-indigo-600 dark:text-indigo-400">
-                    {applicants.filter((a) => a.status === 'under_review' || a.status === 'submitted').length}
-                  </div>
-                </div>
-
-                <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-0.5">
-                  <div className="text-slate-400 text-[10px] uppercase font-bold">Unreviewed Flags</div>
-                  <div className="text-xl font-black text-amber-600 dark:text-amber-400">
-                    {unresolvedFlagsCount}
-                  </div>
-                </div>
-              </div>
-
-              {/* Sort & Filter Controls (Part E2) */}
-              <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs">
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-slate-400 text-[10px] uppercase">Sort By:</span>
-                  <select
-                    value={sortBy}
-                    onChange={(e) => setSortBy(e.target.value)}
-                    className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-800 dark:text-slate-200"
-                  >
-                    <option value="score_desc">Highest Evidence Score</option>
-                    <option value="date_desc">Application Date (Newest)</option>
-                    <option value="name_asc">Candidate Name (A-Z)</option>
-                  </select>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-bold text-slate-400 text-[10px] uppercase">Verdict:</span>
-                  <select
-                    value={filterVerdict}
-                    onChange={(e) => setFilterVerdict(e.target.value)}
-                    className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-800 dark:text-slate-200"
-                  >
-                    <option value="all">All Verdicts</option>
-                    <option value="HIRE">Hire / Strong Hire</option>
-                    <option value="BORDERLINE">Borderline</option>
-                    <option value="NO_HIRE">No Hire / Lean No Hire</option>
-                  </select>
-
-                  <span className="font-bold text-slate-400 text-[10px] uppercase ml-2">Decision:</span>
-                  <select
-                    value={filterDecision}
-                    onChange={(e) => setFilterDecision(e.target.value)}
-                    className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-800 dark:text-slate-200"
-                  >
-                    <option value="all">All Decisions</option>
-                    <option value="advance">Advanced</option>
-                    <option value="hold">On Hold</option>
-                    <option value="reject">Rejected</option>
-                    <option value="undecided">Undecided</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Applicants Table */}
-              {loadingApplicants ? (
-                <div className="py-16 text-center space-y-2">
-                  <RefreshCw className="w-6 h-6 animate-spin text-indigo-600 mx-auto" />
-                  <p className="text-slate-400">Querying applicants for this position...</p>
-                </div>
-              ) : applicants.length === 0 ? (
-                <div className="p-12 rounded-3xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center space-y-2">
-                  <Users className="w-8 h-8 text-slate-400 mx-auto" />
-                  <h4 className="font-bold text-slate-900 dark:text-white text-sm">No applications submitted yet</h4>
-                  <p className="text-slate-400 text-xs">
-                    Candidates who apply via the candidate portal will appear here with automated discrepancy checks and live ID baseline photos.
-                  </p>
-                </div>
-              ) : (
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden bg-white dark:bg-slate-900">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
-                      <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                        <th className="py-3 px-4">Candidate</th>
-                        <th className="py-3 px-4">Score & Verdict</th>
-                        <th className="py-3 px-4">Competency Levels</th>
-                        <th className="py-3 px-4">Signals & Flags</th>
-                        <th className="py-3 px-4">Recruiter Decision</th>
-                        <th className="py-3 px-4 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {applicants
-                        .filter((app) => {
-                          if (filterVerdict !== 'all') {
-                            const v = app.evaluation?.verdict || '';
-                            if (filterVerdict === 'HIRE' && (!v.includes('HIRE') || v.includes('NO'))) return false;
-                            if (filterVerdict === 'BORDERLINE' && v !== 'BORDERLINE') return false;
-                            if (filterVerdict === 'NO_HIRE' && !v.includes('NO')) return false;
-                          }
-                          if (filterDecision !== 'all') {
-                            const d = app.recruiter_decision || 'undecided';
-                            if (filterDecision !== d) return false;
-                          }
-                          return true;
-                        })
-                        .sort((a, b) => {
-                          if (sortBy === 'score_desc') {
-                            const sa = a.evaluation?.overall_score ?? -1;
-                            const sb = b.evaluation?.overall_score ?? -1;
-                            return sb - sa;
-                          } else if (sortBy === 'name_asc') {
-                            return (a.full_name || '').localeCompare(b.full_name || '');
-                          } else {
-                            return new Date(b.applied_at) - new Date(a.applied_at);
-                          }
-                        })
-                        .map((app) => {
-                          const hasUnresolvedFlags = app.discrepancy_flags?.some((f) => !f.reviewed_by_recruiter);
-                          const hasAnyFlags = (app.discrepancy_flags?.length || 0) > 0;
-                          const overallScore = app.evaluation?.overall_score;
-                          const verdict = app.evaluation?.verdict;
-
-                          return (
-                            <tr
-                              key={app.id}
-                              className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
-                            >
-                              <td className="py-3.5 px-4">
-                                <div className="font-bold text-slate-900 dark:text-white text-xs">{app.full_name}</div>
-                                <div className="text-[11px] text-slate-400">{app.email}</div>
-                                <div className="text-[10px] text-slate-400 mt-0.5">Applied {new Date(app.applied_at).toLocaleDateString()}</div>
-                              </td>
-
-                              <td className="py-3.5 px-4 font-mono text-xs">
-                                {overallScore !== undefined && overallScore !== null ? (
-                                  <div>
-                                    <div className="font-black text-indigo-600 dark:text-indigo-400 text-sm">
-                                      {Math.round(overallScore)}/100
-                                    </div>
-                                    <span
-                                      className={`inline-block mt-0.5 px-2 py-0.5 rounded text-[10px] font-bold ${
-                                        verdict?.includes('HIRE') && !verdict?.includes('NO')
-                                          ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
-                                          : verdict === 'BORDERLINE'
-                                          ? 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300'
-                                          : 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
-                                      }`}
-                                    >
-                                      {verdict?.replace(/_/g, ' ')}
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <span className="text-slate-400 text-[11px] font-sans">
-                                    {app.status === 'interviewed' || app.interview_session_status === 'completed'
-                                      ? 'Scoring in progress'
-                                      : 'Pending interview'}
-                                  </span>
-                                )}
-                              </td>
-
-                              <td className="py-3.5 px-4">
-                                {app.skill_scores && app.skill_scores.length > 0 ? (
-                                  <div className="flex flex-wrap gap-1 max-w-xs">
-                                    {app.skill_scores.slice(0, 4).map((s, idx) => (
-                                      <span
-                                        key={idx}
-                                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                                          s.score_level >= 'L3'
-                                            ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
-                                            : 'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800'
-                                        }`}
-                                      >
-                                        {s.skill_name?.slice(0, 10)}: {s.score_level}
-                                      </span>
-                                    ))}
-                                    {app.skill_scores.length > 4 && (
-                                      <span className="text-[10px] text-slate-400">+{app.skill_scores.length - 4}</span>
-                                    )}
-                                  </div>
-                                ) : (
-                                  <span className="text-slate-400 text-[11px]">—</span>
-                                )}
-                              </td>
-
-                              <td className="py-3.5 px-4">
-                                <div className="space-y-1 text-[10px]">
-                                  {hasAnyFlags ? (
-                                    <span
-                                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold border ${
-                                        hasUnresolvedFlags
-                                          ? 'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800'
-                                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
-                                      }`}
-                                    >
-                                      <AlertTriangle className="w-3 h-3 text-amber-500" />
-                                      <span>{app.discrepancy_flags.length} Discrepancies</span>
-                                    </span>
-                                  ) : (
-                                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
-                                      <Check className="w-3 h-3" /> No Discrepancies
-                                    </span>
-                                  )}
-
-                                  {app.integrity_events_count > 0 && (
-                                    <div className="text-amber-600 dark:text-amber-400 font-semibold">
-                                      {app.integrity_events_count} Integrity Signals
-                                    </div>
-                                  )}
-                                </div>
-                              </td>
-
-                              <td className="py-3.5 px-4">
-                                {app.recruiter_decision ? (
-                                  <span
-                                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                                      app.recruiter_decision === 'advance'
-                                        ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
-                                        : app.recruiter_decision === 'hold'
-                                        ? 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300'
-                                        : 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
-                                    }`}
-                                  >
-                                    {app.recruiter_decision}
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-400 text-[11px]">Undecided</span>
-                                )}
-                              </td>
-
-                              <td className="py-3.5 px-4 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => setSelectedApplicant(app)}
-                                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-xs font-bold transition-colors cursor-pointer"
-                                >
-                                  <Eye className="w-3.5 h-3.5" />
-                                  <span>Inspect Dossier</span>
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-            </div>
-          )}
-
-          {/* TAB 1: Competencies & Rubrics */}
-          {activeTab === 'skills' && (
+          {/* TAB 1: OVERVIEW */}
+          {activeTab === 'overview' && (
             <div className="space-y-6">
-              {job.skills?.map((skill, idx) => (
-                <div
-                  key={idx}
-                  className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 space-y-4"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200/60 dark:border-slate-800">
-                    <div className="flex items-center gap-2">
-                      <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
-                        skill.priority_tier === 'P0'
-                          ? 'bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300'
-                          : 'bg-indigo-100 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300'
-                      }`}>
-                        {skill.priority_tier} {skill.priority_tier === 'P0' ? 'Mandatory' : 'Core'}
-                      </span>
-                      <h4 className="text-base font-bold text-slate-900 dark:text-white">
-                        {skill.name}
-                      </h4>
-                      <span className="text-xs text-slate-500 dark:text-slate-400">
-                        ({skill.category})
-                      </span>
-                    </div>
-                    <div className="text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-2.5 py-1 rounded-lg border border-indigo-100 dark:border-indigo-900/50">
-                      Weight: {skill.weight_percentage}%
-                    </div>
-                  </div>
+              <div className="rounded-2xl border border-white/[0.08] bg-[#111113] p-5 space-y-3">
+                <h3 className="font-display text-lg font-normal text-white">
+                  Role Description & Scope
+                </h3>
+                <p className="text-zinc-300 leading-relaxed text-xs whitespace-pre-line">
+                  {job.job_description || 'No job description provided for this role.'}
+                </p>
+              </div>
 
-                  {/* 5-Level Behavioral Rubrics */}
-                  <div className="grid grid-cols-1 gap-2.5 text-xs">
-                    <div className="p-2.5 rounded-lg bg-rose-50/50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/30">
-                      <strong className="text-rose-700 dark:text-rose-400 block mb-0.5">L1 (Incompetent / Novice):</strong>
-                      <span className="text-slate-700 dark:text-slate-300">{skill.rubric_l1 || 'Fails to understand core concepts; proposes broken solutions.'}</span>
+              {/* Competencies Grid */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-xs uppercase tracking-wider text-zinc-400">
+                  Target Competencies & Calibrated Rubrics
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {(job.skills || []).map((skill, sIdx) => (
+                    <div
+                      key={sIdx}
+                      className="rounded-xl border border-white/[0.06] bg-[#111113] p-3.5 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white text-xs">{skill.name}</span>
+                        <Badge
+                          variant={skill.priority_tier === 'P0' ? 'error' : 'teal'}
+                          size="sm"
+                        >
+                          {skill.priority_tier || 'P1'}
+                        </Badge>
+                      </div>
+                      <p className="text-[11px] text-zinc-400 leading-relaxed line-clamp-2">
+                        {skill.description || 'Core technical capability evaluation.'}
+                      </p>
                     </div>
-                    <div className="p-2.5 rounded-lg bg-amber-50/50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/30">
-                      <strong className="text-amber-700 dark:text-amber-400 block mb-0.5">L2 (Developing / Basic):</strong>
-                      <span className="text-slate-700 dark:text-slate-300">{skill.rubric_l2 || 'Names technologies but struggles with failure modes and implementation mechanics.'}</span>
-                    </div>
-                    <div className="p-2.5 rounded-lg bg-blue-50/50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900/30">
-                      <strong className="text-blue-700 dark:text-blue-400 block mb-0.5">L3 (Proficient / Target Baseline):</strong>
-                      <span className="text-slate-700 dark:text-slate-300">{skill.rubric_l3 || 'Clean, workable production-grade answer with sound architectural reasoning.'}</span>
-                    </div>
-                    <div className="p-2.5 rounded-lg bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/30">
-                      <strong className="text-indigo-700 dark:text-indigo-400 block mb-0.5">L4 (Advanced / Strong):</strong>
-                      <span className="text-slate-700 dark:text-slate-300">{skill.rubric_l4 || 'Proactively identifies edge cases, distributed failures, and optimization trade-offs.'}</span>
-                    </div>
-                    <div className="p-2.5 rounded-lg bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30">
-                      <strong className="text-emerald-700 dark:text-emerald-400 block mb-0.5">L5 (Expert / Exceptional):</strong>
-                      <span className="text-slate-700 dark:text-slate-300">{skill.rubric_l5 || 'Deep systems-level mastery; evaluates engine internals, cost vs SLAs, and hardware bounds.'}</span>
-                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Parameters Breakdown */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+                <div className="rounded-xl border border-white/[0.06] bg-[#111113] p-3">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    Duration
+                  </div>
+                  <div className="mt-1 font-semibold text-white">
+                    {job.interview_duration_mins} Minutes
                   </div>
                 </div>
-              ))}
+
+                <div className="rounded-xl border border-white/[0.06] bg-[#111113] p-3">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    Interviewer Tone
+                  </div>
+                  <div className="mt-1 font-semibold text-white capitalize">
+                    {job.interviewer_tone || 'Professional'}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/[0.06] bg-[#111113] p-3">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    Follow-Up Depth
+                  </div>
+                  <div className="mt-1 font-semibold text-white">
+                    Max L{job.max_followup_depth || 3} Probing
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/[0.06] bg-[#111113] p-3">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    Pacing Strictness
+                  </div>
+                  <div className="mt-1 font-semibold text-white capitalize">
+                    {job.pacing_strictness || 'Adaptive'}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
-          {/* TAB 2: Interview Blueprint */}
-          {activeTab === 'plan' && (
+          {/* TAB 2: BLUEPRINT */}
+          {activeTab === 'blueprint' && (
             <div className="space-y-4">
               <BlueprintReviewEditor
-                job={job}
-                onApproved={(approvedBp) => {
-                  job.active_blueprint_id = approvedBp.id;
-                  job.blueprint_status = approvedBp.status;
-                  job.blueprint_is_stale = false;
-                  job.accepts_applications = true;
+                jobId={job.id}
+                onBlueprintApproved={() => {
+                  if (onJobUpdated) onJobUpdated({ ...job, blueprint_status: 'approved' });
                 }}
               />
             </div>
           )}
 
-          {/* TAB 3: Academic & Experience Criteria */}
-          {activeTab === 'criteria' && (
-            <div className="space-y-6 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
-                  <div className="font-bold text-slate-500 uppercase tracking-wider">Minimum Degree</div>
-                  <div className="text-sm font-extrabold text-slate-900 dark:text-white">{job.min_degree_level}</div>
-                  <div className="text-slate-500">Enforcement: <span className="font-semibold text-indigo-600 dark:text-indigo-400">{job.degree_enforcement_type}</span></div>
+          {/* TAB 3: APPLICANTS RANKED LIST */}
+          {activeTab === 'applicants' && (
+            <div className="space-y-4">
+              {/* Filter & Sort Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl border border-white/[0.08] bg-[#111113] text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    Sort:
+                  </span>
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="rounded-lg border border-white/[0.08] bg-[#18181B] px-2.5 py-1 text-white font-semibold focus:outline-none"
+                  >
+                    <option value="score_desc">Ranked by Evidence Score</option>
+                    <option value="date_desc">Application Date (Newest)</option>
+                  </select>
                 </div>
 
-                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5">
-                  <div className="font-bold text-slate-500 uppercase tracking-wider">Experience Thresholds</div>
-                  <div className="text-sm font-extrabold text-slate-900 dark:text-white">
-                    {job.total_experience_years} Years Total ({job.domain_experience_years} Years Domain)
-                  </div>
-                  <div className="text-slate-500">
-                    Leadership / Mentorship: <span className="font-semibold">{job.leadership_required ? 'Required (Scenario Question Allocated)' : 'Not Mandatory'}</span>
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5 sm:col-span-2">
-                  <div className="font-bold text-slate-500 uppercase tracking-wider">Accepted Fields of Study (Majors)</div>
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {job.accepted_majors?.map((major, idx) => (
-                      <span key={idx} className="px-2.5 py-1 rounded-md bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-medium">
-                        {major}
-                      </span>
-                    ))}
-                  </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    Verdict:
+                  </span>
+                  <select
+                    value={filterVerdict}
+                    onChange={(e) => setFilterVerdict(e.target.value)}
+                    className="rounded-lg border border-white/[0.08] bg-[#18181B] px-2.5 py-1 text-white font-semibold focus:outline-none"
+                  >
+                    <option value="all">All Verdicts</option>
+                    <option value="HIRE">Hire Recommended</option>
+                    <option value="BORDERLINE">Borderline</option>
+                    <option value="NO_HIRE">No Hire</option>
+                  </select>
                 </div>
               </div>
-            </div>
-          )}
 
-          {/* TAB 4: Custom Questions */}
-          {activeTab === 'custom' && (
-            <div className="space-y-4">
-              {job.custom_questions?.length > 0 ? (
-                job.custom_questions.map((q, idx) => (
-                  <div
-                    key={idx}
-                    className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2 text-xs"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-indigo-600 dark:text-indigo-400">{q.priority_tier} Priority</span>
-                      <span className="text-slate-500">{q.difficulty_level} · {q.category}</span>
-                    </div>
-                    <p className="text-sm font-semibold text-slate-900 dark:text-white">
-                      “{q.question_text}”
-                    </p>
-                    <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800">
-                      <div className="font-bold text-slate-600 dark:text-slate-400 mb-1">Expected Key Points:</div>
-                      <ul className="list-disc pl-4 space-y-1 text-slate-700 dark:text-slate-300">
-                        {q.expected_key_points?.map((pt, pIdx) => (
-                          <li key={pIdx}>{pt}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-                ))
+              {/* Applicants Ranked List */}
+              {loadingApplicants ? (
+                <div className="py-16 text-center space-y-2">
+                  <RefreshCw className="w-5 h-5 animate-spin text-teal-400 mx-auto" />
+                  <p className="text-zinc-400">Loading applicant pipeline...</p>
+                </div>
+              ) : sortedApplicants.length === 0 ? (
+                <div className="p-10 rounded-2xl border border-white/[0.08] bg-[#111113] text-center space-y-2">
+                  <Users className="w-7 h-7 text-zinc-500 mx-auto" />
+                  <p className="font-semibold text-white">No applicants found</p>
+                  <p className="text-zinc-500 text-xs">
+                    Candidate applications submitted for this role will appear ranked by score here.
+                  </p>
+                </div>
               ) : (
-                <div className="text-center py-8 text-xs text-slate-500">
-                  No custom questions specified. System utilizes standard calibrated question plan.
+                <div className="space-y-2">
+                  {sortedApplicants.map((app, rankIdx) => {
+                    const score = app.evaluation?.overall_score;
+                    const verdict = app.evaluation?.verdict;
+                    const statusVariant =
+                      app.status === 'hired'
+                        ? 'success'
+                        : app.status === 'rejected'
+                        ? 'error'
+                        : app.status === 'interviewed'
+                        ? 'teal'
+                        : 'neutral';
+
+                    return (
+                      <div
+                        key={app.id}
+                        onClick={() => setSelectedApplicant(app)}
+                        className="group flex items-center justify-between gap-4 p-4 rounded-2xl border border-white/[0.06] bg-[#111113] hover:border-white/[0.16] hover:bg-[#18181B] transition-all cursor-pointer"
+                      >
+                        {/* Left: Rank & Candidate Details */}
+                        <div className="flex items-center gap-4 min-w-0">
+                          <span className="font-mono text-sm font-bold text-zinc-500 w-6 text-center">
+                            #{rankIdx + 1}
+                          </span>
+
+                          <ScoreRing score={score} />
+
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <h4 className="font-bold text-sm text-white group-hover:text-teal-300 transition-colors truncate">
+                                {app.full_name}
+                              </h4>
+                              {verdict && (
+                                <Badge
+                                  size="sm"
+                                  variant={
+                                    verdict.includes('HIRE') && !verdict.includes('NO')
+                                      ? 'success'
+                                      : verdict === 'BORDERLINE'
+                                      ? 'warning'
+                                      : 'error'
+                                  }
+                                >
+                                  {verdict.replace(/_/g, ' ')}
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="text-xs text-zinc-400 truncate">{app.email}</p>
+                            <div className="flex items-center gap-2 mt-1 text-[11px] text-zinc-500">
+                              <span className="flex items-center gap-1">
+                                <Calendar className="w-3 h-3" />
+                                <span>{new Date(app.applied_at).toLocaleDateString()}</span>
+                              </span>
+                              {app.interview_duration && (
+                                <>
+                                  <span>•</span>
+                                  <span>{app.interview_duration}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Right: Status & Action Button */}
+                        <div className="flex items-center gap-3 shrink-0">
+                          <Badge variant={statusVariant} size="sm">
+                            {app.status?.replace(/_/g, ' ') || 'Submitted'}
+                          </Badge>
+
+                          <button
+                            type="button"
+                            className="p-2 rounded-xl text-teal-400 hover:text-white bg-teal-950/40 border border-teal-800/60 group-hover:bg-teal-400 group-hover:text-black transition-all"
+                            aria-label="Inspect Scorecard"
+                          >
+                            <ChevronRight className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
           )}
-
         </div>
-
-        {/* Footer */}
-        <div className="p-4 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex justify-end">
-          <button
-            onClick={onClose}
-            className="px-5 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-100"
-          >
-            Close
-          </button>
-        </div>
-
       </div>
 
-      {/* Deep Applicant Inspection Drawer / Modal */}
+      {/* Applicant Detail Modal (Scorecard view) */}
       {selectedApplicant && (
         <ApplicantDetailModal
           application={selectedApplicant}
@@ -618,7 +444,6 @@ export default function JobDetailModal({ job, isOpen, onClose }) {
           onApplicationUpdated={handleApplicantUpdated}
         />
       )}
-
     </div>
   );
 }

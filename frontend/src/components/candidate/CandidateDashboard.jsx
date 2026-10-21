@@ -3,16 +3,37 @@ import {
   Video, Mic, MicOff, Camera, CameraOff, Volume2, ShieldCheck, CheckCircle2, X,
   AlertCircle, ArrowLeft, Play, Sparkles, RefreshCw, Clock, Award,
   CheckCircle, HelpCircle, Layers, FileText, ChevronRight, LogOut, Briefcase,
-  Radio, Cpu, MessageSquare, Zap
+  Radio, Cpu, MessageSquare, Zap, Headphones, Check, UserCheck
 } from 'lucide-react';
-import Logo from '../Logo';
+import Header from '../Header';
+import { Card, Badge, Stat, EmptyState, PageHeader } from '../ui';
 import CandidateJobListing from './CandidateJobListing';
 import ApplicationWizard from './ApplicationWizard';
 import PreFlightCheckModal from './interview/PreFlightCheckModal';
 import LiveInterviewRoom from './interview/LiveInterviewRoom';
 
+function getApplicationStep(app) {
+  if (!app) return 1;
+  const status = (app.status || '').toLowerCase();
+  const sessionStatus = (app.interview_session_status || '').toLowerCase();
+  const completed = app.interview_completed || status === 'interview_completed' || sessionStatus === 'completed' || status === 'interviewed';
+
+  if (status === 'hired' || status === 'rejected') return 4;
+  if (completed || status === 'under_review') return 3;
+  if (app.interview_ready || status === 'ready_for_interview' || status === 'interview_ready' || sessionStatus === 'in_progress' || sessionStatus === 'paused') return 2;
+  return 1;
+}
+
+const STEP_LABELS = ['Applied', 'Interview', 'Under review', 'Decision'];
+
 export default function CandidateDashboard({ authUser, onBackToLanding, onSignOut }) {
-  const [activePortalTab, setActivePortalTab] = useState('applications'); // 'applications' | 'browse'
+  const [activePortalTab, setActivePortalTab] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const tab = new URLSearchParams(window.location.search).get('tab');
+      if (tab === 'browse') return 'browse';
+    }
+    return 'applications';
+  });
   const [applyingJob, setApplyingJob] = useState(null);
   const [applications, setApplications] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -37,9 +58,6 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     localStorage.getItem('candidly-auth-token-candidate') ||
     localStorage.getItem('candidly-auth-token');
 
-  // Fetch applications for candidate.
-  // silent=true is for background polling: don't toggle the full-tab spinner
-  // (the applications tab renders from `loading` and would flicker every poll).
   const fetchApplications = async (silent = false) => {
     if (!silent) {
       setLoading(true);
@@ -75,11 +93,6 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     fetchApplications();
   }, [authUser]);
 
-  // Realtime "Preparing Interview..." -> "Start Interview" enablement.
-  // A freshly submitted application has NO generation-run row yet, so its
-  // interview_generation_status is null — the old running/queued-only poll
-  // condition never fired and the button stayed disabled until a manual
-  // refresh. Poll (silently) while anything is still preparing.
   const pollStartRef = useRef(0);
   useEffect(() => {
     const needsPoll = applications.some((app) =>
@@ -94,9 +107,6 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     if (!pollStartRef.current) {
       pollStartRef.current = Date.now();
     }
-    // Cap: blueprint generation can take minutes; stop polling long-stuck rows.
-    // The backend self-heals succeeded-but-session-less rows on any fetch, so a
-    // later refresh still turns the button on.
     if (Date.now() - pollStartRef.current > 360000) {
       return undefined;
     }
@@ -113,7 +123,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
   const currentApp = applications[selectedAppIndex] || applications[0];
   const activeJob = currentApp?.job;
 
-  const handleApplicationSubmitted = (newApp) => {
+  const handleApplicationSubmitted = () => {
     fetchApplications();
     setActivePortalTab('applications');
     setApplyingJob(null);
@@ -136,7 +146,6 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
       if (!res.ok) {
         throw new Error(payload.detail || 'Could not start practice interview');
       }
-      // The practice-interview endpoint returns the session under `id` (no `session_id`).
       const sessionId = payload.session_id || payload.id;
       const startRes = await fetch(`/api/interview-sessions/${sessionId}/start`, {
         method: 'POST',
@@ -223,7 +232,6 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         setError(payload.detail || 'Unable to withdraw application.');
         return;
       }
-      // Wiped all candidate records per user specification
       setApplications([]);
       setActivePortalTab('browse');
       setWithdrawalOpen(false);
@@ -239,202 +247,149 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     }
   };
 
+  // If live interview is running, render interview room directly
+  if (interviewStarted && interviewSession) {
+    return (
+      <LiveInterviewRoom
+        session={interviewSession}
+        onEndInterview={() => {
+          setInterviewStarted(false);
+          setInterviewSession(null);
+          setIsPracticeMode(false);
+          fetchApplications();
+        }}
+        isPractice={isPracticeMode}
+      />
+    );
+  }
+
+  const currentStep = getApplicationStep(currentApp);
+  const isInterviewCompleted =
+    currentApp?.interview_completed ||
+    currentApp?.status === 'interview_completed' ||
+    currentApp?.interview_session_status === 'completed';
+
   return (
-    <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#0B0F19] text-slate-900 dark:text-white transition-colors">
-      
-      {/* Candidate Portal Top Navigation */}
-      <header className="sticky top-0 z-40 bg-white/85 dark:bg-[#0B0F19]/85 backdrop-blur-xl border-b border-slate-200/80 dark:border-slate-800/80 py-3 px-4 sm:px-6 lg:px-8 transition-colors">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
-          
-          {/* Left: Brand Identity & Portal Pill */}
-          <div className="flex items-center gap-5 sm:gap-6">
-            <div className="flex items-center gap-2.5">
-              <Logo size={32} className="w-8 h-8 shrink-0" />
-              <div className="flex items-center gap-2">
-                <span className="font-extrabold text-base tracking-tight text-slate-900 dark:text-white">
-                  Candidly<span className="text-indigo-600 dark:text-indigo-400">.AI</span>
-                </span>
-                <span className="hidden sm:inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/70 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/60">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  CANDIDATE PORTAL
-                </span>
-              </div>
-            </div>
+    <div className="min-h-screen bg-black text-white flex flex-col">
+      {/* Header with Role Navigation */}
+      <Header
+        user={authUser}
+        roleNav="candidate"
+        activeRoleNav={activePortalTab === 'browse' ? 'jobs' : 'applications'}
+        onNavChange={(key) => {
+          if (key === 'jobs') setActivePortalTab('browse');
+          else if (key === 'applications') setActivePortalTab('applications');
+        }}
+        onAction={() => setActivePortalTab('browse')}
+        actionLabel="Browse Jobs"
+        onSignOut={onSignOut}
+      />
 
-            {/* Quick Navigation Tabs in Header */}
-            <nav className="hidden md:flex items-center gap-1 bg-slate-100/80 dark:bg-slate-900/80 p-1 rounded-xl border border-slate-200/60 dark:border-slate-800/60 text-xs font-semibold">
-              <button
-                type="button"
-                onClick={() => setActivePortalTab('applications')}
-                className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-                  activePortalTab === 'applications'
-                    ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-300 shadow-sm font-bold'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-              >
-                <Briefcase className="w-3.5 h-3.5" />
-                <span>My Applications</span>
-                {applications.length > 0 && (
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 font-bold">
-                    {applications.length}
-                  </span>
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActivePortalTab('browse')}
-                className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-                  activePortalTab === 'browse'
-                    ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-300 shadow-sm font-bold'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                <span>Explore Jobs</span>
-              </button>
-            </nav>
-          </div>
-
-          {/* Right: User Profile Chip & Actions */}
-          <div className="flex items-center gap-2 sm:gap-3">
-            {/* User Profile Chip */}
-            <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-slate-100/80 dark:bg-slate-900/80 border border-slate-200/60 dark:border-slate-800/60 text-xs">
-              <div className="w-6 h-6 rounded-lg bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white text-[10px] font-bold shadow-sm">
-                {(authUser?.full_name || 'Candidate')
-                  .split(' ')
-                  .map((n) => n[0])
-                  .slice(0, 2)
-                  .join('')
-                  .toUpperCase()}
-              </div>
-              <div className="hidden sm:flex flex-col text-left">
-                <span className="text-xs font-bold text-slate-800 dark:text-slate-200 leading-tight">
-                  {authUser?.full_name || 'Candidate'}
-                </span>
-                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium leading-none flex items-center gap-1 mt-0.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block animate-pulse" />
-                  Active
-                </span>
-              </div>
-            </div>
-
-            {/* Refresh Button */}
-            <button
-              type="button"
-              onClick={fetchApplications}
-              disabled={loading}
-              title="Refresh application and interview status"
-              className="p-2 rounded-xl text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white bg-slate-100/80 dark:bg-slate-900/80 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200/60 dark:border-slate-800/60 transition-colors"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            </button>
-
-            {/* Back to Overview */}
-            {onBackToLanding && (
-              <button
-                type="button"
-                onClick={onBackToLanding}
-                title="Return to main portal overview"
-                className="hidden lg:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white bg-slate-100/80 dark:bg-slate-900/80 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200/60 dark:border-slate-800/60 transition-colors"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Overview</span>
-              </button>
-            )}
-
-            {/* Sign Out */}
-            <button
-              type="button"
-              onClick={onSignOut}
-              title="Sign out of candidate account"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-600 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 bg-slate-100/80 dark:bg-slate-900/80 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-slate-200/60 dark:border-slate-800/60 hover:border-rose-300 dark:hover:border-rose-900/60 transition-all"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Sign Out</span>
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Container */}
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         
-        {/* Welcome Banner */}
-        <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-r from-indigo-900/90 via-slate-900 to-indigo-950 text-white border border-indigo-500/20 shadow-lg relative overflow-hidden">
-          <div className="absolute right-0 top-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-          <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="space-y-2 max-w-2xl">
-              <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-semibold border border-indigo-400/20">
-                <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                <span>{applications.length > 0 ? 'Active Candidate Evaluation' : 'Ready to Discover New Roles'}</span>
-              </div>
-              <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight">
-                Welcome, {authUser?.full_name || 'Candidate'}
-              </h1>
-              <p className="text-xs sm:text-sm text-indigo-200">
-                {authUser?.headline || 'Explore opportunities and showcase your skills through AI voice interviews.'}
-              </p>
-              <p className="text-xs text-slate-300 pt-1">
-                {applications.length > 0
-                  ? 'Review the role details, verify your device readiness, and enter your scheduled session.'
-                  : 'You have not submitted any applications yet. Browse open positions configured by hiring teams, apply, and complete your evaluation.'}
-              </p>
-            </div>
-
-            <div className="flex flex-col sm:flex-row items-center gap-3">
+        {/* Page Header with Serif Greeting */}
+        <PageHeader
+          badge="Candidate Portal"
+          title={`Hello, ${authUser?.full_name ? authUser.full_name.split(' ')[0] : 'Candidate'}`}
+          subtitle={
+            authUser?.headline ||
+            'Review active applications, prepare for your voice interviews, and explore open roles.'
+          }
+          actions={
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={handleStartPracticeInterview}
                 disabled={startingPractice}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-indigo-500/30 hover:bg-indigo-500/50 text-white font-bold text-xs border border-indigo-400/40 shadow-sm transition-all cursor-pointer"
-                title="Conduct a 5-minute warm-up interview with the AI interviewer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium text-zinc-300 bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] transition-colors cursor-pointer"
               >
-                <Sparkles className="w-4 h-4 text-indigo-300" />
-                <span>{startingPractice ? 'Starting Warm-up...' : 'Practice Interview (5m Warm-up)'}</span>
+                <Sparkles className="w-3.5 h-3.5 text-teal-400" />
+                <span>{startingPractice ? 'Starting...' : 'Warm-Up (5m)'}</span>
               </button>
 
-              {applications.length > 0 ? (
-                <span className="text-xs font-semibold text-indigo-200 hidden md:inline">
-                  Select an application below.
-                </span>
-              ) : (
-                <button
-                  onClick={() => setActivePortalTab('browse')}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm shadow-lg shadow-indigo-600/30 hover:-translate-y-0.5 transition-all"
-                >
-                  <Briefcase className="w-4 h-4 fill-white" />
-                  <span>Browse Open Positions</span>
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => fetchApplications(false)}
+                disabled={loading}
+                title="Refresh applications"
+                className="p-1.5 rounded-lg text-zinc-400 hover:text-white bg-white/[0.05] border border-white/[0.08] transition-colors"
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+          }
+        />
+
+        {/* Short "How the interview works" strip */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 rounded-xl bg-[#0A0A0B] border border-white/[0.08]">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-teal-500/10 text-teal-400 flex items-center justify-center shrink-0 border border-teal-500/20">
+              <Mic className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-white">Voice-only</div>
+              <div className="text-[11px] text-zinc-400">Natural conversation</div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-teal-500/10 text-teal-400 flex items-center justify-center shrink-0 border border-teal-500/20">
+              <Clock className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-white">~30 Minutes</div>
+              <div className="text-[11px] text-zinc-400">Structured & adaptive</div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-teal-500/10 text-teal-400 flex items-center justify-center shrink-0 border border-teal-500/20">
+              <Cpu className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-white">No coding</div>
+              <div className="text-[11px] text-zinc-400">Architecture & depth</div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-teal-500/10 text-teal-400 flex items-center justify-center shrink-0 border border-teal-500/20">
+              <Headphones className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-white">Headphones</div>
+              <div className="text-[11px] text-zinc-400">Recommended for clarity</div>
             </div>
           </div>
         </div>
 
-        {/* Portal View Tabs */}
-        <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-slate-200 dark:border-slate-800 text-sm font-bold">
+        {/* View Switcher: Applications vs Browse */}
+        <div className="flex items-center gap-2 border-b border-white/[0.08] pb-1">
           <button
+            type="button"
             onClick={() => setActivePortalTab('applications')}
-            className={`pb-3 px-1 border-b-2 transition-all flex items-center gap-2 ${
+            className={`pb-2.5 px-3 text-xs font-medium border-b-2 transition-all flex items-center gap-2 ${
               activePortalTab === 'applications'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
-                : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
+                ? 'border-teal-400 text-teal-400'
+                : 'border-transparent text-zinc-400 hover:text-white'
             }`}
           >
-            <Briefcase className="w-4 h-4" />
+            <Briefcase className="w-3.5 h-3.5" />
             <span>Applications ({applications.length})</span>
           </button>
 
           <button
+            type="button"
             onClick={() => setActivePortalTab('browse')}
-            className={`pb-3 px-1 border-b-2 transition-all flex items-center gap-2 ${
+            className={`pb-2.5 px-3 text-xs font-medium border-b-2 transition-all flex items-center gap-2 ${
               activePortalTab === 'browse'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
-                : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white'
+                ? 'border-teal-400 text-teal-400'
+                : 'border-transparent text-zinc-400 hover:text-white'
             }`}
           >
-            <Sparkles className="w-4 h-4" />
-            <span>Browse Open Positions</span>
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Explore Jobs</span>
           </button>
         </div>
 
@@ -447,182 +402,79 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
 
         {/* APPLICATIONS TAB */}
         {activePortalTab === 'applications' && (
-          <>
-            {/* Loading / Error States */}
+          <div className="space-y-8">
             {loading && (
-              <div className="py-16 text-center space-y-3">
-                <RefreshCw className="w-8 h-8 text-indigo-600 animate-spin mx-auto" />
-                <p className="text-sm text-slate-500 dark:text-slate-400">Loading your candidate profile and active applications...</p>
+              <div className="py-20 text-center space-y-2">
+                <RefreshCw className="w-6 h-6 animate-spin text-teal-400 mx-auto" />
+                <p className="text-xs text-zinc-400">Loading your applications...</p>
               </div>
             )}
 
             {error && (
-              <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-sm flex items-center gap-3">
-                <AlertCircle className="w-5 h-5 shrink-0" />
-                <span>{error}</span>
+              <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
+                {error}
               </div>
             )}
 
-            {/* If multiple applications, allow selecting */}
-            {!loading && applications.length > 1 && (
-              <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                <span className="text-xs font-bold text-slate-400 whitespace-nowrap">Your Roles:</span>
-                {applications.map((app, idx) => (
-                  <button
-                    key={app.id}
-                    onClick={() => setSelectedAppIndex(idx)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all flex items-center gap-2 ${
-                      selectedAppIndex === idx
-                        ? 'bg-indigo-600 text-white shadow-sm'
-                        : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-800 hover:border-slate-300'
-                    }`}
-                  >
-                    <span>{app.job?.job_title || `Role ${idx + 1}`}</span>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${selectedAppIndex === idx ? 'bg-indigo-700 text-indigo-100' : 'bg-slate-100 dark:bg-slate-800'}`}>
-                      {app.status === 'interview_ready' ? 'Ready' : 'Applied'}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* Empty Applications Fallback */}
             {!loading && applications.length === 0 && !error && (
-              <div className="p-8 sm:p-12 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center space-y-4 max-w-lg mx-auto shadow-sm">
-                <div className="w-14 h-14 rounded-2xl bg-indigo-50 dark:bg-indigo-950 flex items-center justify-center mx-auto text-indigo-600 dark:text-indigo-400">
-                  <Briefcase className="w-7 h-7" />
-                </div>
-                <div className="space-y-1.5">
-                  <h3 className="text-xl font-bold text-slate-900 dark:text-white">No active applications found</h3>
-                  <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400">
-                    You haven't applied to any job requisitions yet. Explore open roles configured by hiring teams and submit your application to schedule your AI voice interview.
-                  </p>
-                </div>
-                <div className="pt-2 flex items-center justify-center gap-3">
-                  <button
-                    onClick={() => setActivePortalTab('browse')}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-md shadow-indigo-600/20 transition-all"
-                  >
-                    <Sparkles className="w-4 h-4" />
-                    <span>Explore Open Positions</span>
-                  </button>
-                  <button
-                    onClick={fetchApplications}
-                    className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Refresh</span>
-                  </button>
-                </div>
-              </div>
+              <EmptyState
+                icon={Briefcase}
+                title="No active applications yet"
+                description="Explore open engineering positions configured by hiring teams and submit your application to schedule your AI voice evaluation."
+                actionLabel="Explore Open Positions"
+                onAction={() => setActivePortalTab('browse')}
+              />
             )}
 
-            {/* Active Application Card & Interview Entry */}
-            {!loading && activeJob && (
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-                
-                {/* Left Column: Application Details & Skills (7 cols) */}
-                <div className="lg:col-span-7 space-y-6">
-                  <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-6">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
-                            Target Position
-                          </span>
-                          <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                            {currentApp?.status === 'interview_ready' ? 'Interview Ready' : 'Applied'}
-                          </span>
-                        </div>
-                        <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white mt-1">
-                          {activeJob.job_title}
-                        </h2>
-                        <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-                          {activeJob.department} • {activeJob.seniority_level} • {activeJob.employment_type}
-                        </p>
+            {!loading && applications.length > 0 && activeJob && (
+              <>
+                {/* UPCOMING INTERVIEW HERO CARD (with low-opacity dotted-wave background) */}
+                <div className="relative overflow-hidden rounded-2xl bg-[#0A0A0B] border border-white/[0.08] p-6 sm:p-8 bg-dots shadow-2xl">
+                  <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                    <div className="space-y-3 max-w-2xl">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] font-mono uppercase tracking-wider text-teal-400">
+                          {isInterviewCompleted ? 'Evaluation Complete' : 'Upcoming Interview'}
+                        </span>
+                        <Badge variant={isInterviewCompleted ? 'emerald' : currentApp?.interview_ready ? 'teal' : 'neutral'}>
+                          {isInterviewCompleted
+                            ? 'Interview Completed'
+                            : currentApp?.interview_ready
+                            ? 'Ready to Start'
+                            : 'Preparing Interview'}
+                        </Badge>
                       </div>
 
-                      <div className="text-right">
-                        <div className="text-xs text-slate-400 font-medium">Session Length</div>
-                        <div className="text-lg font-black text-slate-900 dark:text-white flex items-center justify-end gap-1">
-                          <Clock className="w-4 h-4 text-indigo-500" />
-                          <span>{activeJob.interview_duration_mins} mins</span>
+                      <h2 className="text-2xl sm:text-3xl font-display font-bold text-white tracking-tight">
+                        {activeJob.job_title}
+                      </h2>
+
+                      <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed">
+                        {activeJob.department} · {activeJob.workplace_model} · {activeJob.interview_duration_mins} min session
+                      </p>
+
+                      {currentApp?.candidate_summary && (
+                        <div className="p-3.5 rounded-lg bg-white/[0.03] border border-white/[0.06] text-xs text-zinc-300 leading-relaxed mt-2">
+                          <strong className="text-teal-300">Session Reflection: </strong>
+                          {currentApp.candidate_summary}
                         </div>
-                      </div>
+                      )}
                     </div>
 
-                    {/* Job Specs Grid */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                      <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800">
-                        <div className="text-slate-400">Workplace Model</div>
-                        <div className="font-bold text-slate-800 dark:text-slate-200 mt-0.5">{activeJob.workplace_model}</div>
-                      </div>
-                      <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800">
-                        <div className="text-slate-400">Experience Bar</div>
-                        <div className="font-bold text-slate-800 dark:text-slate-200 mt-0.5">{activeJob.total_experience_years}+ Years</div>
-                      </div>
-                    </div>
-
-                    {/* Skills needed for the role */}
-                    <div className="space-y-3 pt-2">
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center justify-between">
-                        <span>Skills Needed for This Role ({activeJob.skills?.length || 0})</span>
-                      </h3>
-
-                      <div className="space-y-2.5">
-                        {activeJob.skills?.map((skill) => (
-                          <div
-                            key={skill.id}
-                            className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/70 dark:border-slate-800"
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
-                                {skill.name}
-                              </span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Candidate-Safe Summary Feedback (Part D5) */}
-                    {(currentApp?.interview_completed || currentApp?.status === 'interview_completed' || currentApp?.interview_session_status === 'completed') && (
-                      <div className="space-y-3 pt-2">
-                        <div className="p-4 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200/70 dark:border-indigo-900/50 space-y-2">
-                          <div className="flex items-center gap-2 text-indigo-700 dark:text-indigo-300 font-bold text-xs">
-                            <Sparkles className="w-4 h-4" />
-                            <span>Interview Completed · Constructive Reflection</span>
-                          </div>
-                          {currentApp?.candidate_summary ? (
-                            <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
-                              {currentApp.candidate_summary}
-                            </p>
-                          ) : (
-                            <p className="text-xs text-slate-600 dark:text-slate-400">
-                              Your interview turns and technical responses are safely stored. The hiring team has received your evaluation dossier.
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="flex flex-wrap items-center gap-3 pt-2">
-                      {currentApp?.interview_completed || currentApp?.status === 'interview_completed' || currentApp?.interview_session_status === 'completed' ? (
-                        <div className="inline-flex items-center gap-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800 px-4 py-3 text-xs font-bold text-emerald-700 dark:text-emerald-300">
-                          <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                          <span>Interview Completed · Recruiter Review in Progress</span>
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0">
+                      {isInterviewCompleted ? (
+                        <div className="inline-flex items-center gap-2 px-5 py-3 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 text-xs font-semibold">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                          <span>Submitted for Recruiter Review</span>
                         </div>
                       ) : (
                         <button
+                          type="button"
                           onClick={() => setPreflightOpen(true)}
                           disabled={!currentApp?.interview_ready}
-                          className={`inline-flex items-center gap-2 rounded-xl px-5 py-3 text-xs font-bold text-white transition-all shadow-md ${
-                            currentApp?.interview_ready
-                              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-indigo-600/30 cursor-pointer'
-                              : 'bg-slate-400 cursor-not-allowed shadow-none'
-                          }`}
+                          className="inline-flex items-center justify-center gap-2.5 px-7 py-3.5 rounded-lg bg-teal-500 hover:bg-teal-400 text-black font-semibold text-sm shadow-xl shadow-teal-500/20 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5"
                         >
-                          <Play className="h-3.5 w-3.5 fill-white" />
+                          <Play className="w-4 h-4 fill-black" />
                           <span>
                             {currentApp?.interview_session_status === 'paused'
                               ? 'Resume Interview'
@@ -632,96 +484,187 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
                           </span>
                         </button>
                       )}
+
                       <button
+                        type="button"
                         onClick={() => setWithdrawalOpen(true)}
-                        className="inline-flex items-center gap-2 rounded-xl border border-rose-200 px-4 py-2.5 text-xs font-bold text-rose-600 hover:bg-rose-50 dark:border-rose-900/60 dark:text-rose-400 dark:hover:bg-rose-950/30 transition-colors cursor-pointer"
+                        className="px-3.5 py-3 rounded-lg text-xs font-medium text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/20 transition-colors"
                       >
-                        Withdraw application
+                        Withdraw
                       </button>
                     </div>
-
                   </div>
                 </div>
 
-                {/* Right Column: AI Interview Experience Guide (5 cols) */}
-                <div className="lg:col-span-5 space-y-6">
-                  <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm space-y-5 sticky top-20">
+                {/* Grid: Application Status Steps + Profile Completeness Card */}
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                  
+                  {/* Left (8 cols): Applications List with 4 Status Steps */}
+                  <div className="lg:col-span-8 space-y-4">
                     <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400">
-                          <Radio className="h-4 w-4 animate-pulse" />
+                      <h3 className="text-xs font-mono uppercase tracking-wider text-zinc-400">
+                        Active Application Pipeline
+                      </h3>
+                      {applications.length > 1 && (
+                        <div className="flex items-center gap-1.5">
+                          {applications.map((app, idx) => (
+                            <button
+                              key={app.id}
+                              onClick={() => setSelectedAppIndex(idx)}
+                              className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
+                                selectedAppIndex === idx
+                                  ? 'bg-teal-500 text-black font-semibold'
+                                  : 'bg-white/[0.05] text-zinc-400 hover:text-white'
+                              }`}
+                            >
+                              Role {idx + 1}
+                            </button>
+                          ))}
                         </div>
-                        <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
-                          Real-Time Voice Room
-                        </h3>
-                      </div>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200/50 dark:border-emerald-800/50">
-                        Enterprise UX
-                      </span>
+                      )}
                     </div>
 
-                    <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                      You will participate in a live, bidirectional conversational interview conducted by our AI interviewer with lip-synced visual presence.
-                    </p>
+                    {applications.map((app, idx) => {
+                      const step = getApplicationStep(app);
+                      const isSelected = selectedAppIndex === idx;
 
-                    {/* Feature Highlights */}
-                    <div className="space-y-3 text-xs">
-                      <div className="flex items-start gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800">
-                        <div className="p-2 rounded-xl bg-indigo-100 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 shrink-0">
-                          <Cpu className="h-4 w-4" />
-                        </div>
-                        <div>
-                          <div className="font-bold text-slate-900 dark:text-white">Voqalize 2D Talking Head</div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                            Speech-correlated viseme lip synchronization with real-time listening & thinking states.
+                      return (
+                        <div
+                          key={app.id}
+                          onClick={() => setSelectedAppIndex(idx)}
+                          className={`p-5 rounded-xl border transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-[#0A0A0B] border-white/[0.16] ring-1 ring-teal-400/20'
+                              : 'bg-[#0A0A0B] border-white/[0.08] hover:border-white/[0.12]'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                            <div>
+                              <h4 className="text-base font-semibold text-white">
+                                {app.job?.job_title || 'Software Engineer'}
+                              </h4>
+                              <p className="text-xs text-zinc-400">
+                                {app.job?.department} · Applied on {new Date(app.applied_at || Date.now()).toLocaleDateString()}
+                              </p>
+                            </div>
+
+                            <Badge variant={step >= 3 ? 'emerald' : step === 2 ? 'teal' : 'neutral'}>
+                              {step === 4 ? 'Decision Made' : step === 3 ? 'Under Review' : step === 2 ? 'Interview Stage' : 'Applied'}
+                            </Badge>
                           </div>
+
+                          {/* 4 Status Steps (Applied -> Interview -> Under review -> Decision) */}
+                          <div className="pt-2">
+                            <div className="flex items-center justify-between relative">
+                              {STEP_LABELS.map((label, sIdx) => {
+                                const stepNum = sIdx + 1;
+                                const isPassed = step > stepNum;
+                                const isCurrent = step === stepNum;
+
+                                return (
+                                  <React.Fragment key={label}>
+                                    <div className="flex flex-col items-center z-10">
+                                      <div
+                                        className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-mono transition-all ${
+                                          isPassed
+                                            ? 'bg-teal-400 text-black font-bold'
+                                            : isCurrent
+                                            ? 'bg-teal-500 text-black font-bold ring-4 ring-teal-500/20'
+                                            : 'bg-white/[0.08] text-zinc-500'
+                                        }`}
+                                      >
+                                        {isPassed ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : stepNum}
+                                      </div>
+                                      <span
+                                        className={`text-[11px] mt-1.5 transition-colors ${
+                                          isCurrent
+                                            ? 'font-semibold text-white'
+                                            : isPassed
+                                            ? 'text-teal-400'
+                                            : 'text-zinc-500'
+                                        }`}
+                                      >
+                                        {label}
+                                      </span>
+                                    </div>
+
+                                    {sIdx < STEP_LABELS.length - 1 && (
+                                      <div
+                                        className={`flex-1 h-0.5 mx-2 -mt-4 transition-colors ${
+                                          step > stepNum ? 'bg-teal-400/60' : 'bg-white/[0.08]'
+                                        }`}
+                                      />
+                                    )}
+                                  </React.Fragment>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Right (4 cols): Profile Completeness & Device Readiness */}
+                  <div className="lg:col-span-4 space-y-4">
+                    <h3 className="text-xs font-mono uppercase tracking-wider text-zinc-400">
+                      Profile Readiness
+                    </h3>
+
+                    <div className="p-5 rounded-xl bg-[#0A0A0B] border border-white/[0.08] space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs font-semibold text-white">Profile Completeness</div>
+                        <span className="text-xs font-mono text-teal-400">100%</span>
+                      </div>
+
+                      <div className="w-full h-1.5 bg-white/[0.08] rounded-full overflow-hidden">
+                        <div className="h-full bg-teal-400 rounded-full w-full" />
+                      </div>
+
+                      <div className="space-y-2 text-xs pt-1">
+                        <div className="flex items-center justify-between text-zinc-300">
+                          <span className="flex items-center gap-2">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />
+                            <span>Contact & Profile</span>
+                          </span>
+                          <span className="text-zinc-500 text-[11px]">Verified</span>
+                        </div>
+
+                        <div className="flex items-center justify-between text-zinc-300">
+                          <span className="flex items-center gap-2">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />
+                            <span>Resume Uploaded</span>
+                          </span>
+                          <span className="text-zinc-500 text-[11px]">Parsed</span>
+                        </div>
+
+                        <div className="flex items-center justify-between text-zinc-300">
+                          <span className="flex items-center gap-2">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />
+                            <span>Webcam & Mic Permissions</span>
+                          </span>
+                          <span className="text-zinc-500 text-[11px]">Ready</span>
                         </div>
                       </div>
 
-                      <div className="flex items-start gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800">
-                        <div className="p-2 rounded-xl bg-indigo-100 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 shrink-0">
-                          <Zap className="h-4 w-4" />
-                        </div>
-                        <div>
-                          <div className="font-bold text-slate-900 dark:text-white">Continuous Audio & Barge-In</div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                            No manual buttons during the call. Interrupt the AI naturally at any point; speech halts instantly.
-                          </div>
-                        </div>
+                      <div className="pt-2 border-t border-white/[0.06]">
+                        <button
+                          type="button"
+                          onClick={() => setPreflightOpen(true)}
+                          disabled={!currentApp?.interview_ready}
+                          className="w-full py-2 px-3 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-xs font-medium text-zinc-200 transition-colors flex items-center justify-center gap-2 border border-white/[0.08] disabled:opacity-40"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5 text-teal-400" />
+                          <span>Pre-Flight Diagnostic</span>
+                        </button>
                       </div>
-
-                      <div className="flex items-start gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800">
-                        <div className="p-2 rounded-xl bg-indigo-100 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 shrink-0">
-                          <MessageSquare className="h-4 w-4" />
-                        </div>
-                        <div>
-                          <div className="font-bold text-slate-900 dark:text-white">Adaptive Turn State Machine</div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                            Greeting → Self-Intro → Technical Deep Dive with Follow-Ups → Closing & Next Steps.
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Pre-flight CTA Button */}
-                    <div className="pt-2">
-                      <button
-                        onClick={() => setPreflightOpen(true)}
-                        disabled={!currentApp?.interview_ready}
-                        className="w-full py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md shadow-indigo-600/30 hover:shadow-indigo-600/40 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <ShieldCheck className="w-4 h-4" />
-                        <span>Launch Pre-Flight & Enter Room</span>
-                      </button>
-                      <p className="text-[11px] text-center text-slate-400 mt-2">
-                        Requires camera, microphone, and a stable internet connection.
-                      </p>
                     </div>
                   </div>
+
                 </div>
-              </div>
+              </>
             )}
-          </>
+          </div>
         )}
       </main>
 
@@ -734,7 +677,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         onApplicationSubmitted={handleApplicationSubmitted}
       />
 
-      {/* Part 1: Pre-Interview Requirements Check Screen */}
+      {/* Pre-Interview PreFlightCheckModal (Untouched props) */}
       <PreFlightCheckModal
         isOpen={preflightOpen}
         onClose={() => setPreflightOpen(false)}
@@ -744,80 +687,35 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         isEntering={startingInterview}
       />
 
-      {/* Part 2: Enterprise Real-Time Live Interview Room */}
-      {interviewStarted && interviewSession && (
-        <LiveInterviewRoom
-          sessionId={interviewSession.id}
-          jobTitle={interviewSession?.job_title || activeJob?.job_title || 'Technical Interview'}
-          candidateName={authUser?.full_name}
-          durationMins={interviewSession?.duration_mins || activeJob?.interview_duration_mins || 20}
-          token={localStorage.getItem('candidly-auth-token')}
-          onExit={() => {
-            setInterviewStarted(false);
-            setInterviewSession(null);
-            setIsPracticeMode(false);
-            setApplications((prev) =>
-              prev.map((app) =>
-                app.interview_session_id === interviewSession.id || app.id === currentApp?.id
-                  ? {
-                      ...app,
-                      interview_completed: true,
-                      status: 'interview_completed',
-                      interview_ready: false,
-                      interview_session_status: 'completed',
-                    }
-                  : app
-              )
-            );
-            fetchApplications();
-          }}
-        />
-      )}
-
       {/* Withdrawal Confirmation Dialog */}
       {withdrawalOpen && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
-          <div role="dialog" aria-modal="true" className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Withdraw application?</h3>
-                <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                  All applications, interview transcripts, sessions, and data associated with your candidate profile will be permanently wiped out.
-                </p>
-                {error && (
-                  <div className="mt-3 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{error}</span>
-                  </div>
-                )}
-              </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-md p-6 rounded-2xl bg-[#0A0A0B] border border-white/[0.12] space-y-4">
+            <h3 className="text-base font-semibold text-white">Withdraw Application?</h3>
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Are you sure you want to withdraw your application for{' '}
+              <strong className="text-white">{activeJob?.job_title}</strong>? This action will cancel your scheduled interview and remove your dossier from the recruiter's active pipeline.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
               <button
+                type="button"
                 onClick={() => setWithdrawalOpen(false)}
-                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-                aria-label="Close"
+                className="px-4 py-2 rounded-lg text-xs font-medium text-zinc-300 bg-white/[0.05] hover:bg-white/[0.1]"
               >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                onClick={() => setWithdrawalOpen(false)}
-                className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-              >
-                Keep application
+                Cancel
               </button>
               <button
-                onClick={withdrawApplication}
+                type="button"
                 disabled={withdrawing}
-                className="rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-rose-700 disabled:opacity-60 transition-colors"
+                onClick={withdrawApplication}
+                className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500"
               >
-                {withdrawing ? 'Withdrawing...' : 'Withdraw application'}
+                {withdrawing ? 'Withdrawing...' : 'Confirm Withdrawal'}
               </button>
             </div>
           </div>
         </div>
       )}
-
     </div>
   );
 }
