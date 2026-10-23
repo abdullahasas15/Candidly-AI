@@ -212,6 +212,7 @@ def validate_question_text(
     # 5. Prohibit Code-Request Patterns (Voice Interview is Verbal Only)
     code_request_patterns = [
         (r"\bwrite (a |an )?(function|method|class|code|script|snippet|program)\b", "write code/function/program"),
+        (r"\bwrite (a |an )?(unit|integration|test|tests|test case|test cases|test suite)\b", "write tests"),
         (r"\bwrite code\b", "write code"),
         (r"\bcode aloud\b", "code aloud"),
         (r"\btype out\b", "type out code"),
@@ -416,6 +417,16 @@ def validate_skill_section(
     core_count = sum(1 for e in expectations if getattr(e, "importance", "core") == "core")
     stretch_count = sum(1 for e in expectations if getattr(e, "importance", "core") == "stretch")
 
+    # If core_count > 3 but total_exp <= 5, auto-rebalance excess core items to stretch
+    if core_count > 3 and total_exp <= 5:
+        for e in reversed(expectations):
+            if getattr(e, "importance", "core") == "core":
+                e.importance = "stretch"
+                core_count -= 1
+                stretch_count += 1
+                if core_count <= 3:
+                    break
+
     if core_count > 3:
         issues.append(ValidationIssue(
             severity="error",
@@ -558,6 +569,20 @@ def validate_section_dict(
     total_exp = len(expectations)
     core_count = sum(1 for e in expectations if (e.get("importance") if isinstance(e, dict) else getattr(e, "importance", "core")) == "core")
     stretch_count = sum(1 for e in expectations if (e.get("importance") if isinstance(e, dict) else getattr(e, "importance", "core")) == "stretch")
+
+    # If core_count > 3 but total_exp <= 5, auto-rebalance excess core items to stretch
+    if core_count > 3 and total_exp <= 5:
+        for e in reversed(expectations):
+            imp = e.get("importance") if isinstance(e, dict) else getattr(e, "importance", "core")
+            if imp == "core":
+                if isinstance(e, dict):
+                    e["importance"] = "stretch"
+                else:
+                    e.importance = "stretch"
+                core_count -= 1
+                stretch_count += 1
+                if core_count <= 3:
+                    break
 
     if core_count > 3:
         issues.append(ValidationIssue(
@@ -747,16 +772,24 @@ def run_batched_blueprint_llm_review_sync(
         "Critically evaluate each section against these 6 checks:\n"
         "1. RELEVANCE TO SKILL (CRITICAL ERROR): Does every expectation, question, and probe strictly belong to the declared skill? "
         "If an item evaluates a completely unrelated engineering domain (for example, relational database indexing, SQL sharding, or B-trees placed under 'Kubernetes Operations' or 'AI Engineering'), "
-        "you MUST flag it as an ERROR with issue_type='relevance'.\n"
-        "2. ESCALATION CONTAINMENT (ERROR): Escalation questions must push depth, scale, or failure modes, NOT repeat the anchor scenario.\n"
-        "3. PROBE TECHNIQUE LEAKAGE (ERROR): Probes must NEVER reference meta-interview framework names like 'STAR method', 'probing for depth', 'CAR framework', or 'tell me in 3 steps'.\n"
+        "you MUST flag it as an ERROR with issue_type='relevance'. A negative rubric expectation ('struggles with...') is still relevant; do not flag it for being negative. "
+        "Data Structures & Problem Solving explicitly includes complexity, space-time trade-offs, edge cases, overflow, and bounds.\n"
+        "2. ESCALATION CONTAINMENT (ERROR): Flag ONLY when the escalation is essentially the same scenario as the anchor and adds no depth, scale, constraints, or failure modes. "
+        "Escalations that add load, failure handling, scale, or new constraints are compliant, even if they build on the same scenario.\n"
+        "3. PROBE TECHNIQUE LEAKAGE (ONE-DIRECTIONAL ERROR): Flag ONLY when a probe ITSELF names a meta-interview framework or technique such as 'STAR method', 'probing for depth', 'CAR framework', or 'tell me in 3 steps'. "
+        "NEVER flag a probe for failing to mention a framework name. Absence of framework names is correct behavior.\n"
         "4. SENIORITY FIT (CRITICAL ERROR if mismatched):\n"
         "   - ENTRY LEVEL (L3): Target topics are fundamental data structures, basic algorithms, problem-solving, and single-service APIs. "
         "FORBIDDEN FOR ENTRY: CPU cache lines, memory layout / alignment, lock-free concurrency, distributed consensus (Raft/Paxos), multi-region active-active replication, organization-wide architecture governance. If any question or escalation asks about these, flag as an ERROR with issue_type='seniority_fit'.\n"
         "   - SENIOR / LEAD (L5+): Target topics are system trade-offs, scalability, fault tolerance, observability, and failure domains. "
         "FORBIDDEN FOR SENIOR: Trivial element lookup from a list or dictionary, basic loop/variable syntax definitions. If any question asks trivial definitions, flag as an ERROR with issue_type='seniority_fit'.\n"
         "5. VOICE SUITABILITY: Natural verbal flow, concise (under ~35-45 words), ends with a single question mark.\n"
-        "6. VERBAL-ONLY QUESTION FRAMING (CRITICAL ERROR): Spoken voice interview only. Prohibit all code-request patterns: 'write', 'implement', 'code up', 'function that', 'class that', 'snippet', 'syntax', 'whiteboard', 'program'. Candidates must be asked for approach, conceptual ideas, trade-offs, and complexity explained aloud, NEVER writing or reciting syntax. Flag any violation with issue_type='code_request'.\n\n"
+        "6. VERBAL-ONLY QUESTION FRAMING (CRITICAL ERROR): This rule applies ONLY to spoken question text, NEVER to expectations. Spoken questions must not request writing, implementing, coding, snippets, syntax, or whiteboarding. "
+        "Expectations MAY describe testing, writing unit tests, or code quality; do NOT flag expectations with issue_type='code_request'. For a spoken question, flag only when the question itself contains a direct code-writing request.\n\n"
+        "FALSE-POSITIVE GUARDS:\n"
+        "- If you are uncertain, do NOT report an error. Reserve errors for clear, concrete violations.\n"
+        "- Do not invent an issue because an item could be stronger; flag only the six checks above.\n"
+        "- Use target_item values exactly like 'anchor', 'anchor_alt', 'escalation', 'probe_1', 'expectation_1'.\n\n"
         f"Sections to review:\n{json.dumps(skill_sections_summary, indent=2)}\n\n"
         "Return your evaluation as valid JSON matching this schema:\n"
         "{\n"
@@ -766,7 +799,7 @@ def run_batched_blueprint_llm_review_sync(
         "    {\n"
         '      "section_index": 1,\n'
         '      "skill_name": "Kubernetes Operations",\n'
-        '      "target_item": "anchor_question",\n'
+        '      "target_item": "anchor",\n'
         '      "issue_type": "relevance",\n'
         '      "severity": "error",\n'
         '      "reason": "PostgreSQL indexing and query optimization belong to Database Administration, not Kubernetes Operations."\n'
@@ -894,6 +927,290 @@ async def run_batched_blueprint_llm_review(
     )
 
 
+def _section_review_records(sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build a lookup of exact reviewable items keyed by section index/name."""
+    records: List[Dict[str, Any]] = []
+    for idx, section in enumerate(sections):
+        if section.get("section_type") != "skill":
+            continue
+        record: Dict[str, Any] = {
+            "index": idx,
+            "skill_name": section.get("skill_name") or section.get("title") or f"Section {idx}",
+            "expectations": [],
+            "questions": {},
+            "probes": [],
+        }
+        content = section.get("content")
+        if content is not None and hasattr(content, "expectations"):
+            record["expectations"] = [e.expectation_text for e in content.expectations]
+            record["questions"] = {
+                "anchor": getattr(getattr(content, "anchor_question", None), "question_text", ""),
+                "anchor_alt": getattr(getattr(content, "anchor_alt_question", None), "question_text", ""),
+                "escalation": getattr(getattr(content, "escalation_question", None), "question_text", ""),
+            }
+            record["probes"] = [p.question_text for p in content.probes]
+        else:
+            if isinstance(content, dict):
+                record["expectations"] = [
+                    e.get("expectation_text", "") for e in (content.get("expectations") or [])
+                ]
+            else:
+                record["expectations"] = [
+                    e.get("expectation_text", "") if isinstance(e, dict) else getattr(e, "expectation_text", "")
+                    for e in (section.get("expectations") or [])
+                ]
+            for q in section.get("questions") or []:
+                role = q.get("question_role") if isinstance(q, dict) else getattr(q, "question_role", "")
+                text = q.get("question_text") if isinstance(q, dict) else getattr(q, "question_text", "")
+                if role in ("anchor", "anchor_alt", "escalation"):
+                    record["questions"][role] = text
+                elif role == "probe":
+                    record["probes"].append(text)
+        records.append(record)
+    return records
+
+
+def _record_for_review_item(
+    records: List[Dict[str, Any]],
+    item: LLMReviewItem,
+) -> Optional[Dict[str, Any]]:
+    if item.section_index is not None:
+        for record in records:
+            if record["index"] == item.section_index:
+                return record
+    if item.skill_name:
+        wanted = item.skill_name.strip().lower()
+        for record in records:
+            if record["skill_name"].strip().lower() == wanted:
+                return record
+    return None
+
+
+def _review_target_text(record: Dict[str, Any], target_item: Optional[str]) -> str:
+    target = re.sub(r"[^a-z0-9]+", "_", (target_item or "").strip().lower()).strip("_")
+    if not target:
+        return ""
+
+    if target.startswith("expectation"):
+        match = re.search(r"(\d+)", target)
+        idx = max(0, int(match.group(1)) - 1) if match else 0
+        return record["expectations"][idx] if idx < len(record["expectations"]) else ""
+
+    if "anchor_alt" in target or "hypothetical" in target:
+        return record["questions"].get("anchor_alt", "")
+    if "escalation" in target or "escalate" in target:
+        return record["questions"].get("escalation", "")
+    if "anchor" in target:
+        return record["questions"].get("anchor", "")
+    if "probe" in target:
+        match = re.search(r"(\d+)", target)
+        idx = max(0, int(match.group(1)) - 1) if match else 0
+        return record["probes"][idx] if idx < len(record["probes"]) else ""
+    return ""
+
+
+def _token_similarity(left: str, right: str) -> float:
+    left_tokens = extract_keywords(left or "")
+    right_tokens = extract_keywords(right or "")
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens.intersection(right_tokens)) / len(left_tokens.union(right_tokens))
+
+
+def _is_absence_claim(reason: str) -> bool:
+    lower = (reason or "").lower()
+    return bool(re.search(
+        r"\b(does not|doesn't|did not|didn't|fails? to|no|not|never)\b[^.]{0,60}"
+        r"\b(reference|references|mention|mentions|use|uses|include|includes|contain|contains|name|names)\b",
+        lower,
+    ))
+
+
+def _contains_framework_leakage(text: str) -> bool:
+    lower = (text or "").lower()
+    return bool(re.search(
+        r"\b(star method|car framework|meta[- ]interview|probing for depth|tell me in \d+ steps|"
+        r"star framework|situation, task, action, result)\b",
+        lower,
+    ))
+
+
+def _contains_code_request(text: str) -> bool:
+    lower = (text or "").lower()
+    patterns = [
+        r"\bwrite (a |an )?(function|method|class|code|script|snippet|program)\b",
+        r"\bwrite (a |an )?(unit|integration|test|tests|test case|test cases|test suite)\b",
+        r"\bwrite code\b",
+        r"\bcode aloud\b",
+        r"\btype out\b",
+        r"\bcode up\b",
+        r"\bimplement (a |an )?(function|method|class|script|snippet)\b",
+        r"\bfunction that\b",
+        r"\bclass that\b",
+        r"\b(code )?snippet\b",
+        r"\b(exact )?syntax\b",
+        r"\bwhiteboard\b",
+        r"\bprogram (a |an )\b",
+    ]
+    return any(re.search(pattern, lower) for pattern in patterns)
+
+
+def _is_voice_issue(text: str) -> bool:
+    if not text:
+        return False
+    return len(text.split()) > 45 or text.count("?") != 1
+
+
+def _rubric_text_for_skill(skill_name: Optional[str], job_skills: List[Dict[str, Any]]) -> str:
+    wanted = (skill_name or "").strip().lower()
+    if not wanted:
+        return ""
+    for skill in job_skills or []:
+        name = (skill.get("name") or skill.get("skill_name") or "").strip().lower()
+        if name != wanted:
+            continue
+        return " ".join(
+            str(skill.get(f"rubric_l{level}") or "")
+            for level in range(1, 6)
+        ).lower()
+    return ""
+
+
+def _expectation_is_rubric_derived(text: str, rubric_text: str) -> bool:
+    if not text or not rubric_text:
+        return False
+    cleaned = re.sub(r"\s+", " ", text.strip().lower())
+    if cleaned in rubric_text:
+        return True
+    overlap = extract_keywords(cleaned).intersection(extract_keywords(rubric_text))
+    return len(overlap) >= 4
+
+
+def _sanitize_llm_review_issues(
+    llm_review: BatchedBlueprintReviewResponse,
+    sections: List[Dict[str, Any]],
+    job_skills: List[Dict[str, Any]],
+) -> BatchedBlueprintReviewResponse:
+    """Drop LLM findings that contradict the deterministic rules or the rubric.
+
+    The reviewer is useful for judgment calls, but it occasionally inverts a
+    rule (flagging a probe for *not* naming a framework) or flags a rubric
+    expectation as irrelevant. Those findings must not block approval.
+    """
+    if not llm_review or not getattr(llm_review, "issues", None):
+        if llm_review:
+            llm_review.is_approved = True
+        return llm_review
+
+    records = _section_review_records(sections)
+    kept: List[LLMReviewItem] = []
+    seen: set[tuple[Any, ...]] = set()
+
+    for item in llm_review.issues:
+        raw_type = re.sub(r"[^a-z0-9]+", "_", (item.issue_type or "relevance").lower()).strip("_")
+        if any(k in raw_type for k in ("technique", "framework", "leak")):
+            issue_type = "technique_leakage"
+        elif any(k in raw_type for k in ("escalat", "containment", "repetition", "duplicate")):
+            issue_type = "escalation_containment"
+        elif any(k in raw_type for k in ("code", "coding", "syntax", "whiteboard")):
+            issue_type = "code_request"
+        elif "voice" in raw_type:
+            issue_type = "voice_suitability"
+        elif "seniority" in raw_type:
+            issue_type = "seniority_fit"
+        elif raw_type in {
+            "relevance",
+            "escalation_containment",
+            "technique_leakage",
+            "seniority_fit",
+            "voice_suitability",
+            "code_request",
+        }:
+            issue_type = raw_type
+        else:
+            issue_type = "relevance"
+
+        record = _record_for_review_item(records, item)
+        target = (item.target_item or "").strip().lower()
+        target_text = _review_target_text(record, target) if record else ""
+        reason = item.reason or ""
+        reason_lower = reason.lower()
+
+        # 1. Absence claims & meta-interview framework mentions: NEVER flag absence of frameworks.
+        if _is_absence_claim(reason) or "does not reference" in reason_lower or "meta-interview framework" in reason_lower or "framework names" in reason_lower:
+            continue
+
+        # 2. Expectations may describe testing/code/mocks; only spoken questions can violate voice-only.
+        if "expectation" in target or "expectation" in reason_lower:
+            if issue_type == "code_request" or "code" in reason_lower or "unit test" in reason_lower or "mock" in reason_lower:
+                continue
+
+        # 3. Probes are designed to explore the anchor scenario; never flag probes for repeating the anchor scenario.
+        if "probe" in target or target.startswith("probe"):
+            if "repeat" in reason_lower or "same scenario" in reason_lower or "anchor" in reason_lower:
+                continue
+
+        # 4. Relevance on Data Structures & Problem Solving: space-time trade-offs, edge cases, and complexity belong here.
+        skill_name_check = ((record["skill_name"] if record else "") or item.skill_name or "").lower()
+        if any(term in skill_name_check for term in ("data structure", "problem solving", "algorithm")):
+            if any(term in reason_lower for term in ("space-time", "trade-off", "trade off", "edge case", "complexity", "bounds", "overflow")):
+                continue
+
+        if issue_type == "technique_leakage":
+            if _is_absence_claim(reason) or not _contains_framework_leakage(target_text):
+                continue
+
+        if issue_type == "code_request":
+            if target.startswith("expectation") or "expectation" in reason_lower or not target_text:
+                continue
+            if not _contains_code_request(target_text):
+                continue
+
+        if issue_type == "escalation_containment" and record:
+            if target.startswith("probe") or "probe" in target:
+                continue
+            if "repeat" in reason_lower or "same scenario" in reason_lower or "duplicate" in reason_lower:
+                anchor_text = record["questions"].get("anchor", "")
+                if target_text and anchor_text and _token_similarity(target_text, anchor_text) < 0.35:
+                    continue
+
+        if issue_type == "voice_suitability" and not _is_voice_issue(target_text):
+            continue
+
+        if issue_type == "relevance" and record:
+            rubric_text = _rubric_text_for_skill(record["skill_name"], job_skills)
+            reason_tokens = extract_keywords(reason)
+            candidates = record["expectations"] if not target.startswith("expectation") else [target_text]
+            for expectation_text in candidates:
+                overlap = reason_tokens.intersection(extract_keywords(expectation_text))
+                if len(overlap) >= 3 and _expectation_is_rubric_derived(expectation_text, rubric_text):
+                    # The item is copied from the job's own rubric; the reviewer
+                    # is disagreeing with the rubric, not finding a mismatch.
+                    record = None
+                    break
+            if record is None:
+                continue
+
+        item.issue_type = issue_type
+        dedupe_key = (
+            item.section_index,
+            (item.skill_name or "").strip().lower(),
+            target,
+            issue_type,
+            (item.reason or "").strip().lower(),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        kept.append(item)
+
+    llm_review.issues = kept
+    llm_review.is_approved = not any(i.severity == "error" for i in kept)
+    if not kept:
+        llm_review.summary = "LLM review found no actionable issues after deterministic verification."
+    return llm_review
+
+
 def validate_blueprint(
     sections: List[Dict[str, Any]],
     job_skills: List[Dict[str, Any]],
@@ -904,6 +1221,8 @@ def validate_blueprint(
 ) -> ValidationReport:
     """Validate full blueprint against P0 coverage, reachability, word limits, format, variety, and relevance."""
     all_issues: List[ValidationIssue] = []
+    if llm_review:
+        llm_review = _sanitize_llm_review_issues(llm_review, sections, job_skills)
 
     # 1. P0 Coverage Check: Every P0 skill MUST have a section
     p0_skills = [

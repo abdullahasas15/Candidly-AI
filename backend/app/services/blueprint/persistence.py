@@ -336,6 +336,12 @@ async def update_or_fork_job_blueprint(
         for s in (job.skills or [])
     ]
 
+    # Apply expectation caps to updated sections
+    from backend.app.services.blueprint.generator import _apply_expectation_caps
+    for s in updated_sections:
+        if s.get("expectations"):
+            s["expectations"] = _apply_expectation_caps(s["expectations"])
+
     # Validate updated sections
     report = validate_blueprint(
         sections=updated_sections,
@@ -475,9 +481,21 @@ async def regenerate_blueprint_section(
     skill_dict = {
         "id": skill_info.id if skill_info else None,
         "name": target_sec.skill_name,
-        "priority_tier": target_sec.priority_tier or "P1",
+        "skill_name": target_sec.skill_name,
+        "category": getattr(skill_info, "category", None) or "Core Technical",
+        "priority_tier": target_sec.priority_tier or getattr(skill_info, "priority_tier", None) or "P1",
+        "weight_percentage": getattr(skill_info, "weight_percentage", None) or 0,
         "allocated_minutes": target_sec.allocated_minutes,
         "recommended_expectations": 4,
+        "rubric_l1": getattr(skill_info, "rubric_l1", None) or "",
+        "rubric_l2": getattr(skill_info, "rubric_l2", None) or "",
+        "rubric_l3": getattr(skill_info, "rubric_l3", None) or "",
+        "rubric_l4": getattr(skill_info, "rubric_l4", None) or "",
+        "rubric_l5": getattr(skill_info, "rubric_l5", None) or "",
+        "rubrics": {
+            f"l{level}": getattr(skill_info, f"rubric_l{level}", None) or ""
+            for level in range(1, 6)
+        },
     }
 
     # Generate fresh section content
@@ -486,6 +504,7 @@ async def regenerate_blueprint_section(
         seniority_level=job.seniority_level or "Mid-Level (L4)",
         skill_info=skill_dict,
         section_index=target_sec.order_index,
+        job_description=job.job_description or "",
     )
     new_content: SkillSectionContent = gen_result["content"]
 
@@ -508,13 +527,22 @@ async def regenerate_blueprint_section(
                     "target_expectation_ids": [],
                     "source": "llm",
                 },
-                {
-                    "question_role": "escalation",
-                    "question_text": new_content.escalation_question.question_text,
+            ]
+            if getattr(new_content, "anchor_alt_question", None) and new_content.anchor_alt_question.question_text:
+                q_list.append({
+                    "question_role": "anchor_alt",
+                    "question_text": new_content.anchor_alt_question.question_text,
+                    "trigger_condition": new_content.anchor_alt_question.trigger_condition,
                     "target_expectation_ids": [],
                     "source": "llm",
-                },
-            ]
+                })
+            q_list.append({
+                "question_role": "escalation",
+                "question_text": new_content.escalation_question.question_text,
+                "trigger_condition": new_content.escalation_question.trigger_condition,
+                "target_expectation_ids": [],
+                "source": "llm",
+            })
             for p in new_content.probes:
                 q_list.append({
                     "question_role": "probe",
