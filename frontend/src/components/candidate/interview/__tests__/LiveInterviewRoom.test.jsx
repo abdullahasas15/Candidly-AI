@@ -856,7 +856,7 @@ describe('LiveInterviewRoom Component', () => {
     }
   });
 
-  it('UIStatus completed does not immediately trigger onExit until SessionEnded arrives', async () => {
+  it('UIStatus completed shows thank-you screen; SessionEnded defers exit to click or grace', async () => {
     const onExitMock = vi.fn();
     render(
       <LiveInterviewRoom
@@ -878,14 +878,22 @@ describe('LiveInterviewRoom Component', () => {
       ws.onmessage({ data: JSON.stringify({ type: 'UIStatus', status: 'completed' }) });
     });
 
-    // onExit MUST NOT have been called yet because SessionEnded has not arrived
+    // onExit MUST NOT have been called yet because SessionEnded has not arrived,
+    // and the completion / thank-you screen is visible.
     expect(onExitMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId('completion-overlay')).toBeInTheDocument();
 
-    // Now emit SessionEnded
+    // Now emit SessionEnded: exit is deferred briefly so the candidate can read
+    // the thank-you screen instead of being torn down instantly.
     act(() => {
       ws.onmessage({ data: JSON.stringify({ type: 'SessionEnded' }) });
     });
 
+    expect(onExitMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId('completion-overlay')).toBeInTheDocument();
+
+    // The candidate clicks "Return to Dashboard" to leave immediately.
+    fireEvent.click(screen.getByTestId('completion-exit-button'));
     expect(onExitMock).toHaveBeenCalledTimes(1);
   });
 
@@ -1035,9 +1043,13 @@ describe('LiveInterviewRoom Component', () => {
       global.fetch.mock.calls.some((call) => typeof call[0] === 'string' && call[0].includes('/end'))
     ).toBe(true);
 
-    // SessionEnded arrives while the REST request is still in flight.
+    // SessionEnded arrives while the REST request is still in flight. Exit is
+    // deferred for the completion screen grace period; fire it here.
     act(() => {
       ws.onmessage({ data: JSON.stringify({ type: 'SessionEnded' }) });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(8200);
     });
     expect(onExitMock).toHaveBeenCalledTimes(1);
 

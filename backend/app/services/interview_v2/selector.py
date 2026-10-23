@@ -30,6 +30,7 @@ ALLOWED_ACTIONS = [
     "ADVANCE",
     "FOLLOW_UP",
     "CLARIFY_OR_REPEAT",
+    "SWAP_QUESTION",
     "CANDIDATE_QA",
     "END_INTERVIEW",
 ]
@@ -40,6 +41,7 @@ ALLOWED_REASON_CODES = [
     "ambiguity",
     "transcription_issue",
     "candidate_question",
+    "no_knowledge",
     "time_limit",
     "plan_complete",
 ]
@@ -52,6 +54,12 @@ class SelectorInput(BaseModel):
     candidate_answer: str
     next_planned_question: Optional[Dict[str, Any]] = None
     optional_prepared_followups: List[Dict[str, Any]] = Field(default_factory=list)
+    # Server-side deterministic signal: the committed answer reads as "I don't
+    # know / no idea / not familiar". The LLM must answer with SWAP_QUESTION.
+    no_knowledge_signal: bool = False
+    # Prepared alternative question on the same skill (anchor variant) used when
+    # swapping; the conductor resolves the authoritative wording from the plan.
+    alternative_question: Optional[Dict[str, Any]] = None
     followups_remaining: int = 1
     remaining_time_mins: float = 10.0
     allowed_actions: List[str] = Field(default_factory=lambda: list(ALLOWED_ACTIONS))
@@ -82,6 +90,8 @@ class SelectorOutput(BaseModel):
             raw_dec = "FOLLOW_UP"
         elif raw_dec in ("CLARIFY", "CLARIFY_OR_REPEAT", "REPHRASE", "OFF_TOPIC"):
             raw_dec = "CLARIFY_OR_REPEAT"
+        elif raw_dec in ("SWAP", "SWAP_QUESTION", "ALT", "ALTERNATIVE", "NO_EXPERIENCE", "NO_KNOWLEDGE"):
+            raw_dec = "SWAP_QUESTION"
         elif raw_dec in ("CANDIDATE_QA", "QA_REPLY"):
             raw_dec = "CANDIDATE_QA"
         elif raw_dec in ("CLOSE", "END", "END_INTERVIEW"):
@@ -159,6 +169,14 @@ def validate_selector_output(output: SelectorOutput, input_data: SelectorInput) 
             cur_text = input_data.current_question.get("text") or "Could you clarify that?"
             output.clarify_text = f"Could you clarify your answer regarding that?"
 
+    elif output.decision == "SWAP_QUESTION":
+        # The conductor resolves the authoritative alternative wording from the
+        # plan; surface the prepared alternative (if any) as the follow-up text.
+        if input_data.alternative_question and not output.follow_up_question:
+            output.follow_up_question = input_data.alternative_question.get("text") or None
+        if not output.reason_code or output.reason_code == "planned_next":
+            output.reason_code = "no_knowledge"
+
     # Check ack word count
     if output.ack and len(output.ack.split()) > 10:
         # Truncate rather than rejecting
@@ -196,6 +214,8 @@ async def select_next_interview_action(
         candidate_answer=input_data.candidate_answer,
         next_planned_question_json=json.dumps(input_data.next_planned_question, indent=2) if input_data.next_planned_question else "null",
         optional_prepared_followups_json=json.dumps(input_data.optional_prepared_followups, indent=2),
+        no_knowledge_signal="true" if input_data.no_knowledge_signal else "false",
+        alternative_question_json=json.dumps(input_data.alternative_question, indent=2) if input_data.alternative_question else "null",
         followups_remaining=str(input_data.followups_remaining),
         remaining_time_mins=f"{input_data.remaining_time_mins:.1f}",
         allowed_actions_json=json.dumps(input_data.allowed_actions),
@@ -309,6 +329,19 @@ async def select_next_interview_action(
         metrics.update(fb_metrics)
         return fallback_decision, metrics
 
+    # Hard guard: a no-knowledge admission ("I don't know") must never be probed
+    # or clarified, regardless of what the model returned.
+    if input_data.no_knowledge_signal and candidate_output.decision in ("FOLLOW_UP", "CLARIFY_OR_REPEAT"):
+        candidate_output = SelectorOutput(
+            decision="SWAP_QUESTION",
+            follow_up_question=(input_data.alternative_question or {}).get("text"),
+            ack=candidate_output.ack,
+            bridge=candidate_output.bridge or "No problem.",
+            reason_code="no_knowledge",
+            rationale="Candidate indicated no knowledge; swapping question",
+            confidence=0.9,
+        )
+
     metrics["validation_passed"] = True
     metrics["fallback_used"] = False
     return candidate_output, metrics
@@ -322,6 +355,22 @@ def _generate_plan_aware_fallback(input_data: SelectorInput, reason: str = "fall
         "fallback_reason": reason,
         "validation_passed": False,
     }
+
+    # A no-knowledge admission swaps the question (or advances) — never a probe.
+    if getattr(input_data, "no_knowledge_signal", False):
+        return (
+            SelectorOutput(
+                decision="SWAP_QUESTION",
+                follow_up_question=(input_data.alternative_question or {}).get("text"),
+                ack="No problem.",
+                bridge=None,
+                reason_code="no_knowledge",
+                rationale="Deterministic no-knowledge swap",
+                confidence=0.5,
+            ),
+            fallback_metrics,
+        )
+
     if next_q and input_data.remaining_time_mins > 1.0:
         out = SelectorOutput(
             decision="ADVANCE",

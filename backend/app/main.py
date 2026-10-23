@@ -82,7 +82,7 @@ from backend.app.services.blueprint.contracts import (
 )
 from backend.app.services.interview_v2.finalizer import (
     finalize_interview_session,
-    run_evaluation_for_session as _run_evaluation_for_session,
+    sweep_pending_evaluations,
 )
 import logging
 
@@ -225,6 +225,13 @@ async def lifespan(app: FastAPI):
                 "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS system_prompt_snapshot TEXT;",
                 "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS generation_run_id VARCHAR(36) REFERENCES interview_generation_runs(id) ON DELETE SET NULL;",
                 "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMP;",
+                # Exactly-one evaluation per session: dedupe legacy rows, then enforce uniqueness.
+                (
+                    "DELETE FROM interview_evaluations a USING interview_evaluations b "
+                    "WHERE a.session_id = b.session_id "
+                    "AND (a.created_at > b.created_at OR (a.created_at = b.created_at AND a.id > b.id));"
+                ),
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_interview_evaluations_session_id ON interview_evaluations (session_id);",
             ]
             for mig in migrations:
                 try:
@@ -282,7 +289,34 @@ async def lifespan(app: FastAPI):
     if os.getenv("SKIP_VOICE_WARMUP", "").lower() not in {"1", "true", "yes"}:
         asyncio.create_task(warmup_voice_models())
 
+    # Multi-worker guard: live runner state (ACTIVE_RUNNERS / SESSION_STATE_CACHE /
+    # disconnect-grace tasks) is process-local. Running more than one worker per
+    # instance without sticky WebSocket routing breaks reconnect resume and grace
+    # cancellation; the DB-backed ticket store alone is cross-worker safe.
+    web_concurrency = os.getenv("WEB_CONCURRENCY", "")
+    if web_concurrency.isdigit() and int(web_concurrency) > 1:
+        logger.warning(
+            "WEB_CONCURRENCY=%s detected. The live interview engine keeps per-session runner "
+            "state in-process. Run exactly ONE worker per instance (scale horizontally with a "
+            "sticky-routing load balancer) or reconnects and disconnect-grace cancels will misbehave.",
+            web_concurrency,
+        )
+
+    # Periodic sweeper: re-run evaluations stuck in pending (lost background task
+    # after restart, or a failed judge attempt) so scorecards never hang forever.
+    async def _evaluation_sweeper_loop() -> None:
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await sweep_pending_evaluations()
+            except Exception:
+                logger.exception("Evaluation sweeper loop error")
+
+    sweeper_task = asyncio.create_task(_evaluation_sweeper_loop())
+
     yield
+
+    sweeper_task.cancel()
     await engine.dispose()
 
 
@@ -385,10 +419,28 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware for local frontend development
+# CORS: '*' alongside allow_credentials=True is invalid per spec and leaks the API
+# to any origin. Dev defaults to the local Vite/Next ports; production must set
+# ALLOWED_ORIGINS explicitly.
+_extra_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if os.getenv("ENV", "development").lower() == "production":
+    if not _extra_origins:
+        logger.critical(
+            "ALLOWED_ORIGINS is not configured in production; cross-origin requests "
+            "from the frontend will be rejected by CORS."
+        )
+    _cors_origins = _extra_origins
+else:
+    _cors_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ] + _extra_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -521,11 +573,29 @@ def _candidate_application_payload(application: JobApplication) -> dict:
 
 @app.get("/api/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "service": "Candidly AI Platform Backend",
-        "database": "Connected"
-    }
+    """Liveness + real database readiness probe (used by frontend preflight)."""
+    started = time.perf_counter()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+        db_latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        return {
+            "status": "healthy",
+            "service": "Candidly AI Platform Backend",
+            "database": "Connected",
+            "database_latency_ms": db_latency_ms,
+        }
+    except Exception as exc:
+        logger.error("Health check database probe failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "unhealthy",
+                "service": "Candidly AI Platform Backend",
+                "database": "Disconnected",
+                "error": str(exc)[:200],
+            },
+        )
 
 @app.get("/api/health/ai")
 async def ai_health_check():

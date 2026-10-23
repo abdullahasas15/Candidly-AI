@@ -368,7 +368,12 @@ async def test_p0_4_websocket_authentication_ownership_and_incumbent_runner_prot
 
                 assert ws_valid.accepted is True
 
-                # Incumbent runner was stopped and evicted
+                # Incumbent runner was stopped and evicted. Session setup now
+                # includes a keyterms DB fetch, so poll briefly instead of
+                # assuming a fixed 50ms budget.
+                deadline = asyncio.get_running_loop().time() + 2.0
+                while asyncio.get_running_loop().time() < deadline and mock_incumbent_runner.stop.await_count == 0:
+                    await asyncio.sleep(0.02)
                 mock_incumbent_runner.stop.assert_awaited_once()
 
                 # Client received SessionConnected
@@ -903,7 +908,7 @@ async def test_rest_end_interview_endpoint_authorization_and_idempotency():
     token_recruiter = create_access_token({"sub": recruiter.id, "email": recruiter.email, "role": "recruiter", "id": recruiter.id})
     token_unrelated = create_access_token({"sub": unrelated_user.id, "email": unrelated_user.email, "role": "candidate", "id": unrelated_user.id})
 
-    with patch("backend.app.main._run_evaluation_for_session"):
+    with patch("backend.app.services.interview_v2.finalizer.run_evaluation_for_session"):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             # 1. Unauthenticated request -> 401
             res_unauth = await client.post(f"/api/interview-sessions/{session_id}/end")

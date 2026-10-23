@@ -23,8 +23,10 @@ Validates:
 6. Candidate Q&A Answer Grounding:
    - Selector CANDIDATE_QA evaluates candidate's committed question using authoritative job facts.
    - Suppresses ack on deferral without invalidating answer.
-7. Speculation Guard in Plan Mode:
-   - Speculative replies are disabled when script_plan is active.
+7. Speculation in Plan Mode:
+   - Speculative lookahead runs the SAME plan-bounded selector pipeline as the
+     committed decision (never the raw Director), so a reused speculation can
+     never bypass the plan. INTERVIEW_DISABLE_PLAN_SPECULATION=1 opts out.
 8. WebSocket Privacy:
    - Outbound UIStatus frames strip expected_key_points, rubrics, and internal plan hints.
 """
@@ -633,12 +635,14 @@ async def test_candidate_qa_evaluates_with_job_facts_and_suppresses_ack_on_defer
 
 
 # =============================================================================
-# 7. Speculation Guard in Plan Mode
+# 7. Speculation in Plan Mode (plan-safe lookahead)
 # =============================================================================
 
 @pytest.mark.asyncio
-async def test_speculation_disabled_in_plan_mode():
-    """Verify speculative reply generation is immediately disabled when a ScriptPlan is present."""
+async def test_speculation_in_plan_mode_uses_plan_selector():
+    """Speculative lookahead with a ScriptPlan must run the SAME plan-bounded
+    selector pipeline as the committed decision, never the raw Director, so a
+    reused speculation can never bypass the plan."""
     plan = ScriptPlan(
         plan_id="plan_spec_test",
         application_id="app_01",
@@ -652,13 +656,62 @@ async def test_speculation_disabled_in_plan_mode():
         script={"script_plan": plan.model_dump(), "questions": []},
     )
     assert runner.script_plan is not None
+    runner.state.phase = ConductorPhase.INTRO
 
-    with patch("backend.app.services.interview_v2.runner.generate_director_decision") as mock_director:
+    selector_result = (
+        SelectorOutput(
+            decision="FOLLOW_UP",
+            follow_up_question="How did you tune Kafka consumer lag in production?",
+            ack="Understood.",
+            reason_code="answer_gap",
+            confidence=0.9,
+        ),
+        {"model_name": "apac.amazon.nova-pro-v1:0", "provider": "bedrock"},
+    )
+
+    with patch(
+        "backend.app.services.interview_v2.runner.select_next_interview_action",
+        new_callable=AsyncMock,
+        return_value=selector_result,
+    ) as mock_selector:
         spec_event = StartSpeculativeReply(token="spec_01", source_text="I use Kafka for streaming.")
         await runner._handle_start_speculative_reply(spec_event)
 
-        # Director was never called because speculation is bypassed in plan mode
-        mock_director.assert_not_called()
+        assert runner.spec_task is not None
+        await asyncio.wait_for(runner.spec_task, timeout=5.0)
+
+        # The plan-bounded selector pipeline produced the speculative decision
+        mock_selector.assert_awaited_once()
+        assert runner.spec_decision is not None
+        assert runner.spec_decision.get("action") == "follow_up"
+
+
+@pytest.mark.asyncio
+async def test_speculation_opt_out_env():
+    """INTERVIEW_DISABLE_PLAN_SPECULATION=1 restores the old bypass behaviour."""
+    plan = ScriptPlan(
+        plan_id="plan_spec_opt",
+        application_id="app_01",
+        job_id="job_01",
+        input_hash="hash_01",
+        slots=[],
+    )
+
+    runner = SessionRunner(
+        session_id="sess_spec_opt",
+        script={"script_plan": plan.model_dump(), "questions": []},
+    )
+    runner.state.phase = ConductorPhase.INTRO
+
+    with patch(
+        "backend.app.services.interview_v2.runner.select_next_interview_action",
+        new_callable=AsyncMock,
+    ) as mock_selector:
+        with patch.dict(os.environ, {"INTERVIEW_DISABLE_PLAN_SPECULATION": "1"}):
+            spec_event = StartSpeculativeReply(token="spec_01", source_text="I use Kafka for streaming.")
+            await runner._handle_start_speculative_reply(spec_event)
+
+        mock_selector.assert_not_called()
         assert runner.spec_decision is None
 
 
@@ -1329,7 +1382,9 @@ def test_hypothetical_raw_action_selects_anchor_alt_without_no_experience_flag()
         now_ms=2000,
     )
     speak = next(e for e in effects if isinstance(e, Speak))
-    assert speak.question_text == "Hypothetically, how would you design an in-memory cache from scratch?"
+    # With no ack provided, the swap speaks a brief gracious bridge before the
+    # alternative question instead of jumping topics silently.
+    assert speak.question_text == "No problem. Hypothetically, how would you design an in-memory cache from scratch?"
     assert speak.text.strip() != ""
     assert "Hypothetically, how would you design an in-memory cache from scratch?" in speak.text
     assert new_state.current_slot_id == "slot_h_alt"

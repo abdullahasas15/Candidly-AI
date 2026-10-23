@@ -14,6 +14,13 @@ $current_question_json
 === CANDIDATE ANSWER ===
 $candidate_answer
 
+=== NO_KNOWLEDGE_SIGNAL ===
+$no_knowledge_signal
+(If true, the candidate admitted they do not know this topic. You MUST choose "SWAP_QUESTION" — never FOLLOW_UP or CLARIFY_OR_REPEAT.)
+
+=== ALTERNATIVE QUESTION (SAME SKILL) ===
+$alternative_question_json
+
 === NEXT PLANNED QUESTION(S) ===
 $next_planned_question_json
 
@@ -25,13 +32,13 @@ $allowed_actions_json
 
 Return ONLY valid JSON matching this schema:
 {
-  "decision": "ADVANCE | FOLLOW_UP | CLARIFY_OR_REPEAT | CANDIDATE_QA | END_INTERVIEW",
+  "decision": "ADVANCE | FOLLOW_UP | CLARIFY_OR_REPEAT | SWAP_QUESTION | CANDIDATE_QA | END_INTERVIEW",
   "planned_question_id": "required for ADVANCE, otherwise null",
   "follow_up_question": "required for FOLLOW_UP, otherwise null",
   "clarify_text": "required for CLARIFY_OR_REPEAT, otherwise null",
   "ack": "optional brief grounded gist, max 8 words, no question mark, or null",
   "bridge": "optional transition, max 12 words, no question mark, or null",
-  "reason_code": "planned_next | answer_gap | ambiguity | transcription_issue | candidate_question | time_limit | plan_complete",
+  "reason_code": "planned_next | answer_gap | ambiguity | transcription_issue | candidate_question | no_knowledge | time_limit | plan_complete",
   "rationale": "optional <= 20 words, or null",
   "confidence": 0.9
 }

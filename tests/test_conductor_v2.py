@@ -2317,3 +2317,61 @@ def test_phase_a5_validate_and_format_ack_enforces_grounding():
 
 
 
+
+
+# -----------------------------------------------------------------------------
+# Test: No-Knowledge Guard (candidate says "I don't know")
+# -----------------------------------------------------------------------------
+
+def test_no_knowledge_answer_never_probed():
+    """An 'I don't know' answer coerces any follow_up/clarify decision into the
+    anchor_alt swap, and a second admission moves on with a gracious transition."""
+    state, _ = start_session()
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
+    state, _ = step(state, ReadyButton(now_ms=2100))
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
+    state = complete_intro_and_advance(state)
+    assert state.phase == ConductorPhase.SKILL_ANCHOR
+
+    # First admission: "I don't know"
+    state, _ = step(state, TurnEnd(text="I don't know, I have never worked with Python concurrency.", turn_id="t_dk1", now_ms=5500))
+    state, effects = step(state, Tick(now_ms=5800))
+    req = next(e for e in effects if isinstance(e, RequestDecision))
+
+    alt_q = next(q for q in state.questions if q.kind == "anchor_alt" and q.skill_name == "Python")
+    # Model wrongly decides to probe deeper into the unknown topic:
+    state, effects = step(
+        state,
+        DecisionReady(
+            token=req.token,
+            decision={
+                "ack": "",
+                "action": "follow_up",
+                "followup": "Can you explain threading locks anyway?",
+                "covered_expectations": [],
+            },
+            now_ms=5900,
+        ),
+    )
+    speak_eff = next(e for e in effects if isinstance(e, Speak))
+    assert "threading locks" not in speak_eff.text, "must never probe an admission of no knowledge"
+    assert alt_q.question_text in speak_eff.text, "must swap to the prepared alternative question"
+    assert "No problem" in speak_eff.text
+    assert state.hypothetical_used_per_skill.get("Python") is True
+
+    # Second admission on the same skill: move on gracefully instead of swapping again
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=7000))
+    state, _ = step(state, TurnEnd(text="Honestly, I have no idea about that one.", turn_id="t_dk2", now_ms=9000))
+    state, effects = step(state, Tick(now_ms=9300))
+    req2 = next(e for e in effects if isinstance(e, RequestDecision))
+    state, effects = step(
+        state,
+        DecisionReady(
+            token=req2.token,
+            decision={"ack": "", "action": "follow_up", "followup": "What about locks?", "covered_expectations": []},
+            now_ms=9400,
+        ),
+    )
+    speak2 = next(e for e in effects if isinstance(e, Speak))
+    assert "What about locks?" not in speak2.text
+    assert "move on" in speak2.text.lower()

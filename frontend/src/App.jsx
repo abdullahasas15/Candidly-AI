@@ -15,8 +15,11 @@ import CandidateDashboard from './components/candidate/CandidateDashboard';
 const InterviewPreviewGallery = React.lazy(() => import('./components/candidate/interview/InterviewPreviewGallery'));
 
 export default function App() {
-  // Check for developer/preview gallery mode in URL
+  // Developer/preview gallery mode: only available in development builds so the
+  // mock-preview backdoor (which mounts the real room without connecting) is
+  // never shipped to production candidates.
   const isPreviewMode =
+    import.meta.env.DEV &&
     typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('preview') === 'interview';
 

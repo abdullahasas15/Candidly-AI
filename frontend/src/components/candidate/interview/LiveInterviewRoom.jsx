@@ -33,6 +33,7 @@ import { initAudioPipeline } from './audioWorklet';
  */
 const MAX_RECONNECT_ATTEMPTS = 5;
 const PERSISTENCE_FAILURE_EXIT_DELAY_MS = 2500;
+const COMPLETION_SCREEN_GRACE_MS = 8000;
 const INTERVIEW_EXIT_NOTICE_KEY = 'candidly-interview-exit-notice';
 
 export default function LiveInterviewRoom({
@@ -65,7 +66,8 @@ export default function LiveInterviewRoom({
 
   // Interview state from conductor
   const [phase, setPhase] = useState(mockState?.phase || 'greeting');
-  const [status, setStatus] = useState(mockState?.status || 'speaking'); // 'listening' | 'thinking' | 'speaking' | 'preparing_audio' | 'completed' | 'failed'
+  // 'connecting' | 'listening' | 'talking' | 'thinking' | 'speaking' | 'preparing_audio' | 'completed' | 'failed'
+  const [status, setStatus] = useState(mockState?.status || 'connecting');
   const statusRef = useRef(status);
   const [currentSection, setCurrentSection] = useState(mockState?.currentSection || 1);
   const [totalSections, setTotalSections] = useState(mockState?.totalSections || 5);
@@ -373,6 +375,26 @@ export default function LiveInterviewRoom({
     canonicalOnExit();
   }, [canonicalOnExit, clearStartupWatchdog, detachAudioStateListener]);
 
+  // After a completed interview, hold the thank-you screen for a short grace
+  // period (or until the candidate clicks) before unmounting the room.
+  const exitAfterCompletion = useCallback(() => {
+    if (fallbackExitTimerRef.current) {
+      clearTimeout(fallbackExitTimerRef.current);
+    }
+    fallbackExitTimerRef.current = setTimeout(() => {
+      fallbackExitTimerRef.current = null;
+      handleTerminalCleanup();
+    }, COMPLETION_SCREEN_GRACE_MS);
+  }, [handleTerminalCleanup]);
+
+  // Manual turn-commit accelerator: ends the current answer immediately instead
+  // of waiting for server-side silence detection to fire.
+  const handleCommitAnswer = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'commit_button' }));
+    }
+  }, []);
+
   // Terminal session error handler stops all hardware and halts reconnection
   const terminateSession = useCallback((msg) => {
     isTerminatedRef.current = true;
@@ -495,6 +517,15 @@ export default function LiveInterviewRoom({
           },
         });
         audioPipelineRef.current = pipeline;
+
+        // Bot speech that arrived while the pipeline was being rebuilt must not
+        // be dropped: drain the early buffer into the fresh playback worklet.
+        if (earlyAudioBufferRef.current.length > 0) {
+          earlyAudioBufferRef.current.forEach((chunk) => {
+            audioPipelineRef.current.feedPlaybackChunk(currentSpeechIdRef.current, chunk);
+          });
+          earlyAudioBufferRef.current = [];
+        }
       }
     } catch (err) {
       console.warn('Failed to switch microphone:', err);
@@ -865,14 +896,19 @@ export default function LiveInterviewRoom({
             setIsEndingSession(true);
             setConnectionState('ending');
             updateStatus('closing');
+            // Always arm the bounded fallback. Previously the timer was only
+            // re-armed when one already existed, so a server-initiated close
+            // (time limit) with no prior end_button left the candidate stuck
+            // on "Concluding..." forever if SessionEnded never arrived.
             if (endTimeoutRef.current) {
               clearTimeout(endTimeoutRef.current);
-              endTimeoutRef.current = setTimeout(() => {
-                if (performRestFallbackRef.current) {
-                  performRestFallbackRef.current();
-                }
-              }, 14000);
             }
+            endTimeoutRef.current = setTimeout(() => {
+              endTimeoutRef.current = null;
+              if (performRestFallbackRef.current) {
+                performRestFallbackRef.current();
+              }
+            }, 14000);
           } else if (msg.type === 'SessionEnded') {
             if (completionFallbackTimerRef.current) {
               clearTimeout(completionFallbackTimerRef.current);
@@ -882,7 +918,12 @@ export default function LiveInterviewRoom({
               clearTimeout(endTimeoutRef.current);
               endTimeoutRef.current = null;
             }
-            handleTerminalCleanup();
+            if (statusRef.current === 'completed') {
+              // Keep the thank-you screen visible briefly; exit on click or grace.
+              exitAfterCompletion();
+            } else {
+              handleTerminalCleanup();
+            }
           } else if (msg.type === 'TTSError') {
             // TTS failure recovered: transition out of stuck speaking
             updateStatus('listening');
@@ -967,6 +1008,13 @@ export default function LiveInterviewRoom({
               delete ttsDoneMapRef.current[msg.speech_id];
             }
             updateStatus('speaking');
+            // The finished answer stays visible only until the interviewer
+            // starts the next question — then the transcript bubble clears so
+            // the candidate focuses on the new question alone.
+            if (!msg.is_ack && !msg.is_bridge) {
+              setLastCandidateAnswer('');
+              setCandidateLiveTranscript('');
+            }
             if (
               msg.text &&
               !msg.is_ack &&
@@ -1070,6 +1118,7 @@ export default function LiveInterviewRoom({
     attachAudioStateListener,
     clearStartupWatchdog,
     handleTerminalCleanup,
+    exitAfterCompletion,
     terminateSession,
     updateStatus,
   ]);
@@ -1130,6 +1179,48 @@ export default function LiveInterviewRoom({
       clientReadySocketRef.current = null;
     };
   }, [clearStartupWatchdog, detachAudioStateListener]);
+
+  // Lightweight integrity monitoring promised in the preflight consent notice:
+  // tab switches, window blur, and paste events are recorded server-side as
+  // timestamps only (audio/video recording stays OFF).
+  useEffect(() => {
+    if (!canonicalSessionId || mockState?.skipConnect) return undefined;
+
+    const postIntegrityEvent = (eventType, details) => {
+      const tokenToUse =
+        token ||
+        localStorage.getItem('candidly-auth-token-candidate') ||
+        localStorage.getItem('candidly-auth-token');
+      fetch(`/api/interview-sessions/${canonicalSessionId}/integrity-events`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(tokenToUse ? { Authorization: `Bearer ${tokenToUse}` } : {}),
+        },
+        body: JSON.stringify({ event_type: eventType, details_json: details }),
+        keepalive: true,
+      }).catch(() => {});
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        postIntegrityEvent('tab_hidden', { at: new Date().toISOString() });
+      } else {
+        postIntegrityEvent('tab_visible', { at: new Date().toISOString() });
+      }
+    };
+    const handleBlur = () => postIntegrityEvent('window_blur', { at: new Date().toISOString() });
+    const handlePaste = () => postIntegrityEvent('paste', { at: new Date().toISOString() });
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('paste', handlePaste);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('paste', handlePaste);
+    };
+  }, [canonicalSessionId, token, mockState?.skipConnect]);
 
   // Resume browser audio after an autoplay/device suspension. This handler is
   // rendered as an explicit room-level prompt so the candidate is never left
@@ -1255,7 +1346,11 @@ export default function LiveInterviewRoom({
       });
       clearTimeout(abortTimeout);
       if (res.ok) {
-        handleTerminalCleanup();
+        if (statusRef.current === 'completed') {
+          exitAfterCompletion();
+        } else {
+          handleTerminalCleanup();
+        }
         return;
       }
       const errData = await res.json().catch(() => ({}));
@@ -1287,7 +1382,7 @@ export default function LiveInterviewRoom({
         handleTerminalCleanup();
       }, PERSISTENCE_FAILURE_EXIT_DELAY_MS);
     }
-  }, [canonicalSessionId, token, handleTerminalCleanup]);
+  }, [canonicalSessionId, token, handleTerminalCleanup, exitAfterCompletion]);
 
   useEffect(() => {
     performRestFallbackRef.current = performRestFallback;
@@ -1322,8 +1417,12 @@ export default function LiveInterviewRoom({
 
   // Status badge config
   const statusConfig = {
+    connecting: { label: 'Connecting...', dotColor: 'bg-zinc-500', textColor: 'text-zinc-400' },
     listening: { label: 'Listening', dotColor: 'bg-emerald-400', textColor: 'text-emerald-300' },
+    talking: { label: 'Your Turn', dotColor: 'bg-emerald-400', textColor: 'text-emerald-300' },
+    opening_listening: { label: 'Listening', dotColor: 'bg-emerald-400', textColor: 'text-emerald-300' },
     thinking: { label: 'Thinking', dotColor: 'bg-amber-400', textColor: 'text-amber-300' },
+    awaiting_decision: { label: 'Thinking', dotColor: 'bg-amber-400', textColor: 'text-amber-300' },
     speaking: { label: 'Speaking', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
     waiting_for_ready: { label: 'Ready Gate', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
     preparing_audio: { label: 'Preparing Audio', dotColor: 'bg-teal-400', textColor: 'text-teal-300' },
@@ -1502,16 +1601,6 @@ export default function LiveInterviewRoom({
       <main className="relative z-10 flex flex-1 flex-col md:flex-row items-center justify-between px-6 md:px-14 lg:px-20 pt-6 pb-28 gap-8 overflow-hidden">
         {/* Left Side: Bot Captions, Status Line, and Candidate Bubble */}
         <div className="flex flex-1 flex-col justify-center max-w-2xl w-full z-10">
-          {/* Previous Bot Caption (Dimmed Above) */}
-          {previousBotCaption && (
-            <p
-              data-testid="previous-caption"
-              className="mb-3 text-base md:text-lg font-light text-zinc-600 line-clamp-2 transition-opacity duration-700 select-text"
-            >
-              {previousBotCaption}
-            </p>
-          )}
-
           {/* Transition Line (Muted Above) */}
           {botTransitionText && (
             <p
@@ -1752,7 +1841,7 @@ export default function LiveInterviewRoom({
           )}
         </div>
 
-        {/* Button 3: Transcript Toggle */}
+        {/* Button 4: Transcript Toggle */}
         <button
           type="button"
           onClick={() => setIsTranscriptOpen((prev) => !prev)}
@@ -1766,6 +1855,23 @@ export default function LiveInterviewRoom({
         >
           <FileText className="h-4 w-4" />
         </button>
+
+        {/* Button 5: Manual Answer Commit Accelerator.
+            Shown only while the candidate is mid-answer (speech detected) so it
+            can never accidentally skip a question with an empty buffer. */}
+        {(status === 'listening' || status === 'talking' || status === 'opening_listening') &&
+          candidateLiveTranscript && (
+            <button
+              type="button"
+              onClick={handleCommitAnswer}
+              data-testid="pill-commit-answer"
+              title="Submit your answer now"
+              className="flex h-10 items-center gap-1.5 rounded-full bg-teal-600/90 px-4 text-[11px] font-semibold text-white transition-all hover:bg-teal-500 active:scale-95"
+            >
+              <CheckCircle2 className="h-4 w-4" />
+              <span>I&rsquo;m done answering</span>
+            </button>
+          )}
       </div>
 
       {/* 5. Transcript Slide-Out Drawer */}
@@ -1817,7 +1923,35 @@ export default function LiveInterviewRoom({
         </aside>
       )}
 
-      {/* 6. End Interview Confirmation Dialog */}
+      {/* 7. Completion / Thank-You Screen */}
+      {(connectionState === 'completed' || status === 'completed') && (
+        <div
+          data-testid="completion-overlay"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 p-6 backdrop-blur-md"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-teal-800/50 bg-zinc-950 p-8 text-center shadow-2xl">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-teal-500/10 text-teal-300">
+              <CheckCircle2 className="h-7 w-7" />
+            </div>
+            <h2 className="mt-4 text-xl font-semibold text-white">Interview Complete</h2>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-400">
+              Thank you{candidateName && candidateName !== 'Candidate' ? `, ${candidateName}` : ''}! Your
+              session has been submitted for evaluation. You can safely close this page or return to
+              your dashboard now.
+            </p>
+            <button
+              type="button"
+              data-testid="completion-exit-button"
+              onClick={handleTerminalCleanup}
+              className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-teal-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-teal-500 active:scale-[0.99]"
+            >
+              Return to Dashboard
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 8. End Interview Confirmation Dialog */}
       {confirmExitOpen && (
         <div
           data-testid="end-confirm-modal"

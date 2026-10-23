@@ -136,9 +136,11 @@ def test_prompt_loader_substitutes_variables():
         candidate_answer="I use asyncio.gather for network I/O.",
         next_planned_question_json='{"id": "q_next_1", "text": "Explain Python GIL limitations."}',
         optional_prepared_followups_json="[]",
+        no_knowledge_signal="false",
+        alternative_question_json="null",
         followups_remaining="2",
         remaining_time_mins="14.5",
-        allowed_actions_json='["ADVANCE", "FOLLOW_UP", "CLARIFY_OR_REPEAT", "CANDIDATE_QA", "END_INTERVIEW"]',
+        allowed_actions_json='["ADVANCE", "FOLLOW_UP", "CLARIFY_OR_REPEAT", "SWAP_QUESTION", "CANDIDATE_QA", "END_INTERVIEW"]',
     )
     assert "Job: Senior Python Dev" in rendered_user
     assert "How do you handle asyncio concurrency?" in rendered_user
@@ -776,3 +778,51 @@ async def test_gated_live_bedrock_plan_and_selector_acceptance():
     assert output.decision in ("ADVANCE", "FOLLOW_UP")
     if output.decision == "ADVANCE":
         assert output.planned_question_id == plan.slots[1].id
+
+
+# =============================================================================
+# No-Knowledge Guard: "I don't know" answers must swap, never probe
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_no_knowledge_signal_coerces_follow_up_to_swap():
+    """Even when the model returns FOLLOW_UP, a no-knowledge admission is coerced
+    to SWAP_QUESTION with the prepared alternative question."""
+    inp = SelectorInput(
+        candidate_and_job_summary="Job: Senior Python Dev.",
+        current_question={"id": "q1", "text": "How do you tune asyncio event loops?"},
+        candidate_answer="I don't know, I have never used asyncio.",
+        no_knowledge_signal=True,
+        alternative_question={"id": "q_alt", "text": "How do you approach debugging slow code?"},
+        followups_remaining=2,
+        remaining_time_mins=12.0,
+    )
+
+    async def misbehaving_llm(**kwargs):
+        return {
+            "decision": "FOLLOW_UP",
+            "follow_up_question": "But how do you tune the loop anyway?",
+            "reason_code": "answer_gap",
+        }
+
+    out, metrics = await select_next_interview_action(inp, llm_fn=misbehaving_llm)
+    assert out.decision == "SWAP_QUESTION"
+    assert out.reason_code == "no_knowledge"
+    assert out.follow_up_question == "How do you approach debugging slow code?"
+
+
+@pytest.mark.asyncio
+async def test_no_knowledge_fallback_swaps_instead_of_probing():
+    """The deterministic plan-aware fallback also swaps on a no-knowledge signal."""
+    inp = SelectorInput(
+        candidate_and_job_summary="Job: Senior Python Dev.",
+        current_question={"id": "q1", "text": "How do you tune asyncio event loops?"},
+        candidate_answer="I have no idea about that.",
+        next_planned_question={"id": "q_next", "text": "Explain Python GIL limitations."},
+        no_knowledge_signal=True,
+        followups_remaining=2,
+        remaining_time_mins=12.0,
+    )
+    out, _ = _generate_plan_aware_fallback(inp, "llm_error")
+    assert out.decision == "SWAP_QUESTION"
+    assert out.reason_code == "no_knowledge"

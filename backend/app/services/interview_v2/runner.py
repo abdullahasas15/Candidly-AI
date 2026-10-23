@@ -20,7 +20,7 @@ import re
 import time
 import uuid
 from datetime import datetime
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy import select, update
@@ -82,6 +82,7 @@ from backend.app.services.interview_v2.conductor import (
     get_next_plan_question,
     get_skill_time_left_ms,
     is_ack_grounded,
+    looks_like_no_knowledge_answer,
     step,
     DecisionContextSnapshot,
     OutboundSpeechLedger,
@@ -107,8 +108,10 @@ from backend.app.services.voice.flux_stt import (
 
 logger = logging.getLogger("candidly.interview_v2.runner")
 
-# Pre-synthesized 8 bridge clips
-BRIDGE_PHRASES: List[str] = [
+# Pre-synthesized bridge clips. Every conductor BRIDGES phrase MUST be present so
+# the rotating live bridge never falls back to silent PCM; extra phrases keep the
+# legacy cache warm for tests and the dev cockpit.
+BRIDGE_PHRASES: List[str] = list(dict.fromkeys(list(BRIDGES) + [
     "Got it.",
     "Thanks.",
     "Okay.",
@@ -117,7 +120,7 @@ BRIDGE_PHRASES: List[str] = [
     "I see.",
     "Makes sense.",
     "Thank you.",
-]
+]))
 
 # In-memory pre-synthesized bridge audio cache: phrase -> 24kHz linear16 PCM bytes
 BRIDGE_AUDIO_CACHE: Dict[str, bytes] = {}
@@ -481,6 +484,26 @@ def normalize_text(text: str) -> str:
     return cleaned
 
 
+QUESTION_STARTER_WORDS: Set[str] = {
+    "what", "how", "why", "when", "where", "who", "whom", "which", "whose",
+    "is", "are", "am", "was", "were", "do", "does", "did", "can", "could",
+    "will", "would", "should", "shall", "may", "might", "have", "has",
+}
+
+
+def looks_like_candidate_question(text: str) -> bool:
+    """Heuristic: does the committed answer read as a question to the interviewer?
+    Used to decide whether a streaming ack must wait for the final decision (a
+    CANDIDATE_QA deferral must speak zero ack per the A6.2 rule)."""
+    cleaned = (text or "").strip().lower()
+    if not cleaned:
+        return False
+    if "?" in cleaned:
+        return True
+    words = cleaned.split()
+    return bool(words) and words[0] in QUESTION_STARTER_WORDS
+
+
 # -----------------------------------------------------------------------------
 # Speculative Reply Manager
 # -----------------------------------------------------------------------------
@@ -667,6 +690,12 @@ class SessionRunner:
         self.last_decision_latency_ms: float = 0.0
         self.last_spoken_tts_text: str = ""
 
+        # Transcript sequencing: one monotonic counter shared by bot questions
+        # and candidate answers so the stored transcript interleaves in true
+        # chronological order (required by the post-interview judge).
+        self.transcript_seq: int = 0
+        self._persisted_bot_texts: Set[str] = set()
+
         # Latency tracking
         self.current_metrics = TurnLatencyMetrics()
         self.latency_history: List[Dict[str, Any]] = []
@@ -697,6 +726,22 @@ class SessionRunner:
             return
         self.running = True
 
+        # Continue transcript sequencing from whatever is already stored so a
+        # reconnect never reuses sequence numbers.
+        try:
+            from sqlalchemy import func as sa_func
+            async with AsyncSessionLocal() as db:
+                res = await db.execute(
+                    select(sa_func.max(InterviewTranscriptTurn.sequence_number)).where(
+                        InterviewTranscriptTurn.session_id == self.session_id
+                    )
+                )
+                max_seq = res.scalar()
+                if isinstance(max_seq, int) and max_seq > self.transcript_seq:
+                    self.transcript_seq = max_seq
+        except Exception as seq_err:
+            logger.debug("Could not initialize transcript sequence: %s", seq_err)
+
         # Initialize script if at start or aborted welcome (COMPLETED is NOT reset)
         if self.state.phase in (ConductorPhase.INIT, ConductorPhase.WELCOME):
             self.state = ConductorState()
@@ -711,26 +756,34 @@ class SessionRunner:
     async def _reconnect_resync(self) -> None:
         """On active session reconnection, send UIStatus and re-speak current question if bot was speaking."""
         await asyncio.sleep(0.15)
-        curr_q = self.state.current_question
+        curr_q = _get_current_question(self.state)
         text = curr_q.question_text if curr_q else ""
-        skill = curr_q.skill if curr_q else ""
+        skill = (curr_q.skill_name if curr_q else "") or (
+            self.state.skill_names[self.state.current_skill_index]
+            if 0 <= self.state.current_skill_index < len(self.state.skill_names)
+            else ""
+        )
         if self.websocket:
             try:
                 await self.websocket.send_json({
                     "type": "UIStatus",
-                    "status": self.state.status,
+                    "status": self.state.phase.value,
                     "phase": self.state.phase.value,
                     "question_index": self.state.current_question_index,
                     "payload": {
                         "question_text": text,
+                        "display_question": text,
                         "skill": skill,
+                        "topic_label": skill,
+                        "topic_index": self.state.topic_index,
+                        "topic_count": self.state.topic_count,
                     },
                 })
                 if self.state.bot_speaking and text:
                     self.state.speech_seq += 1
                     speech_id = f"speech_{self.state.speech_seq}"
                     self.state.active_speech_id = speech_id
-                    await self._handle_speak(Speak(text=text, speech_id=speech_id))
+                    await self._handle_speak(Speak(text=text, speech_id=speech_id, question_text=text))
             except Exception as e:
                 logger.debug("Failed reconnect resync: %s", e)
 
@@ -1135,6 +1188,33 @@ class SessionRunner:
             except Exception:
                 pass
 
+        # Persist the bot's spoken question so the stored transcript interleaves
+        # full Q&A context for the post-interview judge and recruiter replay.
+        # Offloaded to a task so the DB write never delays TTS streaming.
+        bot_text = (getattr(effect, "question_text", None) or effect.text or "").strip()
+        if bot_text and bot_text not in self._persisted_bot_texts:
+            self._persisted_bot_texts.add(bot_text)
+            self.transcript_seq += 1
+            bot_seq = self.transcript_seq
+            bot_kind = str(getattr(effect, "kind", "") or "question")
+
+            async def _persist_bot_turn():
+                try:
+                    async with AsyncSessionLocal() as db:
+                        db.add(InterviewTranscriptTurn(
+                            session_id=self.session_id,
+                            turn_type=bot_kind,
+                            speaker="ai",
+                            text=bot_text,
+                            spoken_text=(effect.text or "").strip() or None,
+                            sequence_number=bot_seq,
+                        ))
+                        await db.commit()
+                except Exception as e:
+                    logger.debug("Could not persist bot transcript turn: %s", e)
+
+            asyncio.create_task(_persist_bot_turn())
+
         if self.websocket:
             if self.speech_task and not self.speech_task.done():
                 self.speech_task.cancel()
@@ -1442,13 +1522,14 @@ class SessionRunner:
             f"CoreExpectations: {json.dumps(exp_ids)}\n"
             f"StretchExpectations: {json.dumps(stretch_ids)}\n"
             f"FollowupsUsed: {followups_used}/2, TimeLeftSec: {time_left_ms // 1000}\n"
-            "DECISION RULES:\n"
-            "1. strong answer -> escalate (targeting stretch expectations if core expectations covered and time left > 120s; or next if all core and stretch covered).\n"
-            "2. vague or under ~15 words -> clarify asking for concrete example from their work (max once per skill).\n"
-            "3. no_experience -> hypothetical (using anchor_alt question).\n"
-            "4. off_topic -> action 'off_topic', followup = short re-ask in simpler words sharing >=3 content words.\n"
-            "5. matching probe trigger -> probe.\n"
-            "6. if followups >= 2 or time left < 60s -> action 'next'.\n"
+                    "DECISION RULES:\n"
+                    "1. strong answer -> escalate (targeting stretch expectations if core expectations covered and time left > 120s; or next if all core and stretch covered).\n"
+                    "2. vague or under ~15 words -> clarify asking for concrete example from their work (max once per skill).\n"
+                    "3. no_experience -> hypothetical (using anchor_alt question).\n"
+                    "3b. answer admits no knowledge ('i don't know', 'no idea', 'not familiar', 'never used') -> action 'hypothetical' with no_experience=true. NEVER clarify or probe an admission of no knowledge.\n"
+                    "4. off_topic -> action 'off_topic', followup = short re-ask in simpler words sharing >=3 content words.\n"
+                    "5. matching probe trigger -> probe.\n"
+                    "6. if followups >= 2 or time left < 60s -> action 'next'.\n"
             "ACK RULES:\n"
             f"- ack: plain restatement of ONE specific thing candidate said, <=12 words, 1 sentence, no praise words, no '?'. {avoid_opener}\n"
             "- No praise words (no great, good, strong, solid, excellent, impressive, nice, perfect, clean, correct).\n"
@@ -1680,6 +1761,24 @@ class SessionRunner:
                                     next_slot = s
                                     break
 
+                        # Deterministic no-knowledge signal ("I don't know" style
+                        # answers) + the prepared alternative question on this
+                        # skill, both fed to the selector so it can swap instead
+                        # of probing an admission of no knowledge.
+                        no_knowledge = looks_like_no_knowledge_answer(effect.answer_text)
+                        alternative_slot = None
+                        if self.script_plan:
+                            cur_skill_name = (current_slot.skill_name if current_slot else "") or effect.skill
+                            asked_texts = {normalize_text_for_hash(q) for q in self.state.asked_questions_history}
+                            for s in self.script_plan.slots:
+                                if (
+                                    s.kind == "anchor_alt"
+                                    and (s.skill_name or "") == cur_skill_name
+                                    and normalize_text_for_hash(s.question_text) not in asked_texts
+                                ):
+                                    alternative_slot = s
+                                    break
+
                         cand_summary = self.script.get("job_summary")
                         if not cand_summary:
                             job_rec = self.state.job_record or self.script.get("job_record", {})
@@ -1710,28 +1809,37 @@ class SessionRunner:
                                 {"id": f"probe_{i}", "text": p, "parent_question_id": current_slot.id if current_slot else None}
                                 for i, p in enumerate(current_slot.followup_probes if current_slot else [])
                             ],
+                            no_knowledge_signal=no_knowledge,
+                            alternative_question=(
+                                {"id": alternative_slot.id, "text": alternative_slot.question_text, "skill_name": alternative_slot.skill_name}
+                                if alternative_slot else None
+                            ),
                             followups_remaining=max(0, getattr(current_slot, "follow_up_depth_allowed", 2) - effect.followups_used),
                             remaining_time_mins=max(0.0, effect.time_left_ms / 60000.0),
                         )
 
-                        # Buffer selector-level streaming acks: a Candidate Q&A decision
-                        # must not speak an ack that the final validation later rejects.
-                        streamed_selector_acks: List[Any] = []
+                        # Ack-first streaming: the ack reaches the candidate as soon as
+                        # the model emits it. Exception: when the committed answer itself
+                        # reads like a question, hold the ack until the decision lands so
+                        # a CANDIDATE_QA deferral still speaks zero ack (A6.2 rule).
+                        answer_is_question = looks_like_candidate_question(effect.answer_text)
+                        held_qa_acks: List[Any] = []
 
-                        def _buffer_selector_ack(payload: Any) -> None:
-                            streamed_selector_acks.append(payload)
+                        def _ack_sink(payload: Any) -> None:
+                            if answer_is_question:
+                                held_qa_acks.append(payload)
+                            else:
+                                on_stream_ack(payload)
 
                         selector_out, sel_metrics = await select_next_interview_action(
                             selector_input,
                             llm_fn=self.llm_fn,
-                            on_stream_ack=_buffer_selector_ack,
+                            on_stream_ack=_ack_sink,
                         )
                         metrics.update(sel_metrics)
-                        if selector_out.decision != "CANDIDATE_QA":
-                            for payload in streamed_selector_acks:
+                        if held_qa_acks and selector_out.decision != "CANDIDATE_QA":
+                            for payload in held_qa_acks:
                                 on_stream_ack(payload)
-                        else:
-                            streamed_selector_acks.clear()
 
                         if selector_out.decision == "ADVANCE":
                             target_slot = next_slot
@@ -1802,6 +1910,21 @@ class SessionRunner:
                                 "target_skill": effect.skill,
                                 "ack": selector_out.ack or "",
                                 "transition": "",
+                                "covered_expectations": [],
+                            }
+                        elif selector_out.decision == "SWAP_QUESTION":
+                            # Candidate signaled no knowledge: hand off to the
+                            # conductor's no-experience path, which asks the
+                            # prepared alternative question (anchor_alt) on this
+                            # skill once, then moves on with a gracious transition.
+                            decision_dict = {
+                                "action": "hypothetical",
+                                "no_experience": True,
+                                "question": "",
+                                "followup": "",
+                                "target_skill": effect.skill,
+                                "ack": selector_out.ack or "",
+                                "transition": selector_out.bridge or "No problem.",
                                 "covered_expectations": [],
                             }
                         elif selector_out.decision == "CANDIDATE_QA":
@@ -1885,7 +2008,11 @@ class SessionRunner:
                                 "covered_expectations": [],
                             }
 
-                        self.recent_turns.append({"question": effect.question_text, "answer": effect.answer_text})
+                        # Dedupe guard: the speculative lookahead may have recorded this
+                        # turn already via the shared decision pipeline.
+                        turn_entry = {"question": effect.question_text, "answer": effect.answer_text}
+                        if not self.recent_turns or self.recent_turns[-1] != turn_entry:
+                            self.recent_turns.append(turn_entry)
                 logger.info(
                     "Decision Call Latency Diagnosis: TTFT=%sms, Ack=%sms, Total=%sms, Model=%s, Provider=%s, 429s=%d, Tokens=%d, Thinking=%s",
                     metrics.get("ttft_ms"),
@@ -2010,9 +2137,13 @@ class SessionRunner:
         return ""
 
     async def _handle_start_speculative_reply(self, effect: StartSpeculativeReply) -> None:
-        """Start speculative LLM reply generation in background on EagerTurnEnd."""
-        if self.script_plan is not None:
-            # Speculation disabled in bounded plan mode: cannot bypass plan selector
+        """Start speculative LLM reply generation in background on EagerTurnEnd.
+
+        In bounded plan mode the speculation runs the SAME plan-bounded selector
+        pipeline as the committed decision, so a reused speculation can never
+        bypass the plan. Set INTERVIEW_DISABLE_PLAN_SPECULATION=1 to opt out.
+        """
+        if os.getenv("INTERVIEW_DISABLE_PLAN_SPECULATION", "").lower() in {"1", "true", "yes"}:
             return
 
         self.spec_token = effect.token
@@ -2068,87 +2199,13 @@ class SessionRunner:
 
         async def _run_spec():
             try:
-                model_name = os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite")
-                if self.llm_fn:
-                    res = self.llm_fn(req.question_text, req.answer_text, req.escalation_text or req.question_text)
-                    if hasattr(res, "__aiter__"):
-                        chunks = []
-                        async for c in res:
-                            chunks.append(c)
-                        full_text = "".join(chunks).strip()
-                    elif asyncio.iscoroutine(res):
-                        full_text = str(await res).strip()
-                    else:
-                        full_text = str(res).strip()
-
-                    dec = None
-                    if full_text.startswith("{") and full_text.endswith("}"):
-                        try:
-                            dec = json.loads(full_text)
-                        except Exception:
-                            pass
-                    if not dec:
-                        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", full_text) if s.strip()]
-                        ack = sentences[0] if sentences else "Understood."
-                        q = sentences[1] if len(sentences) >= 2 else (req.escalation_text or req.question_text)
-                        dec = {
-                            "ack": ack,
-                            "action": "probe",
-                            "followup": q,
-                            "covered_expectations": [],
-                            "no_experience": False,
-                        }
-                    self.spec_inference_latency_ms = (time.perf_counter() - self.spec_start_wall_time) * 1000.0
-                    self.spec_decision = dec
-                else:
-                    spec_job_facts: Dict[str, str] = {}
-                    if req.skill == "Candidate Q&A":
-                        system_prompt, user_prompt, spec_job_facts = self._build_qa_prompt(req.answer_text, self.state.last_ack_opener)
-                        decision_dict, _ = await stream_decision_with_ack_first(
-                            system_prompt=system_prompt,
-                            user_prompt=user_prompt,
-                            max_output_tokens=160,
-                            temperature=0.1,
-                        )
-                        self.spec_decision = decision_dict
-                    else:
-                        brief = self.state.interviewer_brief or (
-                            self.script.get("interviewer_brief") or self.script.get("metadata", {}).get("interviewer_brief", "")
-                        )
-                        available_comps = []
-                        for s_name in self.state.skill_names:
-                            sq = self.state.skill_questions.get(s_name, {})
-                            anchor = sq.get("anchor")
-                            available_comps.append({
-                                "name": s_name,
-                                "weight": 1.0,
-                                "anchor_question": anchor.question_text if anchor else "",
-                                "expected_key_points": anchor.expected_key_points if anchor else [],
-                            })
-
-                        director_context = {
-                            "interviewer_brief": brief,
-                            "current_phase": self.state.phase.value,
-                            "current_skill": req.skill,
-                            "current_question": req.question_text,
-                            "candidate_answer": req.answer_text,
-                            "recent_turns": self.state.director_memory.get("recent_turns", []),
-                            "topic_summaries": self.state.director_memory.get("topic_summaries", {}),
-                            "coverage": self.state.director_memory.get("coverage", {}),
-                            "unresolved_threads": self.state.director_memory.get("unresolved_threads", []),
-                            "asked_questions": self.state.asked_questions_history,
-                            "remaining_topics": [s for s in self.state.skill_names if s not in self.state.director_memory.get("topics_completed", []) and s != req.skill],
-                            "available_competencies": available_comps,
-                            "followups_used_in_topic": req.followups_used,
-                            "time_left_ms": req.time_left_ms,
-                        }
-
-                        dec_obj, spec_metrics = await generate_director_decision(
-                            context=director_context,
-                            mock_llm_fn=self.llm_fn,
-                        )
-                        self.spec_inference_latency_ms = (time.perf_counter() - self.spec_start_wall_time) * 1000.0
-                        self.spec_decision = dec_obj.to_dict()
+                # Speculative lookahead runs the SAME decision pipeline as the committed
+                # call (plan-bounded selector / QA prompts). AckReady/DecisionReady
+                # events it enqueues carry the speculation token and are dropped by
+                # the conductor until the matching commit makes them current.
+                await self._call_decision_llm(req)
+                self.spec_inference_latency_ms = (time.perf_counter() - self.spec_start_wall_time) * 1000.0
+                self.spec_decision = self.last_raw_decision
             except Exception as e:
                 logger.debug("Speculative decision error: %s", e)
                 self.spec_decision = None
@@ -2166,7 +2223,18 @@ class SessionRunner:
 
     async def _handle_play_bridge(self, effect: PlayBridge) -> None:
         """Play a pre-synthesized conversational bridge clip immediately (0ms latency)."""
-        cached_pcm = BRIDGE_AUDIO_CACHE.get(effect.text) or generate_fallback_pcm(0.35)
+        cached_pcm = BRIDGE_AUDIO_CACHE.get(effect.text)
+        if not cached_pcm:
+            # Cache miss: synthesize on the fly and cache so this phrase is instant next time.
+            try:
+                chunks: List[bytes] = []
+                async for chunk in self.aura_client.speak(effect.text):
+                    chunks.append(chunk)
+                cached_pcm = b"".join(chunks) or generate_fallback_pcm(0.35)
+                BRIDGE_AUDIO_CACHE[effect.text] = cached_pcm
+            except Exception as synth_err:
+                logger.warning("On-the-fly bridge synthesis failed for '%s': %s", effect.text, synth_err)
+                cached_pcm = generate_fallback_pcm(0.35)
         self.current_metrics.used_bridge = True
         logger.info("Playing pre-synthesized bridge '%s' (%d bytes) for speech %s", effect.text, len(cached_pcm), effect.speech_id)
 
@@ -2284,12 +2352,13 @@ class SessionRunner:
         # Persist to database (InterviewTranscriptTurn)
         try:
             async with AsyncSessionLocal() as db:
+                self.transcript_seq += 1
                 db_turn = InterviewTranscriptTurn(
                     session_id=self.session_id,
                     turn_type=turn.get("question_kind", "candidate_answer"),
                     speaker="candidate",
                     text=turn.get("answer", ""),
-                    sequence_number=turn.get("turn_index", 1),
+                    sequence_number=self.transcript_seq,
                 )
                 db.add(db_turn)
                 await db.commit()

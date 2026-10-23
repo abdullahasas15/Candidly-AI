@@ -584,7 +584,7 @@ class SpeakAck:
 
 @dataclass(frozen=True)
 class CancelSpeech:
-    pass
+    speech_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1196,6 +1196,40 @@ INTRO_FILTER_WORDS: Set[str] = {
     "role", "roles", "past", "recent", "currently", "started", "company", "companies",
     "team", "teams", "myself", "sure", "hello", "well",
 }
+
+
+# Short-answer phrases that signal the candidate does not know the topic.
+# Strong phrases trigger at up to ~25 words; weaker hedges only when the whole
+# answer is very short (so "not sure, but I used Kafka with..." still counts as
+# partial knowledge worth probing).
+NO_KNOWLEDGE_STRONG_PHRASES: List[str] = [
+    "i don't know", "i dont know", "i do not know", "no idea",
+    "no experience", "never used", "never worked", "not familiar",
+    "haven't used", "have not used", "not aware", "no exposure",
+]
+NO_KNOWLEDGE_WEAK_PHRASES: List[str] = [
+    "not sure", "don't remember", "dont remember", "can't recall",
+    "cant recall", "not my area", "not my expertise", "skip",
+]
+
+
+def looks_like_no_knowledge_answer(text: str) -> bool:
+    """True when a short committed answer signals the candidate does not know
+    the current topic. Used to guarantee the interviewer swaps the question or
+    moves on instead of probing or clarifying an admission of no knowledge."""
+    if not text:
+        return False
+    cleaned = unicodedata.normalize("NFKC", text).strip().lower()
+    cleaned = cleaned.replace("’", "'").replace("‘", "'")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    words = cleaned.split()
+    if not words or len(words) > 25:
+        return False
+    if any(p in cleaned for p in NO_KNOWLEDGE_STRONG_PHRASES):
+        return True
+    if len(words) <= 8 and any(p in cleaned for p in NO_KNOWLEDGE_WEAK_PHRASES):
+        return True
+    return False
 
 
 def is_qa_done_phrase(text: str) -> bool:
@@ -2613,33 +2647,6 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
 
         return new_state, effects
 
-        # Cancel decision_timeout and ack_fallback timers
-        if "decision_timeout" in new_state.active_timers:
-            effects.append(CancelTimer(name="decision_timeout"))
-            new_state.active_timers.pop("decision_timeout", None)
-        if "ack_fallback" in new_state.active_timers:
-            effects.append(CancelTimer(name="ack_fallback"))
-            new_state.active_timers.pop("ack_fallback", None)
-
-        ack_currently_playing = bool(
-            new_state.bot_speaking
-            and new_state.active_speech_id
-            and new_state.active_speech_id.startswith("ack_speech_")
-        )
-        current_active_speech_id = new_state.active_speech_id
-
-        new_state, dec_effects = validate_and_apply_decision(new_state, event.decision, event.now_ms)
-
-        # If ack speech is currently active, defer speaking question until BotSpeechDone for the ack
-        if ack_currently_playing:
-            new_state.active_speech_id = current_active_speech_id
-            new_state.bot_speaking = True
-            new_state.pending_question_effects = dec_effects
-        else:
-            effects.extend(dec_effects)
-
-        return new_state, effects
-
     # 12. Tick (Timer checks, hard cap, silence progression, bridge playback, decision timeout)
     if isinstance(event, Tick):
         now_ms = event.now_ms
@@ -3235,6 +3242,21 @@ def validate_and_apply_decision(
         if not transition_prefix:
             transition_prefix = f"Let's begin with {target_skill}."
 
+    # 2.7 No-knowledge guard: a candidate who admits they don't know the topic
+    # must never be probed deeper or asked to clarify that admission. Coerce the
+    # decision into the no-experience path, which swaps to the alternative
+    # prepared question once and otherwise moves on with a neutral transition.
+    if (
+        looks_like_no_knowledge_answer(answer)
+        and state.phase != ConductorPhase.CANDIDATE_QA
+        and is_valid
+        and action in ("follow_up", "clarify")
+    ):
+        no_experience = True
+        action = "follow_up"
+        question_text = ""
+        probe_id = None
+
     # 3. Rephrase action
     if is_valid and action == "rephrase":
         rephrased_text = question_text or (curr_q.question_text if curr_q else "")
@@ -3305,6 +3327,10 @@ def validate_and_apply_decision(
                     pass
                 else:
                     question_text = question_text.strip() or "Could you walk me through a similar scenario if you had faced this?"
+            # Brief spoken bridge so the swap does not feel abrupt, but never
+            # duplicate a spoken ack ("No problem." ack + "No problem." transition).
+            if not transition_prefix and not ack:
+                transition_prefix = "No problem."
 
     # 5.5 Handle "off_topic"
     off_topic_move_on = False
@@ -3442,6 +3468,21 @@ def validate_and_apply_decision(
             question_text = anchor_q.question_text if anchor_q else ""
             transition_prefix = f"Thanks for sharing that background. Let's start with {target_skill}."
         else:
+            # No-knowledge guard for the deterministic fallback too: never pick a
+            # probe or a clarify when the candidate just said they don't know.
+            if looks_like_no_knowledge_answer(answer) and state.phase != ConductorPhase.CANDIDATE_QA:
+                anchor_alt_q = sq.get("anchor_alt")
+                if anchor_alt_q and not state.hypothetical_used_per_skill.get(curr_skill, False):
+                    state.hypothetical_used_per_skill[curr_skill] = True
+                    action = "follow_up"
+                    chosen_q = anchor_alt_q
+                    question_text = anchor_alt_q.question_text
+                    ack = "No problem."
+                else:
+                    action = "new_topic"
+                    question_text = ""
+                    transition_prefix = "No problem, let's move on."
+
             best_probe = None
             max_overlap = 0
             ans_lower = answer.lower()
@@ -3455,12 +3496,18 @@ def validate_and_apply_decision(
                     max_overlap = overlap
                     best_probe = p
 
-            if max_overlap >= 2 and best_probe and followups_used < 2 and time_left >= 60000:
+            if (
+                max_overlap >= 2
+                and best_probe
+                and followups_used < 2
+                and time_left >= 60000
+                and not looks_like_no_knowledge_answer(answer)
+            ):
                 action = "follow_up"
                 chosen_q = best_probe
                 question_text = best_probe.question_text
             has_plan = bool(state.current_slot_id or any(getattr(q, "stage", None) for q in state.questions))
-            if has_plan:
+            if has_plan and not chosen_q:
                 # In bounded plan mode, do NOT use generic canned question ("Could you share a concrete example...")
                 # If current question has followup probes, use the first available probe
                 probe_text = None
@@ -3469,10 +3516,15 @@ def validate_and_apply_decision(
                         if pb not in state.asked_questions_history:
                             probe_text = pb
                             break
-                if probe_text and followups_used < 2 and time_left >= 60000:
+                if (
+                    probe_text
+                    and followups_used < 2
+                    and time_left >= 60000
+                    and not looks_like_no_knowledge_answer(answer)
+                ):
                     action = "follow_up"
                     question_text = probe_text
-                else:
+                elif not question_text:
                     action = "new_topic"
                     question_text = ""
             elif (
@@ -3480,11 +3532,12 @@ def validate_and_apply_decision(
                 and not state.clarify_used_per_skill.get(curr_skill, False)
                 and followups_used < 2
                 and time_left >= 60000
+                and not looks_like_no_knowledge_answer(answer)
             ):
                 action = "clarify"
                 question_text = "Could you share a concrete example from your work demonstrating that?"
                 state.clarify_used_per_skill[curr_skill] = True
-            else:
+            elif not question_text and action not in ("new_topic",):
                 action = "new_topic"
                 question_text = ""
 

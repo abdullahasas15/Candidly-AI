@@ -26,7 +26,7 @@ describe('PreFlightCheckModal Component', () => {
     vi.clearAllMocks();
   });
 
-  it('renders the modal when isOpen=true with Headphones Recommendation and WebSocket Step 3', async () => {
+  it('renders the modal when isOpen=true with Headphones Recommendation and backend Step 3', async () => {
     render(
       <PreFlightCheckModal
         isOpen={true}
@@ -40,7 +40,7 @@ describe('PreFlightCheckModal Component', () => {
     // Modal title & subtitle
     expect(screen.getByText('System Readiness Check')).toBeInTheDocument();
     expect(
-      screen.getByText(/WebSocket audio streaming connectivity/i)
+      screen.getByText(/backend audio streaming connectivity/i)
     ).toBeInTheDocument();
 
     // Headphones Recommendation Notice
@@ -49,12 +49,12 @@ describe('PreFlightCheckModal Component', () => {
       screen.getByText(/For optimal acoustic clarity, natural voice turn-taking/i)
     ).toBeInTheDocument();
 
-    // Step 3: WebSocket Audio Channel & Pipeline Probe
+    // Step 3: Backend Connectivity & Latency Probe
     expect(
-      screen.getByText('WebSocket Audio Channel & Pipeline Probe')
+      screen.getByText('Backend Connectivity & Latency Probe')
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Probing WebSocket bidirectional audio stream/i)
+      screen.getByText(/Probing the interview backend/i)
     ).toBeInTheDocument();
   });
 

@@ -467,12 +467,12 @@ async def evaluate_interview_session(
     if is_mock or not candidate_turns_by_id:
         judge_out = _mock_judge_output(skills_spec, turns)
     else:
-        try:
-            judge_out, token_usage = await asyncio.to_thread(
-                _call_judge_sync, prompt, JUDGE_MODEL_NAME, 0.1
-            )
-        except Exception:
-            judge_out = _mock_judge_output(skills_spec, turns)
+        # A live judge failure must NOT silently complete with fabricated mock scores.
+        # Raise so the pending evaluation placeholder stays retryable (startup sweeper
+        # and the recruiter re-evaluate endpoint both re-run it).
+        judge_out, token_usage = await asyncio.to_thread(
+            _call_judge_sync, prompt, JUDGE_MODEL_NAME, 0.1
+        )
 
     def _verify_and_score_pass(output: JudgeLLMOutput) -> tuple[dict[str, dict[str, Any]], Optional[float], list[str]]:
         by_name = {a.skill_name.casefold(): a for a in (output.skills or [])}

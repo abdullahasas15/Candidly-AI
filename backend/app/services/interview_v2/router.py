@@ -304,11 +304,21 @@ async def ws_interview_endpoint(
 
         # Key pool & audio clients
         key_pool = get_shared_key_pool()
+        # Keyterm biasing materially improves Flux transcription accuracy on the
+        # job's domain vocabulary (skills, blueprint terms). It existed for the
+        # dev cockpit but was never wired into the production interview socket.
+        session_keyterms: list[str] = []
+        try:
+            from backend.app.services.voice.gateway import get_session_keyterms
+            session_keyterms = await get_session_keyterms(session_id)
+        except Exception as kt_err:
+            logger.warning("Could not load session keyterms for %s: %s", session_id, kt_err)
         flux_client = FluxSTTClient(
             key_pool=key_pool,
             model="flux-general-en",
             sample_rate=16000,
             encoding="linear16",
+            keyterms=session_keyterms or None,
         )
         aura_client = AuraTTSClient(
             key_pool=key_pool,

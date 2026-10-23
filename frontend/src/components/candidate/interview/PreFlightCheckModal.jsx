@@ -124,7 +124,12 @@ export default function PreFlightCheckModal({
   const [micSoundDetected, setMicSoundDetected] = useState(false);
   const [speakerSoundPlayed, setSpeakerSoundPlayed] = useState(false);
   const [networkRtt, setNetworkRtt] = useState(null);
-  const [consentAccepted, setConsentAccepted] = useState(true);
+  // Consent must be an explicit opt-in action, never pre-checked.
+  const [consentAccepted, setConsentAccepted] = useState(false);
+
+  // Voice-first interviews can proceed without a camera.
+  const [cameraSkipped, setCameraSkipped] = useState(false);
+  const cameraSkippedRef = useRef(false);
 
   // R3.5 Part 4: speech transcription check states
   const [sttStatus, setSttStatus] = useState(null); // {provider, ready, helper_built, detail, ...}
@@ -134,10 +139,14 @@ export default function PreFlightCheckModal({
   const [speechResult, setSpeechResult] = useState(null); // {transcript, match_ratio, latency_ms, provider}
   const [speechError, setSpeechError] = useState('');
   const [speechAttempts, setSpeechAttempts] = useState(0); // evaluated (failed) takes so far
+  // Explicit candidate opt-in after exhausting speech retakes (device/STT quirks
+  // must not permanently lock a candidate out of their interview).
+  const [speechOverride, setSpeechOverride] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState(RECORD_TARGET_SECONDS);
 
   // Streams & nodes
   const mediaStreamRef = useRef(null);
+  const camStreamRef = useRef(null);
   const videoPreviewRef = useRef(null);
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
@@ -159,6 +168,7 @@ export default function PreFlightCheckModal({
       setSpeechResult(null);
       setSpeechError('');
       setSpeechAttempts(0);
+      setSpeechOverride(false);
       loadSttStatus(false);
     } else {
       cleanupMedia();
@@ -181,6 +191,10 @@ export default function PreFlightCheckModal({
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
+    }
+    if (camStreamRef.current) {
+      camStreamRef.current.getTracks().forEach((track) => track.stop());
+      camStreamRef.current = null;
     }
   };
 
@@ -223,7 +237,8 @@ export default function PreFlightCheckModal({
     const micId = micIdOverride !== undefined ? micIdOverride : selectedMicId;
     const camId = camIdOverride !== undefined ? camIdOverride : selectedCamId;
 
-    // 1 & 2: Microphone & Camera Permission + Device Enumeration
+    // 1: Microphone permission + device enumeration (audio-only request so a
+    // missing/blocked camera can never fail the mic check in a voice interview).
     let stream = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
@@ -239,14 +254,8 @@ export default function PreFlightCheckModal({
               noiseSuppression: true,
               autoGainControl: true,
             },
-        video: camId ? { deviceId: { exact: camId } } : true,
       });
       mediaStreamRef.current = stream;
-
-      // Bind video preview
-      if (videoPreviewRef.current) {
-        videoPreviewRef.current.srcObject = stream;
-      }
 
       // Enumerate devices
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -269,31 +278,66 @@ export default function PreFlightCheckModal({
       }
 
       setMicStatus('passed');
-      setCamStatus('passed');
 
       // Setup audio analyzer for mic volume test
       setupAudioAnalyzer(stream);
     } catch (err) {
-      console.error('Media permission error:', err);
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setMicStatus('failed');
+      console.error('Microphone permission error:', err);
+      setMicStatus('failed');
+      setMicError(
+        err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError'
+          ? 'Microphone permission denied — click the lock icon in your browser address bar to allow microphone access.'
+          : `Audio device error: ${err.message || 'Could not access microphone'}`
+      );
+    }
+
+    // 2: Camera — optional for a voice-first interview. Only requested when the
+    // candidate has not skipped it; a failure here no longer blocks entry.
+    if (cameraSkippedRef.current) {
+      setCamStatus('skipped');
+    } else {
+      try {
+        const camStream = await navigator.mediaDevices.getUserMedia({
+          video: camId ? { deviceId: { exact: camId } } : true,
+        });
+        camStreamRef.current = camStream;
+        if (videoPreviewRef.current) {
+          videoPreviewRef.current.srcObject = camStream;
+        }
+        setCamStatus('passed');
+      } catch (err) {
+        console.warn('Camera permission error:', err);
         setCamStatus('failed');
-        setMicError(
-          'Microphone permission denied — click the lock icon in your browser address bar to allow microphone access.'
-        );
         setCamError(
-          'Camera permission denied — click the lock icon in your browser address bar to allow camera access.'
+          err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError'
+            ? 'Camera permission denied. You can enable it in your browser, or skip the camera — this is a voice-first interview.'
+            : `Video device error: ${err.message || 'Could not access camera'}. You can skip the camera — this is a voice-first interview.`
         );
-      } else {
-        setMicStatus('failed');
-        setCamStatus('failed');
-        setMicError(`Audio device error: ${err.message || 'Could not access microphone'}`);
-        setCamError(`Video device error: ${err.message || 'Could not access camera'}`);
       }
     }
 
-    // 3: Network Check (WebSocket audio pipeline probe)
+    // 3: Network Check (backend connectivity + latency probe)
     await runNetworkCheck();
+  };
+
+  const handleSkipCamera = () => {
+    setCameraSkipped(true);
+    cameraSkippedRef.current = true;
+    setCamError('');
+    setCamStatus('skipped');
+    if (camStreamRef.current) {
+      camStreamRef.current.getTracks().forEach((t) => t.stop());
+      camStreamRef.current = null;
+    }
+    if (videoPreviewRef.current) {
+      videoPreviewRef.current.srcObject = null;
+    }
+  };
+
+  const handleUseCamera = () => {
+    setCameraSkipped(false);
+    cameraSkippedRef.current = false;
+    runAllChecks(selectedMicId, selectedCamId);
   };
 
   const setupAudioAnalyzer = (stream) => {
@@ -345,53 +389,37 @@ export default function PreFlightCheckModal({
     setNetError('');
     const startTime = performance.now();
 
+    // Real backend reachability probe: measures the round-trip to /api/health
+    // (which performs a live database check server-side). A dead backend or a
+    // network timeout fails the check honestly instead of being masked by a
+    // fabricated RTT that would surface later as a mid-interview reconnect.
     try {
-      // Perform genuine WebSocket audio path probe
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${proto}//${window.location.host}/ws/interview/preflight-probe`;
-
-      const rtt = await new Promise((resolve) => {
-        let ws;
-        const timeout = setTimeout(() => {
-          if (ws) {
-            try { ws.close(); } catch (e) {}
-          }
-          resolve(Math.round(performance.now() - startTime) || 24);
-        }, 3000);
-
-        try {
-          ws = new WebSocket(wsUrl);
-          ws.onopen = () => {
-            // Ping the interview WebSocket endpoint to verify bidirectional framing
-            ws.send(JSON.stringify({ type: 'ping' }));
-          };
-          ws.onmessage = (event) => {
-            clearTimeout(timeout);
-            const elapsed = Math.round(performance.now() - startTime);
-            try { ws.close(); } catch (e) {}
-            resolve(elapsed);
-          };
-          ws.onerror = () => {
-            clearTimeout(timeout);
-            try { ws.close(); } catch (e) {}
-            // Graceful network latency measurement fallback
-            resolve(Math.round(performance.now() - startTime) || 28);
-          };
-        } catch (e) {
-          clearTimeout(timeout);
-          resolve(Math.round(performance.now() - startTime) || 30);
-        }
-      });
-
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      let res;
+      try {
+        res = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' });
+      } finally {
+        clearTimeout(timeoutId);
+      }
       if (!isMountedRef.current) return;
-      setNetworkRtt(rtt || 24);
+
+      if (!res.ok) {
+        throw new Error(`Interview backend responded with ${res.status}`);
+      }
+      const rtt = Math.round(performance.now() - startTime);
+      setNetworkRtt(rtt);
       setNetStatus('passed');
     } catch (err) {
       if (!isMountedRef.current) return;
-      console.error('WebSocket network check error:', err);
+      const isTimeout = err?.name === 'AbortError';
+      console.error('Network check error:', err);
       setNetStatus('failed');
+      setNetworkRtt(null);
       setNetError(
-        'WebSocket audio path check failed — please verify your internet connection or network firewall.'
+        isTimeout
+          ? 'The interview backend did not respond within 4 seconds — check your internet connection, VPN, or firewall, then retry.'
+          : `Network check failed: ${err.message || 'could not reach the interview backend'}. Verify your connection and retry.`
       );
     }
   };
@@ -485,7 +513,7 @@ export default function PreFlightCheckModal({
       sttStatus.ready === true &&
       (!appleProvider || sttStatus.helper_built === true)
   );
-  const speechPassed = sttGateReady && speechState === 'passed';
+  const speechPassed = sttGateReady && (speechState === 'passed' || speechOverride);
   const speechRetakesExhausted = speechAttempts >= SPEECH_MAX_ATTEMPTS;
 
   const cleanupSpeechRecording = () => {
@@ -672,7 +700,7 @@ export default function PreFlightCheckModal({
 
   const allPassed =
     micStatus === 'passed' &&
-    camStatus === 'passed' &&
+    (camStatus === 'passed' || camStatus === 'skipped') &&
     netStatus === 'passed' &&
     audioTestStatus === 'passed' &&
     speechPassed &&
@@ -695,7 +723,7 @@ export default function PreFlightCheckModal({
               System Readiness Check
             </h2>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Verifying hardware permissions, audio loop, WebSocket audio streaming connectivity, and live transcription before entering the interview room.
+              Verifying hardware permissions, audio loop, backend audio streaming connectivity, and live transcription before entering the interview room.
             </p>
           </div>
           <button
@@ -832,6 +860,11 @@ export default function PreFlightCheckModal({
                   <CheckCircle2 className="h-3.5 w-3.5" /> Passed
                 </span>
               )}
+              {camStatus === 'skipped' && (
+                <span className="flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  <CameraOff className="h-3.5 w-3.5" /> Skipped (voice-only)
+                </span>
+              )}
               {camStatus === 'failed' && (
                 <span className="flex items-center gap-1.5 rounded-full bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 dark:bg-rose-950/50 dark:text-rose-400">
                   <AlertCircle className="h-3.5 w-3.5" /> Failed
@@ -880,6 +913,30 @@ export default function PreFlightCheckModal({
             {camStatus === 'failed' && (
               <div className="mt-3 rounded-xl bg-rose-50 p-3 text-xs text-rose-800 dark:bg-rose-950/30 dark:text-rose-300">
                 {camError}
+                <button
+                  type="button"
+                  onClick={handleSkipCamera}
+                  data-testid="skip-camera-button"
+                  className="mt-2.5 flex items-center gap-1.5 rounded-xl border border-rose-300 bg-white px-4 py-2 text-[11px] font-bold text-rose-700 hover:bg-rose-50 dark:border-rose-800 dark:bg-slate-900 dark:text-rose-300 dark:hover:bg-slate-800"
+                >
+                  <CameraOff className="h-3.5 w-3.5" /> Skip camera — continue voice-only
+                </button>
+              </div>
+            )}
+
+            {camStatus === 'skipped' && (
+              <div className="mt-3 flex items-center justify-between gap-3 rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-slate-900/60 dark:text-slate-300">
+                <span>
+                  Camera skipped — this is a voice-first interview, so the camera is optional.
+                  Your interviewer will not see video.
+                </span>
+                <button
+                  type="button"
+                  onClick={handleUseCamera}
+                  className="flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                >
+                  <Camera className="h-3.5 w-3.5" /> Use camera
+                </button>
               </div>
             )}
           </div>
@@ -903,11 +960,11 @@ export default function PreFlightCheckModal({
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Step 3</span>
                     <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                      WebSocket Audio Channel & Pipeline Probe
+                      Backend Connectivity & Latency Probe
                     </h3>
                   </div>
                   <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                    Probing WebSocket bidirectional audio stream and measuring connection latency.
+                    Probing the interview backend (including its database) and measuring round-trip latency.
                   </p>
                 </div>
               </div>
@@ -931,8 +988,8 @@ export default function PreFlightCheckModal({
 
             {netStatus === 'passed' && (
               <div className="mt-3 flex items-center justify-between text-xs text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/60 p-2.5 rounded-xl border border-slate-100 dark:border-slate-800">
-                <span>WebSocket Audio Path: Connected</span>
-                <span className="font-semibold text-emerald-600 dark:text-emerald-400">Latency: {networkRtt}ms (Optimal)</span>
+                <span>Interview Backend: Reachable</span>
+                <span className="font-semibold text-emerald-600 dark:text-emerald-400">Latency: {networkRtt}ms</span>
               </div>
             )}
 
@@ -1199,7 +1256,7 @@ export default function PreFlightCheckModal({
                           <p className="mt-1.5">
                             Transcript heard: <span className="italic">"{speechResult.transcript}"</span>
                             {typeof speechResult.match_ratio === 'number' && (
-                              <> Match: {Math.round(speechResult.match_ratio * 100)}% (needs 80%).</>
+                              <> Match: {Math.round(speechResult.match_ratio * 100)}% (needs {Math.round(SPEECH_PASS_RATIO * 100)}%).</>
                             )}
                           </p>
                         )}
@@ -1215,7 +1272,7 @@ export default function PreFlightCheckModal({
                     ) : (
                       <>
                         <p className="font-bold text-rose-700 dark:text-rose-200">
-                          Speech verification failed after multiple attempts — phone-support fallback.
+                          Speech verification failed after multiple attempts.
                         </p>
                         {speechResult?.transcript && (
                           <p className="mt-1.5">
@@ -1225,11 +1282,40 @@ export default function PreFlightCheckModal({
                             )}
                           </p>
                         )}
-                        <p className="mt-1.5 opacity-90">
-                          Contact support at <strong>support@candidly.ai</strong> with your name, the role, and a note that
-                          your speech check failed — support will schedule your interview by phone. Room entry stays
-                          locked because your speech cannot be transcribed reliably on this device or network.
-                        </p>
+                        {!speechOverride ? (
+                          <>
+                            <p className="mt-1.5 opacity-90">
+                              This is usually caused by accent variation, background noise, or a
+                              device quirk — not your fault. You can still continue: the live
+                              interview uses a different streaming engine, but transcription quality
+                              may affect your evaluation, so we recommend headphones and a quiet room.
+                              For guaranteed accommodation, contact <strong>support@candidly.ai</strong> to
+                              schedule a phone interview.
+                            </p>
+                            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setSpeechOverride(true)}
+                                data-testid="continue-anyway-button"
+                                className="flex items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-[11px] font-bold text-white hover:bg-amber-700 transition-colors"
+                              >
+                                <ArrowRight className="h-3.5 w-3.5" /> Continue anyway
+                              </button>
+                              <button
+                                type="button"
+                                onClick={startSpeechRecording}
+                                className="flex items-center gap-1.5 rounded-xl border border-rose-300 bg-white px-4 py-2 text-[11px] font-bold text-rose-700 hover:bg-rose-50 dark:border-rose-800 dark:bg-slate-900 dark:text-rose-300 dark:hover:bg-slate-800"
+                              >
+                                <RefreshCw className="h-3.5 w-3.5" /> Try again
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <p className="mt-1.5 font-semibold text-amber-700 dark:text-amber-300">
+                            Continuing without a verified speech check — transcription quality may
+                            affect your evaluation.
+                          </p>
+                        )}
                       </>
                     )}
                   </div>
@@ -1304,7 +1390,7 @@ export default function PreFlightCheckModal({
                 onProceedToInterview &&
                 onProceedToInterview({
                   selectedAudioInput: selectedMicId,
-                  selectedVideoInput: selectedCamId,
+                  selectedVideoInput: cameraSkipped ? '' : selectedCamId,
                   selectedAudioOutput: selectedSpeakerId,
                 })
               }

@@ -50,6 +50,68 @@ async def run_evaluation_for_session(session_id: str) -> None:
         logger.exception("Post-interview evaluation failed for session %s", session_id)
 
 
+SWEEP_MIN_AGE_MINUTES = 10
+SWEEP_MAX_ATTEMPTS = 5
+
+
+async def sweep_pending_evaluations(
+    max_attempts: int = SWEEP_MAX_ATTEMPTS,
+    min_age_minutes: int = SWEEP_MIN_AGE_MINUTES,
+) -> int:
+    """Re-schedule evaluations stuck in 'pending'.
+
+    Covers durability gaps: the in-process asyncio.create_task from finalize can be
+    lost on restart/crash, and a failed judge attempt leaves the placeholder pending
+    (evaluate_interview_session raises instead of writing mock results). Retries are
+    counted in token_usage_json.sweeper_retries; after max_attempts the evaluation is
+    marked 'failed' for manual re-run from the recruiter scorecard.
+    Returns the number of evaluations re-scheduled.
+    """
+    from datetime import timedelta
+
+    cutoff = datetime.utcnow() - timedelta(minutes=min_age_minutes)
+    try:
+        async with AsyncSessionLocal() as db:
+            stmt = (
+                select(InterviewEvaluation)
+                .where(InterviewEvaluation.status == "pending")
+                .where(InterviewEvaluation.created_at < cutoff)
+            )
+            stuck = (await db.execute(stmt)).scalars().all()
+            if not stuck:
+                return 0
+
+            rescheduled = 0
+            for ev in stuck:
+                tu = dict(ev.token_usage_json) if isinstance(ev.token_usage_json, dict) else {}
+                retries = int(tu.get("sweeper_retries", 0))
+                if retries >= max_attempts:
+                    ev.status = "failed"
+                    ev.summary = (
+                        "Evaluation failed after repeated attempts; "
+                        "re-run manually from the recruiter scorecard."
+                    )
+                    ev.completed_at = datetime.utcnow()
+                    logger.error(
+                        "Evaluation %s for session %s exhausted %d sweeper attempts; marking failed",
+                        ev.id, ev.session_id, retries,
+                    )
+                    continue
+                tu["sweeper_retries"] = retries + 1
+                ev.token_usage_json = tu
+                asyncio.create_task(run_evaluation_for_session(ev.session_id))
+                rescheduled += 1
+                logger.info(
+                    "Sweeper re-scheduling evaluation for session %s (attempt %d/%d)",
+                    ev.session_id, retries + 1, max_attempts,
+                )
+            await db.commit()
+            return rescheduled
+    except Exception:
+        logger.exception("Pending evaluation sweep failed")
+        return 0
+
+
 async def _finalize_session_in_db(
     session_id: str,
     db: AsyncSession,
