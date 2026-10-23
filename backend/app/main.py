@@ -10,6 +10,7 @@ import base64
 import hmac
 import re
 import time
+import uuid
 from dotenv import load_dotenv
 load_dotenv(override=True)
 from datetime import datetime, timedelta, timezone
@@ -314,7 +315,7 @@ async def _run_candidate_personalization(application_id: str) -> None:
             job = application.job
             if job.active_blueprint_id:
                 from backend.app.services.interview.personalization import generate_candidate_personalization
-                from backend.app.services.interview.plan_materializer import materialize_blueprint_session_plan
+                from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
 
                 # 1. Non-blocking candidate personalization
                 await generate_candidate_personalization(application.id, db)
@@ -340,8 +341,8 @@ async def _run_candidate_personalization(application_id: str) -> None:
                     db.add(session)
                     await db.flush()
 
-                # 3. Materialize runtime question plan from blueprint
-                await materialize_blueprint_session_plan(session, db)
+                # 3. Ensure authoritative ScriptPlan and synchronized question rows
+                await ensure_session_script_plan(db, session)
 
                 # 4. Record succeeded run so CandidateDashboard is_ready checks pass immediately
                 run_stmt = (
@@ -366,7 +367,7 @@ async def _run_candidate_personalization(application_id: str) -> None:
                     run.completed_at = datetime.utcnow()
 
                 await db.commit()
-                logger.info("Personalization and blueprint plan materialized for app %s", application.id)
+                logger.info("Personalization and script plan ensured for app %s", application.id)
             else:
                 # Fallback to legacy generator for jobs without blueprints
                 await generate_for_application(application_id, db)
@@ -1347,6 +1348,15 @@ async def create_interview_session(
         system_prompt_snapshot=payload.system_prompt_snapshot
     )
     db.add(session)
+    await db.flush()
+
+    if application.job and application.job.active_blueprint_id and payload.status != "practice":
+        from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
+        try:
+            await ensure_session_script_plan(db, session)
+        except Exception as e:
+            logger.warning("Could not auto-generate plan during session creation: %s", e)
+
     await db.commit()
 
     stmt = (
@@ -1357,6 +1367,7 @@ async def create_interview_session(
             selectinload(InterviewSession.job),
         )
         .where(InterviewSession.id == session.id)
+        .execution_options(populate_existing=True)
     )
     res = await db.execute(stmt)
     created_session = res.scalars().first()
@@ -1389,9 +1400,29 @@ async def get_application_interview_session(
         .order_by(InterviewSession.created_at.desc())
     )
     session = (await db.execute(session_stmt)).scalars().first()
-    if not session:
+    if session:
+        is_blueprint_backed = bool(application.job and application.job.active_blueprint_id)
+        has_plan = bool(session.runtime_state and session.runtime_state.get("script_plan"))
+        has_questions = bool(session.questions)
+        if is_blueprint_backed and session.status == "scheduled" and (not has_plan or not has_questions):
+            from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
+            await ensure_session_script_plan(db, session)
+            await db.commit()
+            # Re-select with relationships to avoid stale cached objects
+            session_stmt_fresh = (
+                select(InterviewSession)
+                .where(InterviewSession.id == session.id)
+                .options(
+                    selectinload(InterviewSession.questions),
+                    selectinload(InterviewSession.application),
+                    selectinload(InterviewSession.job),
+                )
+                .execution_options(populate_existing=True)
+            )
+            session = (await db.execute(session_stmt_fresh)).scalars().first()
+    elif not session:
         if application.job and application.job.active_blueprint_id:
-            from backend.app.services.interview.plan_materializer import materialize_blueprint_session_plan
+            from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
             new_sess = InterviewSession(
                 application_id=application_id,
                 job_id=application.job_id,
@@ -1401,9 +1432,19 @@ async def get_application_interview_session(
             )
             db.add(new_sess)
             await db.flush()
-            await materialize_blueprint_session_plan(new_sess, db)
+            await ensure_session_script_plan(db, new_sess)
             await db.commit()
-            session = new_sess
+            session_stmt_fresh = (
+                select(InterviewSession)
+                .where(InterviewSession.id == new_sess.id)
+                .options(
+                    selectinload(InterviewSession.questions),
+                    selectinload(InterviewSession.application),
+                    selectinload(InterviewSession.job),
+                )
+                .execution_options(populate_existing=True)
+            )
+            session = (await db.execute(session_stmt_fresh)).scalars().first()
         else:
             run_stmt = (
                 select(InterviewGenerationRun)
@@ -1463,6 +1504,31 @@ async def start_interview_session(
     session = (await db.execute(stmt)).scalars().first()
     if not session or not session.application or session.application.candidate_id != current_user.id:
         raise HTTPException(status_code=404, detail="Interview session not found")
+    if session.status in (SessionState.COMPLETED.value, SessionState.CANCELLED.value):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot start interview session with terminal status '{session.status}'",
+        )
+    is_blueprint_backed = bool(session.job and session.job.active_blueprint_id)
+    has_plan = bool(session.runtime_state and session.runtime_state.get("script_plan"))
+    has_questions = bool(session.questions)
+    if is_blueprint_backed and (not has_plan or not has_questions):
+        from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
+        await ensure_session_script_plan(db, session)
+        await db.flush()
+        # Refresh relationships after plan sync
+        session_stmt_refresh = (
+            select(InterviewSession)
+            .where(InterviewSession.id == session.id)
+            .options(
+                selectinload(InterviewSession.questions),
+                selectinload(InterviewSession.application),
+                selectinload(InterviewSession.job),
+            )
+            .execution_options(populate_existing=True)
+        )
+        session = (await db.execute(session_stmt_refresh)).scalars().first()
+
     try:
         if session.status == SessionState.SCHEDULED.value:
             session.status = transition_session(session.status, SessionState.PREFLIGHT)
@@ -1489,6 +1555,7 @@ async def start_interview_session(
             selectinload(InterviewSession.application),
             selectinload(InterviewSession.job),
         )
+        .execution_options(populate_existing=True)
     )
     response_session = (await db.execute(response_stmt)).scalars().first()
     return CandidateInterviewSessionResponse.model_validate(response_session).model_dump(mode="json")
@@ -2200,6 +2267,7 @@ async def create_interview_ws_ticket(
             "role": current_user.role,
             "session_id": session.id,
             "type": "ws_ticket",
+            "jti": uuid.uuid4().hex,
         },
         expires_delta=timedelta(minutes=5),
     )
@@ -2216,17 +2284,18 @@ async def create_practice_interview(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a short 2-question practice interview on a generic role so candidates can warm up (Part G4)."""
-    # Find any active job or create a generic practice job
-    job_stmt = select(JobPosting).order_by(JobPosting.created_at.desc()).limit(1)
+    # Find dedicated practice job or create one
+    job_stmt = select(JobPosting).where(JobPosting.status == "practice").order_by(JobPosting.created_at.asc()).limit(1)
     job = (await db.execute(job_stmt)).scalars().first()
     if not job:
         job = JobPosting(
             job_title="Practice Software Engineer",
-            department="Engineering",
+            department="Practice",
             job_description="Practice interview environment for candidates.",
             seniority_level="Mid-Level (L4)",
             interview_duration_mins=5,
             status="practice",
+            recruiter_id=None,
         )
         db.add(job)
         await db.flush()
@@ -2249,6 +2318,9 @@ async def create_practice_interview(
         )
         db.add(practice_app)
         await db.flush()
+    elif practice_app.job_id != job.id:
+        practice_app.job_id = job.id
+        await db.flush()
 
     brief = (
         "=== CANDIDLY PRACTICE INTERVIEW BRIEF ===\n"
@@ -2257,27 +2329,16 @@ async def create_practice_interview(
         "1. Speak 1-2 short sentences maximum. Plain spoken English only.\n"
         "2. Ask at most ONE question per turn."
     )
-    session = InterviewSession(
-        application_id=practice_app.id,
-        job_id=job.id,
-        status="scheduled",
-        total_questions_planned=2,
-        duration_planned_mins=8,  # R3.5b: scripted flow (welcome + ready gate + intro) adds ~2min before answers; 5min aborted sessions mid-flow
-        gemini_model_used=os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite"),
-        system_prompt_snapshot=brief,
-        interviewer_brief=brief,
-        is_practice=True,
-    )
-    db.add(session)
-    await db.flush()
 
     practice_questions = [
-        # R3.5b: kinded questions so the practice warm-up runs the SAME scripted
+        # Kinded questions so the practice warm-up runs the SAME scripted
         # flow as real interviews — welcome ("Ready to begin?" gate) -> intro ->
-        # anchors -> candidate_qa -> closing. Admin kinds need no skill grouping.
+        # anchors -> candidate_qa -> closing.
         (
+            # Leave the spoken script to the conductor so the welcome includes
+            # the practice role title and the actual planned duration.
             "welcome", "",
-            "(Welcome agenda is spoken by the coordinator greeting.)", [],
+            "(Welcome agenda is spoken here)", [],
         ),
         (
             "intro_hook", "",
@@ -2303,6 +2364,20 @@ async def create_practice_interview(
             "Thanks so much for your time today. We'll be in touch shortly with next steps!", [],
         ),
     ]
+
+    session = InterviewSession(
+        application_id=practice_app.id,
+        job_id=job.id,
+        status="scheduled",
+        total_questions_planned=len(practice_questions),
+        duration_planned_mins=5,
+        gemini_model_used=os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite"),
+        system_prompt_snapshot=brief,
+        interviewer_brief=brief,
+        is_practice=True,
+    )
+    db.add(session)
+    await db.flush()
     for idx, (kind, sname, qtext, kps) in enumerate(practice_questions):
         db.add(
             InterviewQuestion(
@@ -2481,7 +2556,7 @@ async def list_candidate_applications(
             and app.job.active_blueprint_id
         ):
             try:
-                from backend.app.services.interview.plan_materializer import materialize_blueprint_session_plan
+                from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
 
                 session = InterviewSession(
                     application_id=app.id,
@@ -2492,7 +2567,7 @@ async def list_candidate_applications(
                 )
                 db.add(session)
                 await db.flush()
-                await materialize_blueprint_session_plan(session, db)
+                await ensure_session_script_plan(db, session)
                 await db.commit()
                 logger.info("Self-healed session plan inline for application %s (generation already succeeded)", app.id)
             except Exception:

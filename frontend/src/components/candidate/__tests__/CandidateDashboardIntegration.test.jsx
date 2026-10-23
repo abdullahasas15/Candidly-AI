@@ -75,6 +75,7 @@ describe('CandidateDashboard Integration & Room Contract', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
   });
 
   it('passes canonical session contract to LiveInterviewRoom on successful interview launch', async () => {
@@ -195,6 +196,54 @@ describe('CandidateDashboard Integration & Room Contract', () => {
 
     expect(screen.getByTestId('room-session-id').textContent).toBe('practice-session-uuid-111');
     expect(screen.getByTestId('room-practice-flag').textContent).toBe('practice');
+  });
+
+  it('shows and dismisses a notice when the room exits after persistence failure', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      if (url.includes('/api/candidate/applications')) {
+        return { ok: true, status: 200, json: async () => [mockApplication] };
+      }
+      if (url.includes('/api/candidate/practice-interview')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'practice-notice-session', duration_mins: 5 }),
+        };
+      }
+      if (url.includes('/start')) {
+        return { ok: true, status: 200, json: async () => ({ id: 'practice-notice-session' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    render(<CandidateDashboard authUser={mockUser} />);
+    await waitFor(() => {
+      expect(screen.getByText('Warm-Up (5m)')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Warm-Up (5m)'));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('mock-live-interview-room')).toBeInTheDocument();
+    });
+
+    sessionStorage.setItem(
+      'candidly-interview-exit-notice',
+      'Your interview ended, but completion could not be confirmed with the server.'
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('room-exit-btn'));
+    });
+
+    const notice = await screen.findByTestId('interview-exit-notice');
+    expect(notice).toHaveTextContent(/completion could not be confirmed/i);
+    expect(sessionStorage.getItem('candidly-interview-exit-notice')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Dismiss interview notice'));
+    });
+    expect(screen.queryByTestId('interview-exit-notice')).not.toBeInTheDocument();
   });
 
   it('does not enter live room when session ID is missing from API response', async () => {

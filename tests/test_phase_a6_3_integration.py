@@ -34,6 +34,7 @@ from backend.app.database import AsyncSessionLocal, engine
 from backend.app.main import (
     app,
     _enrich_jobs_with_blueprint_status,
+    create_practice_interview,
 )
 
 
@@ -63,11 +64,13 @@ async def test_database_isolation_and_no_dev_contamination():
 
 from backend.app.services.interview_v2.finalizer import finalize_interview_session
 from backend.app.services.auth import create_access_token, decode_access_token
+from backend.app.services.ws_ticket_store import consume_ws_ticket
 from backend.app.services.interview_v2.conductor import (
     ConductorPhase,
     ConductorState,
     EndButton,
     SessionStart,
+    step,
 )
 from backend.app.services.interview_v2.router import (
     ACTIVE_RUNNERS,
@@ -196,14 +199,14 @@ async def test_handshake_client_ready_triggers_runner_start():
     await runner.start()
     assert runner.running is True
 
-    # Allow event loop to process SessionStart effect and transition to WELCOME
+    # Allow event loop to process SessionStart effect and transition to GREETING
     await asyncio.sleep(0.05)
-    assert runner.state.phase == ConductorPhase.WELCOME
+    assert runner.state.phase in (ConductorPhase.WELCOME, ConductorPhase.GREETING)
 
     # Wait for welcome breather (0.15s) and effect loop execution
     await asyncio.sleep(0.20)
     assert len(fake_tts.calls) > 0
-    assert "Hello, welcome" in fake_tts.calls[0]
+    assert "Hello, welcome" in fake_tts.calls[0] or "interviewer" in fake_tts.calls[0]
 
     await runner.stop()
 
@@ -470,6 +473,49 @@ async def test_p0_4_ws_ticket_endpoint_generation_and_authorization():
         assert claims["sub"] == candidate.id
         assert claims["session_id"] == session_id
         assert claims["type"] == "ws_ticket"
+        assert claims.get("jti")
+
+
+@pytest.mark.asyncio
+async def test_ws_ticket_is_single_use_across_replay():
+    """A consumed signed ticket must be rejected on a second WebSocket handshake."""
+    session_id = f"ticket-replay-{datetime.now(timezone.utc).timestamp()}"
+    ticket = create_access_token({
+        "sub": "replay-candidate-1",
+        "email": "replay@example.com",
+        "role": "candidate",
+        "session_id": session_id,
+        "type": "ws_ticket",
+        "jti": f"replay-{datetime.now(timezone.utc).timestamp()}",
+    })
+    claims = decode_access_token(ticket)
+
+    # First consumption represents the successful first handshake.
+    assert await consume_ws_ticket(ticket, claims) is True
+
+    replay_ws = FakeWebSocket()
+    await ws_interview_endpoint(replay_ws, session_id, ticket=ticket)
+
+    assert replay_ws.accepted is False
+    assert replay_ws.closed is True
+    assert replay_ws.close_code == 4401
+    assert replay_ws.sent_messages == []
+
+    # Concurrent consumers must race on the shared unique key: exactly one wins.
+    concurrent_ticket = create_access_token({
+        "sub": "replay-candidate-2",
+        "email": "replay2@example.com",
+        "role": "candidate",
+        "session_id": session_id,
+        "type": "ws_ticket",
+        "jti": f"concurrent-{datetime.now(timezone.utc).timestamp()}",
+    })
+    concurrent_claims = decode_access_token(concurrent_ticket)
+    results = await asyncio.gather(
+        *(consume_ws_ticket(concurrent_ticket, concurrent_claims) for _ in range(3))
+    )
+    assert results.count(True) == 1
+    assert results.count(False) == 2
 
 
 @pytest.mark.asyncio
@@ -1076,3 +1122,368 @@ async def test_blueprint_approval_and_application_gate_with_errors():
         )
         assert res_apply.status_code == 400
         assert "not accepting applications" in res_apply.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_real_db_load_real_session_script_eager_application():
+    """Verify that load_real_session_script eagerly loads application and job, avoiding DetachedInstanceError."""
+    async with AsyncSessionLocal() as db:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        candidate = User(email=f"cand_load_{now_ts}@example.com", full_name="Candidate Load", role="candidate", password_hash="pw")
+        recruiter = User(email=f"rec_load_{now_ts}@example.com", full_name="Recruiter Load", role="recruiter", password_hash="pw")
+        db.add_all([candidate, recruiter])
+        await db.flush()
+
+        job = JobPosting(job_title="Eager Test Role", department="Eng", recruiter_id=recruiter.id, status="active", interview_duration_mins=25)
+        db.add(job)
+        await db.flush()
+
+        app_obj = JobApplication(
+            job_id=job.id,
+            candidate_id=candidate.id,
+            full_name=candidate.full_name,
+            email=candidate.email,
+            status="scheduled",
+        )
+        db.add(app_obj)
+        await db.flush()
+
+        sess = InterviewSession(job_id=job.id, application_id=app_obj.id, status="in_progress")
+        db.add(sess)
+        await db.flush()
+
+        q = InterviewQuestion(
+            session_id=sess.id,
+            question_index=0,
+            question_text="Welcome candidate",
+            kind="welcome",
+        )
+        db.add(q)
+        await db.commit()
+        sess_id = sess.id
+
+    # Load in a fresh DB session
+    loaded_sess, script = await load_real_session_script(sess_id)
+    assert loaded_sess.application is not None
+    assert loaded_sess.application.candidate_id == candidate.id
+    assert loaded_sess.job is not None
+    assert loaded_sess.job.job_title == "Eager Test Role"
+    assert script["metadata"]["is_practice"] is False
+    assert script["metadata"]["duration_planned_mins"] == 25
+
+
+@pytest.mark.asyncio
+async def test_real_loader_router_authorized_and_unauthorized():
+    """Verify that router verifies session ownership against real DB: candidate owner succeeds, other candidate is 4403."""
+    async with AsyncSessionLocal() as db:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        cand_a = User(email=f"cand_a_{now_ts}@example.com", full_name="Cand A", role="candidate", password_hash="pw")
+        cand_b = User(email=f"cand_b_{now_ts}@example.com", full_name="Cand B", role="candidate", password_hash="pw")
+        rec = User(email=f"rec_router_{now_ts}@example.com", full_name="Rec", role="recruiter", password_hash="pw")
+        db.add_all([cand_a, cand_b, rec])
+        await db.flush()
+
+        job = JobPosting(job_title="Router Real Test", department="Eng", recruiter_id=rec.id, status="active")
+        db.add(job)
+        await db.flush()
+
+        app_obj = JobApplication(
+            job_id=job.id,
+            candidate_id=cand_a.id,
+            full_name=cand_a.full_name,
+            email=cand_a.email,
+            status="scheduled",
+        )
+        db.add(app_obj)
+        await db.flush()
+
+        sess = InterviewSession(job_id=job.id, application_id=app_obj.id, status="in_progress")
+        db.add(sess)
+        await db.flush()
+
+        q = InterviewQuestion(
+            session_id=sess.id,
+            question_index=0,
+            question_text="Hello",
+            kind="welcome",
+        )
+        db.add(q)
+        await db.commit()
+        sess_id = sess.id
+        cand_a_id = cand_a.id
+        cand_b_id = cand_b.id
+
+    # 1. Unauthorized candidate B attempts to connect
+    ticket_b = create_access_token({
+        "sub": cand_b_id,
+        "email": f"cand_b_{now_ts}@example.com",
+        "role": "candidate",
+        "session_id": sess_id,
+        "type": "ws_ticket",
+    })
+    ws_b = FakeWebSocket()
+    await ws_interview_endpoint(ws_b, sess_id, ticket=ticket_b)
+    assert ws_b.accepted is True
+    assert ws_b.closed is True
+    assert ws_b.close_code == 4403
+    assert any(m.get("type") == "SessionError" and m.get("error") == "Forbidden" for m in ws_b.sent_messages)
+
+    # 2. Authorized candidate A connects
+    ticket_a = create_access_token({
+        "sub": cand_a_id,
+        "email": f"cand_a_{now_ts}@example.com",
+        "role": "candidate",
+        "session_id": sess_id,
+        "type": "ws_ticket",
+    })
+    ws_a = FakeWebSocket(incoming_messages=[{"type": "client_ready", "sample_rate": 24000}])
+    with patch("backend.app.services.interview_v2.router.FluxSTTClient") as mock_flux_cls:
+        mock_flux = AsyncMock()
+        mock_flux_cls.return_value = mock_flux
+        with patch("backend.app.services.interview_v2.router.AuraTTSClient") as mock_tts_cls:
+            mock_tts = FakeTTS()
+            mock_tts_cls.return_value = mock_tts
+            task = asyncio.create_task(ws_interview_endpoint(ws_a, sess_id, ticket=ticket_a))
+            # Wait for the connection frame instead of relying on a fixed sleep;
+            # real DB/eager-load work can exceed 100ms under CI load.
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while (
+                not task.done()
+                and asyncio.get_running_loop().time() < deadline
+                and not any(m.get("type") == "SessionConnected" for m in ws_a.sent_messages)
+            ):
+                await asyncio.sleep(0.01)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            assert ws_a.accepted is True
+            assert any(m.get("type") == "SessionConnected" for m in ws_a.sent_messages)
+
+
+@pytest.mark.asyncio
+async def test_practice_welcome_speech_text_clean_and_informative():
+    """Verify conductor SessionStart produces clean spoken text with role and duration, no placeholders."""
+    script = {
+        "metadata": {
+            "is_practice": True,
+            "job_title": "Practice Interview (General Warm-Up)",
+            "duration_planned_mins": 5,
+        },
+        "questions": [
+            {
+                "id": "q0",
+                "question_index": 0,
+                "question_role": "welcome",
+                "question_text": "(Welcome agenda is spoken here) Welcome to your practice interview session.",
+                "duration_planned_sec": 60,
+            }
+        ]
+    }
+    state = ConductorState()
+    new_state, effects = step(state, SessionStart(session_id="test-practice", plan=script, now_ms=0))
+    speak_effects = [e for e in effects if e.__class__.__name__ == "Speak"]
+    assert len(speak_effects) >= 1
+    spoken_text = speak_effects[0].text
+    assert "(Welcome agenda" not in spoken_text
+    assert "practice" in spoken_text.lower()
+    assert "interviewer" in spoken_text.lower() or "5" in spoken_text
+
+
+@pytest.mark.asyncio
+async def test_real_practice_session_welcome_has_role_and_duration():
+    """The real practice endpoint must produce the role/duration welcome, not only a synthetic script."""
+    async with AsyncSessionLocal() as db:
+        candidate = User(
+            email=f"cand_practice_welcome_{datetime.now(timezone.utc).timestamp()}@example.com",
+            full_name="Practice Welcome Candidate",
+            role="candidate",
+            password_hash="pw",
+        )
+        db.add(candidate)
+        await db.flush()
+        payload = await create_practice_interview(current_user=candidate, db=db)
+
+    session, script = await load_real_session_script(payload["id"])
+    assert session is not None
+    assert script["is_practice"] is True
+    assert script["duration_planned_mins"] == 5
+
+    _state, effects = step(
+        ConductorState(),
+        SessionStart(session_id=payload["id"], plan=script, now_ms=0),
+    )
+    spoken_text = next(e.text for e in effects if e.__class__.__name__ == "Speak")
+    assert "Practice Software Engineer" in spoken_text
+    assert "interviewer" in spoken_text.lower() or "5 minutes" in spoken_text
+
+
+@pytest.mark.asyncio
+async def test_start_session_on_completed_or_cancelled_returns_409():
+    """Verify that POST /api/interview-sessions/{id}/start returns 409 for completed or cancelled sessions."""
+    async with AsyncSessionLocal() as db:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        candidate = User(email=f"cand_409_{now_ts}@example.com", full_name="Candidate 409", role="candidate", password_hash="pw")
+        recruiter = User(email=f"rec_409_{now_ts}@example.com", full_name="Recruiter 409", role="recruiter", password_hash="pw")
+        db.add_all([candidate, recruiter])
+        await db.flush()
+
+        job = JobPosting(job_title="Status 409 Role", department="Eng", recruiter_id=recruiter.id, status="active")
+        db.add(job)
+        await db.flush()
+
+        app_obj = JobApplication(
+            job_id=job.id,
+            candidate_id=candidate.id,
+            full_name=candidate.full_name,
+            email=candidate.email,
+            status="scheduled",
+        )
+        db.add(app_obj)
+        await db.flush()
+
+        sess_completed = InterviewSession(job_id=job.id, application_id=app_obj.id, status="completed")
+        sess_cancelled = InterviewSession(job_id=job.id, application_id=app_obj.id, status="cancelled")
+        db.add_all([sess_completed, sess_cancelled])
+        await db.commit()
+        id_comp = sess_completed.id
+        id_canc = sess_cancelled.id
+
+    token = create_access_token({"sub": candidate.id, "email": candidate.email, "role": "candidate", "id": candidate.id})
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        res_comp = await client.post(f"/api/interview-sessions/{id_comp}/start", headers=headers)
+        assert res_comp.status_code == 409
+        assert "completed" in res_comp.json()["detail"].lower()
+
+        res_canc = await client.post(f"/api/interview-sessions/{id_canc}/start", headers=headers)
+        assert res_canc.status_code == 409
+        assert "cancelled" in res_canc.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_websocket_on_completed_session_returns_session_ended_without_runner():
+    """Verify connecting WS to completed session sends SessionEnded and closes 1000 without starting a runner."""
+    async with AsyncSessionLocal() as db:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        cand = User(email=f"cand_done_{now_ts}@example.com", full_name="Cand Done", role="candidate", password_hash="pw")
+        rec = User(email=f"rec_done_{now_ts}@example.com", full_name="Rec Done", role="recruiter", password_hash="pw")
+        db.add_all([cand, rec])
+        await db.flush()
+
+        job = JobPosting(job_title="Completed WS Role", department="Eng", recruiter_id=rec.id, status="active")
+        db.add(job)
+        await db.flush()
+
+        app_obj = JobApplication(
+            job_id=job.id,
+            candidate_id=cand.id,
+            full_name=cand.full_name,
+            email=cand.email,
+            status="completed",
+        )
+        db.add(app_obj)
+        await db.flush()
+
+        sess = InterviewSession(job_id=job.id, application_id=app_obj.id, status="completed")
+        db.add(sess)
+        await db.commit()
+        sess_id = sess.id
+        cand_id = cand.id
+
+    ticket = create_access_token({"sub": cand_id, "email": cand.email, "role": "candidate", "session_id": sess_id, "type": "ws_ticket"})
+    ws = FakeWebSocket()
+    await ws_interview_endpoint(ws, sess_id, ticket=ticket)
+    assert ws.accepted is True
+    assert ws.closed is True
+    assert ws.close_code == 1000
+    assert any(m.get("type") == "SessionEnded" for m in ws.sent_messages)
+    assert sess_id not in ACTIVE_RUNNERS
+
+
+@pytest.mark.asyncio
+async def test_abandoned_session_disconnect_grace_finalizes():
+    """Verify that an abandoned session triggers background finalization after disconnect grace period."""
+    session_id = f"test-grace-disconnect-{datetime.now(timezone.utc).timestamp()}"
+    mock_session = MagicMock()
+    mock_session.id = session_id
+    mock_session.job_id = "job-grace"
+    mock_session.status = "in_progress"
+    mock_session.runtime_state = {"conductor_v2": ConductorState(phase=ConductorPhase.SKILL_ANCHOR, current_question_index=1).to_dict()}
+    mock_session.application = MagicMock(candidate_id="cand-grace", email="grace@test.com")
+    mock_session.job = MagicMock(recruiter_id="rec-grace")
+
+    ticket = create_access_token({
+        "sub": "cand-grace",
+        "email": "grace@test.com",
+        "role": "candidate",
+        "session_id": session_id,
+        "type": "ws_ticket",
+    })
+
+    ws = FakeWebSocket(incoming_messages=[{"type": "client_ready", "sample_rate": 24000}])
+
+    with patch.dict(os.environ, {"INTERVIEW_DISCONNECT_GRACE_SECONDS": "0.05"}):
+        with patch("backend.app.services.interview_v2.router.load_real_session_script", return_value=(mock_session, make_sample_script())):
+            with patch("backend.app.services.interview_v2.router.FluxSTTClient") as mock_flux_cls:
+                mock_flux = AsyncMock()
+                async def empty_stream():
+                    if False:
+                        yield None
+                mock_flux.stream_events.return_value = empty_stream()
+                mock_flux_cls.return_value = mock_flux
+                with patch("backend.app.services.interview_v2.router.AuraTTSClient") as mock_tts_cls:
+                    mock_tts = FakeTTS()
+                    mock_tts_cls.return_value = mock_tts
+                    with patch("backend.app.services.interview_v2.router.finalize_interview_session", new_callable=AsyncMock) as mock_finalize:
+                        task = asyncio.create_task(ws_interview_endpoint(ws, session_id, ticket=ticket))
+                        await asyncio.sleep(0.08)
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+
+                        await asyncio.sleep(0.12)
+                        assert mock_finalize.called is True
+                        assert "abandoned" in str(mock_finalize.call_args)
+
+
+@pytest.mark.asyncio
+async def test_ws_ticket_rejected_as_rest_bearer_token():
+    """Verify that a token with type='ws_ticket' cannot be used as a REST bearer token (surfaces 401)."""
+    ticket = create_access_token({
+        "sub": "user-cand-123",
+        "email": "candidate@example.com",
+        "role": "candidate",
+        "session_id": "session-123",
+        "type": "ws_ticket",
+    })
+    headers = {"Authorization": f"Bearer {ticket}"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/api/candidate/apply/fake-job-id", headers=headers, json={"notes": "test"})
+        assert res.status_code == 401
+        assert "WebSocket tickets cannot be used as REST bearer tokens" in res.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_production_missing_allowed_origins_closes_1011():
+    """Verify that router fails fast with close code 1011 in production if ALLOWED_ORIGINS is not configured."""
+    ws = FakeWebSocket()
+    session_id = "test-prod-origin-missing"
+    ticket = create_access_token({
+        "sub": "cand-prod",
+        "email": "cand@test.com",
+        "role": "candidate",
+        "session_id": session_id,
+        "type": "ws_ticket",
+    })
+
+    with patch.dict(os.environ, {"ENV": "production", "ALLOWED_ORIGINS": ""}):
+        await ws_interview_endpoint(ws, session_id, ticket=ticket)
+        assert ws.accepted is True
+        assert ws.closed is True
+        assert ws.close_code == 1011

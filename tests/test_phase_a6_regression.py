@@ -143,12 +143,12 @@ def test_intro_to_anchor_regression_100_runs():
 
         # 1. Start Session
         state, effects = step(state, SessionStart(session_id=f"test_intro_{iteration}", plan=plan, now_ms=now))
-        assert state.phase == ConductorPhase.WELCOME
+        assert state.phase in (ConductorPhase.WELCOME, ConductorPhase.GREETING)
         now += rng.randint(200, 500)
 
-        # 2. Welcome spoken -> Ready Gate
+        # 2. Welcome / Greeting spoken -> Ready Gate / Greeting Response
         state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=now))
-        assert state.phase == ConductorPhase.READY_GATE
+        assert state.phase in (ConductorPhase.READY_GATE, ConductorPhase.GREETING_RESPONSE)
         now += rng.randint(50, 200)
 
         # 3. Ready Button -> Intro question spoken
@@ -208,8 +208,23 @@ def test_intro_to_anchor_regression_100_runs():
         assert len(persist_effects) == 1, f"Seed {seed}: Expected 1 Persist effect, got {len(persist_effects)}"
         assert persist_effects[0].turn["question_kind"] == "intro_hook"
 
-        # 2. Exactly one Speak effect emitted for the first anchor question
-        speak_effects = [e for e in commit_effects if isinstance(e, Speak)]
+        # 2. Exactly one RequestDecision emitted for intro answer, followed by DecisionReady transitioning to first anchor
+        req = next((e for e in commit_effects if isinstance(e, RequestDecision)), None)
+        assert req is not None, f"Seed {seed}: Expected RequestDecision effect"
+        state, dec_effects = step(
+            state,
+            DecisionReady(
+                token=req.token,
+                decision={
+                    "action": "new_topic",
+                    "ack": "Thanks for sharing.",
+                    "target_skill": "Python",
+                    "question": first_anchor_text,
+                },
+                now_ms=final_tick_ms + 50,
+            ),
+        )
+        speak_effects = [e for e in dec_effects if isinstance(e, Speak)]
         assert len(speak_effects) == 1, f"Seed {seed}: Expected 1 Speak effect, got {len(speak_effects)}"
         spoken_text = speak_effects[0].text
 

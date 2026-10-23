@@ -58,6 +58,34 @@ describe('PreFlightCheckModal Component', () => {
     ).toBeInTheDocument();
   });
 
+  it('lists output speakers and lets the candidate choose one', async () => {
+    const origEnumerate = navigator.mediaDevices.enumerateDevices;
+    navigator.mediaDevices.enumerateDevices = vi.fn(async () => [
+      { deviceId: 'mic-1', kind: 'audioinput', label: 'Test Microphone' },
+      { deviceId: 'cam-1', kind: 'videoinput', label: 'Test Camera' },
+      { deviceId: 'speaker-1', kind: 'audiooutput', label: 'Built-in Speakers' },
+      { deviceId: 'speaker-2', kind: 'audiooutput', label: 'USB Headphones' },
+    ]);
+
+    render(
+      <PreFlightCheckModal
+        isOpen={true}
+        onClose={vi.fn()}
+        onProceedToInterview={vi.fn()}
+        jobTitle="Full Stack Engineer"
+        candidateName="Test User"
+      />
+    );
+
+    const speakerSelect = await screen.findByTestId('preflight-speaker-select');
+    expect(speakerSelect).toHaveValue('speaker-1');
+
+    fireEvent.change(speakerSelect, { target: { value: 'speaker-2' } });
+    expect(speakerSelect).toHaveValue('speaker-2');
+
+    navigator.mediaDevices.enumerateDevices = origEnumerate;
+  });
+
   it('displays "Setting up the interview environment..." when entering', () => {
     render(
       <PreFlightCheckModal

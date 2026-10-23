@@ -71,13 +71,14 @@ def setup_test_database_schema():
 
     async def _teardown_schema():
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
+            if engine.dialect.name == "postgresql":
+                await conn.execute(text("DROP SCHEMA public CASCADE;"))
+                await conn.execute(text("CREATE SCHEMA public;"))
+            else:
+                await conn.run_sync(Base.metadata.drop_all)
         await engine.dispose()
 
-    try:
-        asyncio.run(_teardown_schema())
-    except Exception:
-        pass
+    asyncio.run(_teardown_schema())
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +100,4 @@ def clean_test_database_after_test():
                 for table in reversed(Base.metadata.sorted_tables):
                     await conn.execute(table.delete())
 
-    try:
-        asyncio.run(_truncate_all_tables())
-    except Exception as exc:
-        pass
+    asyncio.run(_truncate_all_tables())

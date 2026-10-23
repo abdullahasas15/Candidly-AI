@@ -24,7 +24,10 @@ from backend.app.database import AsyncSessionLocal
 from backend.app.models import InterviewSession
 from backend.app.services.auth import decode_access_token
 from backend.app.services.interview_v2.conductor import ConductorPhase
+from backend.app.services.interview_v2.finalizer import finalize_interview_session
+from backend.app.services.ws_ticket_store import consume_ws_ticket
 from backend.app.services.interview_v2.runner import (
+    SESSION_STATE_CACHE,
     SessionRunner,
     build_script,
     load_real_session_script,
@@ -40,10 +43,18 @@ router = APIRouter(tags=["interview_v2"])
 # Active runner registry: session_id -> SessionRunner
 ACTIVE_RUNNERS: Dict[str, SessionRunner] = {}
 
+# Pending disconnect grace tasks: session_id -> asyncio.Task
+PENDING_DISCONNECT_TASKS: Dict[str, asyncio.Task] = {}
+
 
 @router.on_event("startup")
 async def _on_startup() -> None:
-    """Pre-synthesize the 8 bridge clips into memory at startup."""
+    """Pre-synthesize the 8 bridge clips into memory at startup and verify director model."""
+    try:
+        from backend.app.services.interview_v2.director import verify_director_model
+        verify_director_model()
+    except Exception as e:
+        logger.warning("Director model verification failed at startup: %s", e)
     asyncio.create_task(warmup_bridge_cache())
 
 
@@ -128,24 +139,59 @@ async def ws_interview_endpoint(
         await websocket.close(code=4401, reason="Unauthorized: Missing or invalid ticket")
         return
 
-    # 2. Ticket signature and session binding are valid. Call accept() BEFORE loading session / checking ownership
-    # so terminal close frames (4004, 4403, 4000, 4003, 1011) can reach the client.
+    # 1b. Atomically consume the ticket in shared storage. The DB primary-key
+    # constraint makes this single-use across workers, not just this process.
+    dev_bypass = bool(allow_dev and (not auth_ticket or auth_ticket in ("dev", "test", "dev-token")))
+    if not dev_bypass:
+        try:
+            consumed = await consume_ws_ticket(auth_ticket, claims)
+        except Exception as exc:
+            logger.exception("WebSocket ticket store unavailable for session %s: %s", session_id, exc)
+            await websocket.close(code=1011, reason="Ticket store unavailable")
+            return
+        if not consumed:
+            logger.warning("Rejecting replayed WebSocket ticket for session %s", session_id)
+            await websocket.close(code=4401, reason="Unauthorized: Ticket already used")
+            return
+
+    # 2. Cancel any pending disconnect grace finalization for this session
+    pending_disco = PENDING_DISCONNECT_TASKS.pop(session_id, None)
+    if pending_disco and not pending_disco.done():
+        logger.info("Session %s reconnected before disconnect grace expired; cancelling finalizer", session_id)
+        pending_disco.cancel()
+
+    # 3. Call accept() BEFORE loading session / checking ownership so terminal close frames reach client
     await websocket.accept()
 
-    # 3. Exact origin check
+    # 4. Exact origin check
     headers = getattr(websocket, "headers", {})
     origin = headers.get("origin") if hasattr(headers, "get") else None
-    if origin and not allow_dev:
-        raw_allowed = os.getenv("ALLOWED_ORIGINS", "").split(",")
+    env = os.getenv("ENV", "development").lower()
+    raw_allowed = os.getenv("ALLOWED_ORIGINS", "")
+
+    if env == "production":
+        allowed_list = [ao.strip() for ao in raw_allowed.split(",") if ao.strip()]
+        if not allowed_list:
+            logger.critical("ALLOWED_ORIGINS must be configured in production environment!")
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "ServerConfigurationError",
+                "detail": "Allowed origins not configured in production.",
+            })
+            await websocket.close(code=1011, reason="Server misconfigured")
+            return
+    else:
         default_origins = [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "http://localhost:5173",
             "http://127.0.0.1:5173",
         ]
-        all_allowed = [ao.strip() for ao in raw_allowed if ao.strip()] + default_origins
+        allowed_list = [ao.strip() for ao in raw_allowed.split(",") if ao.strip()] + default_origins
+
+    if origin and not allow_dev:
         allowed_tuples = set()
-        for ao in all_allowed:
+        for ao in allowed_list:
             p = urlparse(ao)
             allowed_tuples.add((p.scheme, p.hostname, p.port))
 
@@ -161,90 +207,130 @@ async def ws_interview_endpoint(
             await websocket.close(code=4403, reason="Forbidden origin")
             return
 
-    # 4. Load real session script from database with eager relationships
-    session, script = await load_real_session_script(session_id)
-    if not session:
-        logger.warning("Session %s not found in database", session_id)
-        await websocket.send_json({
-            "type": "SessionError",
-            "error": "SessionNotFound",
-            "detail": f"Interview session {session_id} not found.",
-        })
-        await websocket.close(code=4004, reason="Session not found")
-        return
+    # 5. Full lifecycle wrapped in try/except/finally
+    flux_client: Optional[FluxSTTClient] = None
+    aura_client: Optional[AuraTTSClient] = None
+    runner: Optional[SessionRunner] = None
+    flux_task: Optional[asyncio.Task[None]] = None
+    session: Optional[InterviewSession] = None
 
-    # 5. Ownership check: user must be candidate, recruiter, or admin
-    user_id = claims.get("sub") or claims.get("id")
-    user_email = (claims.get("email") or "").lower()
-    user_role = claims.get("role")
+    try:
+        # Load real session script from database with eager relationships
+        session, script = await load_real_session_script(session_id)
+        if not session:
+            logger.warning("Session %s not found in database", session_id)
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "SessionNotFound",
+                "detail": f"Interview session {session_id} not found.",
+            })
+            await websocket.close(code=4004, reason="Session not found")
+            return
 
-    is_dev = allow_dev and user_role == "dev"
-    is_admin = user_role == "admin"
-    is_candidate = (
-        hasattr(session, "application")
-        and session.application
-        and (
-            getattr(session.application, "candidate_id", None) == user_id
-            or (getattr(session.application, "email", None) and session.application.email.lower() == user_email)
+        # 1. Ownership check: user must be candidate, recruiter, admin, or dev
+        user_id = claims.get("sub") or claims.get("id")
+        user_email = (claims.get("email") or "").lower()
+        user_role = claims.get("role")
+
+        is_dev = allow_dev and user_role == "dev"
+        is_admin = user_role == "admin"
+        is_candidate = (
+            session.application
+            and (
+                getattr(session.application, "candidate_id", None) == user_id
+                or (getattr(session.application, "email", None) and session.application.email.lower() == user_email)
+            )
         )
-    )
-    is_recruiter = (
-        hasattr(session, "job")
-        and session.job
-        and getattr(session.job, "recruiter_id", None) == user_id
-    )
+        is_recruiter = (
+            session.job
+            and getattr(session.job, "recruiter_id", None) == user_id
+        )
 
-    if not (is_candidate or is_recruiter or is_admin or is_dev):
-        logger.warning("User %s is not authorized for session %s", user_id, session_id)
-        await websocket.send_json({
-            "type": "SessionError",
-            "error": "Forbidden",
-            "detail": "User is not authorized for this session.",
-        })
-        await websocket.close(code=4403, reason="Forbidden: Not session owner")
-        return
+        if not (is_candidate or is_recruiter or is_admin or is_dev):
+            logger.warning("User %s is not authorized for session %s", user_id, session_id)
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "Forbidden",
+                "detail": "User is not authorized for this session.",
+            })
+            await websocket.close(code=4403, reason="Forbidden: Not session owner")
+            return
 
-    if not script.get("questions"):
-        logger.warning("Session %s has no questions in database", session_id)
-        await websocket.send_json({
-            "type": "SessionError",
-            "error": "EmptySession",
-            "detail": f"Interview session {session_id} has no questions configured.",
-        })
-        await websocket.close(code=4000)
-        return
+        # 2. Status validation (P1-1)
+        if session.status == "completed":
+            logger.info("Rejecting WS connection for already completed session %s", session_id)
+            await websocket.send_json({
+                "type": "SessionEnded",
+                "session_id": session_id,
+                "status": "completed",
+                "detail": "Interview session is already completed.",
+            })
+            await websocket.close(code=1000, reason="Session already completed")
+            return
 
-    # 6. Key pool & audio clients
-    key_pool = get_shared_key_pool()
-    flux_client = FluxSTTClient(
-        key_pool=key_pool,
-        model="flux-general-en",
-        sample_rate=16000,
-        encoding="linear16",
-    )
-    aura_client = AuraTTSClient(
-        key_pool=key_pool,
-        sample_rate=24000,
-        encoding="linear16",
-    )
+        if session.status == "cancelled":
+            logger.info("Rejecting WS connection for cancelled session %s", session_id)
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "SessionCancelled",
+                "detail": "Interview session has been cancelled.",
+            })
+            await websocket.close(code=4000, reason="Session cancelled")
+            return
 
-    try:
-        await flux_client.start()
-        if hasattr(flux_client, "wait_until_ready"):
-            await flux_client.wait_until_ready(timeout=10.0)
-    except Exception as e:
-        logger.error("Flux STT initialization failed for session %s: %s", session_id, e)
-        await websocket.send_json({
-            "type": "SessionError",
-            "error": "STTInitializationFailed",
-            "detail": "Failed to initialize audio transcription service.",
-        })
-        await websocket.close(code=4003)
-        return
+        if session.status == "scheduled" and not allow_dev:
+            logger.warning("Session %s is in 'scheduled' status; client must call /start first", session_id)
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "SessionNotStarted",
+                "detail": "Interview session has not been started. Please start the interview via preflight first.",
+            })
+            await websocket.close(code=4000, reason="Session not started")
+            return
 
-    # 7. Clean up incumbent runner ONLY after authorization and connection success
-    runner = None
-    try:
+        # 3. Validate session has questions configured
+        if not script.get("questions"):
+            logger.warning("Session %s has no questions in database", session_id)
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "EmptySession",
+                "detail": f"Interview session {session_id} has no questions configured.",
+            })
+            await websocket.close(code=4000)
+            return
+
+        # Load persisted conductor state if present
+        db_conductor_state = (session.runtime_state or {}).get("conductor_v2") if isinstance(session.runtime_state, dict) else None
+
+        # Key pool & audio clients
+        key_pool = get_shared_key_pool()
+        flux_client = FluxSTTClient(
+            key_pool=key_pool,
+            model="flux-general-en",
+            sample_rate=16000,
+            encoding="linear16",
+        )
+        aura_client = AuraTTSClient(
+            key_pool=key_pool,
+            sample_rate=24000,
+            encoding="linear16",
+        )
+
+        try:
+            await flux_client.start()
+            if hasattr(flux_client, "wait_until_ready"):
+                await flux_client.wait_until_ready(timeout=10.0)
+        except Exception as e:
+            logger.error("Flux STT initialization failed for session %s: %s", session_id, e)
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "STTInitializationFailed",
+                "detail": "Failed to initialize audio transcription service.",
+            })
+            await websocket.close(code=4003)
+            return
+
+        # Clean up incumbent runner ONLY after authorization and connection success
         if session_id in ACTIVE_RUNNERS:
             old_runner = ACTIVE_RUNNERS.pop(session_id, None)
             if old_runner:
@@ -259,18 +345,29 @@ async def ws_interview_endpoint(
             websocket=websocket,
             flux_client=flux_client,
             aura_client=aura_client,
+            initial_db_state=db_conductor_state,
         )
         ACTIVE_RUNNERS[session_id] = runner
 
         logger.info("Client successfully initialized /ws/interview/%s (user=%s)", session_id, user_id)
 
-        # Forward Flux events into runner queue
+        # Forward Flux events into runner queue with stream monitoring
         async def _forward_flux_loop() -> None:
             try:
                 async for ev in flux_client.stream_events():
                     await runner.on_flux_event(ev)
             except (asyncio.CancelledError, Exception) as e:
                 logger.debug("Flux event forwarding ended: %s", e)
+                if runner and runner.running and runner.state.phase not in (ConductorPhase.COMPLETED, ConductorPhase.CLOSING):
+                    try:
+                        await websocket.send_json({
+                            "type": "SessionError",
+                            "error": "STTStreamDisconnected",
+                            "detail": "Audio transcription stream disconnected.",
+                            "retryable": True,
+                        })
+                    except Exception:
+                        pass
 
         # Inform client of session metadata first
         await websocket.send_json({
@@ -278,73 +375,50 @@ async def ws_interview_endpoint(
             "session_id": session_id,
             "question_count": len(script.get("questions", [])),
         })
-    except Exception as e:
-        logger.error("Unexpected setup exception for session %s: %s", session_id, e, exc_info=True)
-        ACTIVE_RUNNERS.pop(session_id, None)
+
+        # Wait for explicit client_ready handshake event (60s timeout per P1-11)
+        client_ready = False
         try:
-            await flux_client.stop()
-        except Exception:
-            pass
-        try:
+            while not client_ready:
+                msg = await asyncio.wait_for(websocket.receive(), timeout=60.0)
+                if "text" in msg and msg["text"]:
+                    try:
+                        payload = json.loads(msg["text"])
+                    except Exception:
+                        continue
+                    if payload.get("type") == "client_ready":
+                        client_ready = True
+                        break
+                    elif payload.get("type") == "ping":
+                        await websocket.send_json({"type": "pong", "time": time.time()})
+                elif "bytes" in msg and msg["bytes"]:
+                    pass
+        except asyncio.TimeoutError:
+            logger.warning("Session %s: client_ready timeout after 60s", session_id)
             await websocket.send_json({
                 "type": "SessionError",
-                "error": "SetupFailed",
-                "detail": "Internal error initializing interview session.",
+                "error": "HandshakeTimeout",
+                "detail": "Client audio readiness handshake timed out after 60 seconds.",
             })
-            await websocket.close(code=1011, reason="Internal setup error")
-        except Exception:
-            pass
-        return
+            await websocket.close(code=4008)
+            return
 
-    # Wait for explicit client_ready handshake event before starting greeting
-    client_ready = False
-    try:
-        while not client_ready:
-            msg = await asyncio.wait_for(websocket.receive(), timeout=15.0)
-            if "text" in msg and msg["text"]:
-                try:
-                    payload = json.loads(msg["text"])
-                except Exception:
-                    continue
-                if payload.get("type") == "client_ready":
-                    client_ready = True
-                    break
-                elif payload.get("type") == "ping":
-                    await websocket.send_json({"type": "pong", "time": time.time()})
-            elif "bytes" in msg and msg["bytes"]:
-                # Drop candidate PCM before handshake completes
-                pass
-    except asyncio.TimeoutError:
-        logger.warning("Session %s: client_ready timeout after 15s", session_id)
+        # Notify client that handshake is complete
         await websocket.send_json({
-            "type": "SessionError",
-            "error": "HandshakeTimeout",
-            "detail": "Client audio readiness handshake timed out.",
+            "type": "SessionReady",
+            "session_id": session_id,
         })
-        await flux_client.stop()
-        await websocket.close(code=4008)
-        ACTIVE_RUNNERS.pop(session_id, None)
-        return
 
-    # Notify client that handshake is complete
-    await websocket.send_json({
-        "type": "SessionReady",
-        "session_id": session_id,
-    })
+        flux_task = asyncio.create_task(_forward_flux_loop())
+        await runner.start()
 
-    flux_task = asyncio.create_task(_forward_flux_loop())
-    await runner.start()
-
-    # 4. Inbound WebSocket message loop
-    try:
+        # Inbound WebSocket message loop
         while True:
             message = await websocket.receive()
 
-            # Binary mic PCM chunk (16kHz mono)
             if "bytes" in message and message["bytes"]:
                 await runner.on_mic_audio(message["bytes"])
 
-            # JSON control frame
             elif "text" in message and message["text"]:
                 try:
                     payload = json.loads(message["text"])
@@ -375,8 +449,6 @@ async def ws_interview_endpoint(
                     await runner.on_end_button(request_id=req_id)
 
                 elif msg_type == "restart_session":
-                    from backend.app.services.interview_v2.runner import SESSION_STATE_CACHE
-                    from backend.app.services.interview_v2.conductor import SessionStart, ConductorState
                     SESSION_STATE_CACHE.pop(session_id, None)
                     runner.state = ConductorState()
                     await runner.queue.put(SessionStart(session_id=session_id, plan=runner.script, now_ms=runner.now_ms()))
@@ -387,12 +459,96 @@ async def ws_interview_endpoint(
     except (WebSocketDisconnect, RuntimeError):
         logger.info("Interview WebSocket disconnected for session %s", session_id)
     except Exception as e:
-        logger.error("Error in Interview WebSocket loop: %s", e)
+        logger.error("Error in Interview WebSocket lifecycle for %s: %s", session_id, e, exc_info=True)
+        try:
+            await websocket.send_json({
+                "type": "SessionError",
+                "error": "InternalServerError",
+                "detail": "Unexpected error in interview session.",
+            })
+            await websocket.close(code=1011, reason="Internal error")
+        except Exception:
+            pass
     finally:
-        flux_task.cancel()
-        await flux_client.stop()
-        await runner.stop()
-        ACTIVE_RUNNERS.pop(session_id, None)
+        # 1. Wait for in-flight finalization before stopping runner
+        if runner:
+            try:
+                await runner.wait_for_in_flight_finalization(timeout=10.0)
+            except Exception as e:
+                logger.warning("Error waiting for in-flight finalization: %s", e)
+
+        # 2. Cancel and await flux task
+        if flux_task:
+            flux_task.cancel()
+            try:
+                await flux_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # 3. Stop Flux client
+        if flux_client:
+            try:
+                await flux_client.stop()
+            except Exception:
+                pass
+
+        # 4. Stop runner
+        if runner:
+            try:
+                await runner.stop()
+            except Exception:
+                pass
+
+        # 5. Close Aura client
+        if aura_client:
+            try:
+                await aura_client.close()
+            except Exception:
+                pass
+
+        # 6. Evict runner from active registry if this was the registered instance
+        if ACTIVE_RUNNERS.get(session_id) is runner:
+            ACTIVE_RUNNERS.pop(session_id, None)
+
+        # 7. Disconnect grace finalizer for abandoned sessions (P1-2)
+        # INIT is normally excluded because the runner has not started. However,
+        # `/start` may already have moved the session to in_progress before a
+        # handshake timeout, so an abandoned INIT session still needs cleanup.
+        session_status = getattr(session, "status", None) if session else None
+        should_finalize_abandoned = bool(
+            runner
+            and runner.state.phase != ConductorPhase.COMPLETED
+            and (
+                runner.state.phase != ConductorPhase.INIT
+                or session_status in ("in_progress", "preflight", "paused")
+            )
+        )
+        if should_finalize_abandoned:
+            grace_seconds = float(os.getenv("INTERVIEW_DISCONNECT_GRACE_SECONDS", "120"))
+            is_closing = runner.state.phase == ConductorPhase.CLOSING
+            actual_grace = 5.0 if is_closing else grace_seconds
+
+            async def _disco_finalizer(s_id: str, delay: float):
+                try:
+                    await asyncio.sleep(delay)
+                    logger.info("Disconnect grace period (%.2fs) expired for session %s; finalizing", delay, s_id)
+                    async with AsyncSessionLocal() as db:
+                        await finalize_interview_session(s_id, ended_by="abandoned", db=db)
+                    SESSION_STATE_CACHE.pop(s_id, None)
+                except asyncio.CancelledError:
+                    logger.debug("Disconnect grace cancelled for %s due to reconnect", s_id)
+                except Exception as err:
+                    logger.error("Failed to finalize disconnected session %s: %s", s_id, err)
+                finally:
+                    # A reconnect may have replaced this task with a newer one.
+                    # Only remove the registry entry if it still belongs to us.
+                    if PENDING_DISCONNECT_TASKS.get(s_id) is asyncio.current_task():
+                        PENDING_DISCONNECT_TASKS.pop(s_id, None)
+
+            old_task = PENDING_DISCONNECT_TASKS.pop(session_id, None)
+            if old_task and not old_task.done():
+                old_task.cancel()
+            PENDING_DISCONNECT_TASKS[session_id] = asyncio.create_task(_disco_finalizer(session_id, actual_grace))
 
 
 # -----------------------------------------------------------------------------
@@ -613,20 +769,34 @@ DEV_INTERVIEW_PAGE_HTML = r"""<!DOCTYPE html>
             this.writeIdx = 0;
             this.readIdx = 0;
             this.hasStarted = false;
+            this.isTtsDone = false;
             this.currentSpeechId = null;
 
             this.port.onmessage = (e) => {
               const { type, speechId, pcm16 } = e.data;
               if (type === 'chunk' && pcm16) {
+                if (speechId && speechId !== this.currentSpeechId) {
+                  this.currentSpeechId = speechId;
+                  this.hasStarted = false;
+                  this.isTtsDone = false;
+                  this.readIdx = this.writeIdx;
+                }
                 const arr = new Int16Array(pcm16);
                 for (let i = 0; i < arr.length; i++) {
                   this.ring[this.writeIdx % this.ring.length] = arr[i] / 32768.0;
                   this.writeIdx++;
                 }
-                if (speechId) this.currentSpeechId = speechId;
+              } else if (type === 'tts_done') {
+                this.isTtsDone = true;
+                if (this.writeIdx - this.readIdx <= 0) {
+                  this.hasStarted = false;
+                  this.isTtsDone = false;
+                  this.port.postMessage({ type: 'playback_ended', speechId: this.currentSpeechId });
+                }
               } else if (type === 'flush') {
                 this.readIdx = this.writeIdx;
                 this.hasStarted = false;
+                this.isTtsDone = false;
               }
             };
           }
@@ -634,7 +804,7 @@ DEV_INTERVIEW_PAGE_HTML = r"""<!DOCTYPE html>
             const out = outputs[0][0];
             const buffered = this.writeIdx - this.readIdx;
 
-            if (!this.hasStarted && buffered >= 3600) { // 150ms buffer
+            if (!this.hasStarted && (buffered >= 3600 || (this.isTtsDone && buffered > 0))) { // 150ms buffer or immediate if done
               this.hasStarted = true;
               this.port.postMessage({ type: 'playback_started', speechId: this.currentSpeechId });
             }
@@ -648,12 +818,18 @@ DEV_INTERVIEW_PAGE_HTML = r"""<!DOCTYPE html>
                   out[i] = 0;
                 }
               }
-              if (this.readIdx >= this.writeIdx) {
+              if (this.readIdx >= this.writeIdx && this.isTtsDone) {
                 this.hasStarted = false;
+                this.isTtsDone = false;
                 this.port.postMessage({ type: 'playback_ended', speechId: this.currentSpeechId });
               }
             } else {
               out.fill(0);
+              if (this.hasStarted && this.isTtsDone && buffered <= 0) {
+                this.hasStarted = false;
+                this.isTtsDone = false;
+                this.port.postMessage({ type: 'playback_ended', speechId: this.currentSpeechId });
+              }
             }
             return true;
           }
@@ -764,6 +940,8 @@ DEV_INTERVIEW_PAGE_HTML = r"""<!DOCTYPE html>
             botSpeakingBadge.innerText = 'Bot Speaking';
             botSpeakingBadge.className = 'text-xs px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold';
             if (msg.text) activeQuestionText.innerText = msg.text;
+          } else if (msg.type === 'TTSDone') {
+            if (playbackWorklet) playbackWorklet.port.postMessage({ type: 'tts_done', speechId: msg.speech_id || currentSpeechId });
           } else if (msg.type === 'TTSCancelled') {
             if (playbackWorklet) playbackWorklet.port.postMessage({ type: 'flush' });
           } else if (msg.type === 'TurnMetrics') {

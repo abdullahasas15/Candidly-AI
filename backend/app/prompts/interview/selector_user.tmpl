@@ -1,0 +1,37 @@
+Evaluate the candidate's answer and choose the next action.
+
+=== CONTEXT ===
+Candidate & Job: $candidate_and_job_summary
+Remaining Time: $remaining_time_mins minutes
+Follow-ups Remaining on Current Question: $followups_remaining
+
+=== RECENT TURNS (MAX 2) ===
+$past_two_turns_json
+
+=== CURRENT QUESTION ===
+$current_question_json
+
+=== CANDIDATE ANSWER ===
+$candidate_answer
+
+=== NEXT PLANNED QUESTION(S) ===
+$next_planned_question_json
+
+=== OPTIONAL PREPARED FOLLOW-UPS ===
+$optional_prepared_followups_json
+
+=== ALLOWED ACTIONS ===
+$allowed_actions_json
+
+Return ONLY valid JSON matching this schema:
+{
+  "decision": "ADVANCE | FOLLOW_UP | CLARIFY_OR_REPEAT | CANDIDATE_QA | END_INTERVIEW",
+  "planned_question_id": "required for ADVANCE, otherwise null",
+  "follow_up_question": "required for FOLLOW_UP, otherwise null",
+  "clarify_text": "required for CLARIFY_OR_REPEAT, otherwise null",
+  "ack": "optional brief grounded gist, max 8 words, no question mark, or null",
+  "bridge": "optional transition, max 12 words, no question mark, or null",
+  "reason_code": "planned_next | answer_gap | ambiguity | transcription_issue | candidate_question | time_limit | plan_complete",
+  "rationale": "optional <= 20 words, or null",
+  "confidence": 0.9
+}

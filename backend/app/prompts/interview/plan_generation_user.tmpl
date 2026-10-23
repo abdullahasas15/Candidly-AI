@@ -1,0 +1,32 @@
+Please write the spoken interview wording for the provided PlanSkeleton slots.
+
+=== CANDIDATE PROFILE (SANITIZED) ===
+$candidate_profile_json
+
+=== JOB PROFILE ===
+$job_profile_json
+
+=== COMPETENCIES & RUBRICS (PRIVATE EVALUATION CONTEXT) ===
+$competencies_json
+
+=== CANDIDATE PERSONALIZATION HINTS ===
+$personalization_json
+
+=== PLAN SKELETON (SLOTS TO COMPLETE) ===
+$skeleton_json
+
+=== CONSTRAINTS ===
+$constraints_json
+
+Return ONLY valid JSON matching this exact structure:
+{
+  "schema_version": "interview_script.v1",
+  "slots": [
+    {
+      "id": "matching-slot-id",
+      "text": "spoken wording for this slot",
+      "transition_hint": "optional brief conversational bridge",
+      "source_refs": ["optional source reference"]
+    }
+  ]
+}

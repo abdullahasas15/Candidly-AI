@@ -50,7 +50,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
 registerProcessor('capture-processor', CaptureProcessor);
 `;
 
-const PLAYBACK_WORKLET_CODE = `
+export const PLAYBACK_WORKLET_CODE = `
 class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -59,23 +59,47 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this.writeIdx = 0;
     this.readIdx = 0;
     this.hasStarted = false;
+    this.isTtsDone = false;
     this.currentSpeechId = null;
     this.sampleRatio = 24000 / sampleRate; // Aura-2 is 24kHz
+    this.prebufferSamples = 5400; // 225ms at 24kHz
     this.resamplePos = 0;
     this.levelEmitCounter = 0;
 
     this.port.onmessage = (e) => {
       const { type, speechId, pcm16 } = e.data;
       if (type === 'chunk' && pcm16) {
+        if (speechId && speechId !== this.currentSpeechId) {
+          this.currentSpeechId = speechId;
+          this.hasStarted = false;
+          this.isTtsDone = false;
+          this.readIdx = this.writeIdx;
+        }
         const arr = new Int16Array(pcm16);
         for (let i = 0; i < arr.length; i++) {
           this.ring[this.writeIdx % this.ring.length] = arr[i] / 32768.0;
           this.writeIdx++;
         }
-        if (speechId) this.currentSpeechId = speechId;
+      } else if (type === 'start_speech') {
+        if (speechId) {
+          if (speechId !== this.currentSpeechId) {
+            this.readIdx = this.writeIdx;
+          }
+          this.currentSpeechId = speechId;
+        }
+        this.hasStarted = false;
+        this.isTtsDone = false;
+      } else if (type === 'tts_done') {
+        this.isTtsDone = true;
+        if (this.writeIdx - this.readIdx <= 0) {
+          this.hasStarted = false;
+          this.isTtsDone = false;
+          this.port.postMessage({ type: 'playback_drained', speechId: this.currentSpeechId });
+        }
       } else if (type === 'flush') {
         this.readIdx = this.writeIdx;
         this.hasStarted = false;
+        this.isTtsDone = false;
         this.resamplePos = 0;
       }
     };
@@ -85,8 +109,8 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     const out = outputs[0][0];
     const buffered = this.writeIdx - this.readIdx;
 
-    // Pre-buffer threshold: 150ms at 24kHz is 3600 samples
-    if (!this.hasStarted && buffered >= 3600) {
+    // Pre-buffer threshold: 225ms at 24kHz is 5400 samples, or start immediately if tts_done
+    if (!this.hasStarted && (buffered >= this.prebufferSamples || (this.isTtsDone && buffered > 0))) {
       this.hasStarted = true;
       this.port.postMessage({ type: 'playback_started', speechId: this.currentSpeechId });
     }
@@ -115,12 +139,18 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.port.postMessage({ type: 'bot_level', level: Math.min(1, rms * 3.5) });
       }
 
-      if (this.readIdx >= this.writeIdx) {
+      if (this.readIdx >= this.writeIdx && this.isTtsDone) {
         this.hasStarted = false;
-        this.port.postMessage({ type: 'playback_ended', speechId: this.currentSpeechId });
+        this.isTtsDone = false;
+        this.port.postMessage({ type: 'playback_drained', speechId: this.currentSpeechId });
       }
     } else {
       out.fill(0);
+      if (this.hasStarted && this.isTtsDone && buffered <= 0) {
+        this.hasStarted = false;
+        this.isTtsDone = false;
+        this.port.postMessage({ type: 'playback_drained', speechId: this.currentSpeechId });
+      }
     }
     return true;
   }
@@ -137,24 +167,49 @@ export async function initAudioPipeline({
   onPcmChunk,
   onPlaybackStarted,
   onPlaybackEnded,
+  onPlaybackDrained,
   onMicLevel,
   onBotLevel,
 }) {
-  // Create object URLs from the embedded scripts
-  const captureBlob = new Blob([CAPTURE_WORKLET_CODE], { type: 'application/javascript' });
-  const playbackBlob = new Blob([PLAYBACK_WORKLET_CODE], { type: 'application/javascript' });
+  // Track each module independently. Marking the whole context registered
+  // after a failed addModule leaves retries permanently broken: the next
+  // attempt skips registration and AudioWorkletNode construction fails.
+  if (!audioCtx.__registeredWorklets) {
+    audioCtx.__registeredWorklets = { capture: false, playback: false };
+  }
 
-  const captureUrl = URL.createObjectURL(captureBlob);
-  const playbackUrl = URL.createObjectURL(playbackBlob);
+  const registerModule = async (key, url) => {
+    if (audioCtx.__registeredWorklets[key]) return;
+    try {
+      await audioCtx.audioWorklet.addModule(url);
+    } catch (e) {
+      // A module may already be registered after a partially successful
+      // attempt. Treat that specific error as success; otherwise propagate.
+      if (!String(e).includes('already registered')) {
+        throw e;
+      }
+    }
+    audioCtx.__registeredWorklets[key] = true;
+  };
 
-  try {
-    await Promise.all([
-      audioCtx.audioWorklet.addModule(captureUrl),
-      audioCtx.audioWorklet.addModule(playbackUrl),
-    ]);
-  } finally {
-    URL.revokeObjectURL(captureUrl);
-    URL.revokeObjectURL(playbackUrl);
+  if (!audioCtx.__registeredWorklets.capture || !audioCtx.__registeredWorklets.playback) {
+    const captureBlob = new Blob([CAPTURE_WORKLET_CODE], { type: 'application/javascript' });
+    const playbackBlob = new Blob([PLAYBACK_WORKLET_CODE], { type: 'application/javascript' });
+
+    const captureUrl = URL.createObjectURL(captureBlob);
+    const playbackUrl = URL.createObjectURL(playbackBlob);
+
+    try {
+      const results = await Promise.allSettled([
+        registerModule('capture', captureUrl),
+        registerModule('playback', playbackUrl),
+      ]);
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed) throw failed.reason;
+    } finally {
+      URL.revokeObjectURL(captureUrl);
+      URL.revokeObjectURL(playbackUrl);
+    }
   }
 
   // Create worklet nodes
@@ -178,6 +233,12 @@ export async function initAudioPipeline({
     const { type, speechId, level } = e.data;
     if (type === 'playback_started' && onPlaybackStarted) {
       onPlaybackStarted(speechId);
+    } else if (type === 'playback_drained') {
+      if (onPlaybackDrained) {
+        onPlaybackDrained(speechId);
+      } else if (onPlaybackEnded) {
+        onPlaybackEnded(speechId);
+      }
     } else if (type === 'playback_ended' && onPlaybackEnded) {
       onPlaybackEnded(speechId);
     } else if (type === 'bot_level' && onBotLevel) {
@@ -195,8 +256,28 @@ export async function initAudioPipeline({
         [arrayBuffer]
       );
     },
+    markSpeechDone: (speechId) => {
+      playbackNode.port.postMessage({ type: 'tts_done', speechId });
+    },
     flushPlayback: () => {
       playbackNode.port.postMessage({ type: 'flush' });
+    },
+    dispose: () => {
+      try {
+        if (captureNode) {
+          captureNode.port.onmessage = null;
+          captureNode.disconnect();
+        }
+        if (micSource) {
+          micSource.disconnect();
+        }
+        if (playbackNode) {
+          playbackNode.port.onmessage = null;
+          playbackNode.disconnect();
+        }
+      } catch (err) {
+        console.warn('Error disposing audio pipeline:', err);
+      }
     },
   };
 }

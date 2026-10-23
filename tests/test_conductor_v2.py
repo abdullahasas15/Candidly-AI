@@ -43,6 +43,33 @@ from backend.app.services.interview_v2.conductor import (
 )
 
 
+def complete_intro_and_advance(
+    state: ConductorState,
+    now_ms: int = 4000,
+    intro_ans: str = "I have five years of backend engineering experience with Python.",
+) -> ConductorState:
+    state, _ = step(state, TurnEnd(text=intro_ans, turn_id="t_intro", now_ms=now_ms))
+    state, effects = step(state, Tick(now_ms=now_ms + 300))
+    req = next((e for e in effects if isinstance(e, RequestDecision)), None)
+    if req:
+        anchor_q = state.skill_questions.get("Python", {}).get("anchor")
+        state, _ = step(
+            state,
+            DecisionReady(
+                token=req.token,
+                decision={
+                    "action": "new_topic",
+                    "ack": "Thanks for sharing.",
+                    "target_skill": "Python",
+                    "question": anchor_q.question_text if anchor_q else "",
+                },
+                now_ms=now_ms + 400,
+            ),
+        )
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=now_ms + 1000))
+    return state
+
+
 def make_test_plan() -> Dict[str, Any]:
     """Create a realistic materializer-style interview plan with 3 skills."""
     return {
@@ -203,7 +230,7 @@ def test_late_turn_start_uncommit():
     state, commit_effects = step(state, Tick(now_ms=4300))
     assert state.is_committed is True
     assert any(isinstance(e, Persist) for e in commit_effects)
-    assert any(isinstance(e, Speak) for e in commit_effects)
+    assert any(isinstance(e, RequestDecision) for e in commit_effects)
     assert state.bot_audio_started is False
 
     # Candidate starts speaking again BEFORE BotAudioStarted!
@@ -219,6 +246,20 @@ def test_late_turn_start_uncommit():
     # Once BotAudioStarted arrives after a final commit, commit is permanent
     state, commit_effects2 = step(state, Tick(now_ms=5300))
     assert state.is_committed is True
+    req2 = next(e for e in commit_effects2 if isinstance(e, RequestDecision))
+    state, dec_effects2 = step(
+        state,
+        DecisionReady(
+            token=req2.token,
+            decision={
+                "action": "new_topic",
+                "ack": "Thanks.",
+                "target_skill": "Python",
+                "question": "How do you handle concurrency in Python?",
+            },
+            now_ms=5350,
+        ),
+    )
     speech_id = state.active_speech_id
     state, _ = step(state, BotAudioStarted(speech_id=speech_id, now_ms=5400))
     assert state.bot_audio_started is True
@@ -387,6 +428,23 @@ def test_bridge_fires_once_and_rotates():
     state, bridge_effects2 = step(state, Tick(now_ms=4300))
     assert not any(isinstance(e, PlayBridge) for e in bridge_effects2)
 
+    # Deliver decision for intro so next question is asked
+    req1 = next(e for e in commit_effects if isinstance(e, RequestDecision))
+    anchor_q = state.skill_questions.get("Python", {}).get("anchor")
+    state, _ = step(
+        state,
+        DecisionReady(
+            token=req1.token,
+            decision={
+                "action": "new_topic",
+                "ack": "Understood.",
+                "target_skill": "Python",
+                "question": anchor_q.question_text if anchor_q else "",
+            },
+            now_ms=4350,
+        ),
+    )
+
     # Finish bot speech and answer next question to test bridge rotation
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
     state, _ = step(state, TurnEnd(text="We also tuned our database connection pool settings.", turn_id="t2", now_ms=5500))
@@ -410,8 +468,24 @@ def test_reply_ready_in_300ms_cancels_bridge_timer():
     assert any(isinstance(e, ScheduleTimer) and e.name == "bridge" and e.at_ms == 4200 for e in commit_effects)
     assert "bridge" in state.active_timers
 
-    # Reply is ready in 300ms (at 3800ms) -> BotAudioStarted arrives
-    state, audio_effects = step(state, BotAudioStarted(speech_id=state.active_speech_id, now_ms=3800))
+    # Reply is ready in 300ms (at 3800ms) -> DecisionReady and BotAudioStarted arrive
+    req = next(e for e in commit_effects if isinstance(e, RequestDecision))
+    anchor_q = state.skill_questions.get("Python", {}).get("anchor")
+    state, dec_effects = step(
+        state,
+        DecisionReady(
+            token=req.token,
+            decision={
+                "action": "new_topic",
+                "ack": "Understood.",
+                "target_skill": "Python",
+                "question": anchor_q.question_text if anchor_q else "",
+            },
+            now_ms=3800,
+        ),
+    )
+    speak = next(e for e in dec_effects if isinstance(e, Speak))
+    state, audio_effects = step(state, BotAudioStarted(speech_id=speak.speech_id, now_ms=3800))
     # Must cancel the bridge timer immediately
     assert any(isinstance(e, CancelTimer) and e.name == "bridge" for e in audio_effects)
     assert "bridge" not in state.active_timers
@@ -485,10 +559,7 @@ def test_short_answer_uses_escalation():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
 
     # Intro answer (>= 6 words)
-    state, _ = step(state, TurnEnd(text="I am a software engineer with extensive backend experience.", turn_id="t1", now_ms=3500))
-    state, _ = step(state, Tick(now_ms=3800))
-    # Python anchor asked
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=4500))
+    state = complete_intro_and_advance(state, now_ms=3500, intro_ans="I am a software engineer with extensive backend experience.")
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     # Short answer (< 6 words): "Yes, I used asyncio." (4 words)
@@ -558,25 +629,29 @@ def test_state_serialization_roundtrip():
 def test_full_interview_progression_complete():
     """Verify an end-to-end hands-free interview with all skills probed."""
     state, effects = start_session()
-    assert state.phase == ConductorPhase.WELCOME
+    assert state.phase in (ConductorPhase.GREETING, ConductorPhase.WELCOME)
 
     asked_anchors: List[str] = []
 
-    # 1. Welcome -> Ready Gate
+    # 1. Greeting -> Greeting Response
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
-    assert state.phase == ConductorPhase.READY_GATE
+    assert state.phase == ConductorPhase.GREETING_RESPONSE
 
-    # 2. Ready Gate passed by voice
-    state, _ = step(state, TurnEnd(text="I am ready to start.", turn_id="ready_1", now_ms=2500))
+    # 2. Greeting answered -> Agenda
+    state, _ = step(state, TurnEnd(text="I am doing well, thank you.", turn_id="greeting_1", now_ms=2500))
+    assert state.phase == ConductorPhase.AGENDA
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
+    assert state.phase == ConductorPhase.AGENDA_RESPONSE
+
+    # 3. Agenda confirmed -> Intro
+    state, _ = step(state, TurnEnd(text="Sounds good, let's start.", turn_id="agenda_1", now_ms=3200))
     assert state.phase == ConductorPhase.INTRO
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3500))
 
-    # 3. Intro Answer -> Python Anchor
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
+    # 4. Intro Answer -> Python Anchor
+    state = complete_intro_and_advance(state, now_ms=4000)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
     asked_anchors.append(state.questions[state.current_question_index].question_text)
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
 
     # 4. Python Anchor Answer -> Python Follow-up
     state, _ = step(state, TurnEnd(text="We use asyncio for network coroutines and multiprocessing for CPU tasks.", turn_id="t_py_1", now_ms=5500))
@@ -747,23 +822,29 @@ def test_full_interview_progression_complete():
     "sounds good",
 ])
 def test_ready_gate_natural_phrases(phrase: str):
-    """Candidate saying 'let's begin', 'yes', 'ready', etc. smoothly passes ready gate."""
+    """Candidate saying 'let's begin', 'yes', 'ready', etc. in opening agenda response advances to INTRO."""
     state, _ = start_session()
-    # Welcome finishes speaking
+    # Greeting finishes speaking
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
-    assert state.phase == ConductorPhase.READY_GATE
+    assert state.phase == ConductorPhase.GREETING_RESPONSE
 
-    # Candidate speaks affirmative phrase
+    # Greeting reply -> Agenda
+    state, _ = step(state, TurnEnd(text="I am doing well.", turn_id="greeting_resp", now_ms=2200))
+    assert state.phase == ConductorPhase.AGENDA
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2400))
+    assert state.phase == ConductorPhase.AGENDA_RESPONSE
+
+    # Candidate speaks affirmative phrase to agenda
     state, effects = step(state, TurnEnd(text=phrase, turn_id="turn_ready", now_ms=2500))
     assert state.phase == ConductorPhase.INTRO
     assert any(isinstance(e, Speak) and "introduce yourself" in e.text.lower() for e in effects)
 
 
 def test_ready_gate_commit_button():
-    """Pressing CommitButton in READY_GATE passes ready gate to INTRO."""
+    """Pressing CommitButton in opening advances directly to INTRO."""
     state, _ = start_session()
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
-    assert state.phase == ConductorPhase.READY_GATE
+    assert state.phase == ConductorPhase.GREETING_RESPONSE
 
     state, effects = step(state, CommitButton(now_ms=2500))
     assert state.phase == ConductorPhase.INTRO
@@ -799,9 +880,7 @@ def test_decision_timeout_fallback():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     # Case A: Candidate mentions keywords matching probe_celery trigger ("task queues or celery or background workers")
@@ -830,9 +909,7 @@ def test_no_experience_hypothetical():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     # Candidate says they have no experience with this topic
@@ -870,9 +947,7 @@ def test_duplicate_followup_rejection():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     # Python anchor text is: "How do you handle concurrency in Python using asyncio versus multiprocessing?"
@@ -916,9 +991,7 @@ def test_covered_expectations_forces_next():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     state, _ = step(state, TurnEnd(text="I use asyncio for I/O and multiprocessing for CPU tasks.", turn_id="t_py", now_ms=5500))
@@ -956,9 +1029,7 @@ def test_max_2_followups_per_skill():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     # Artificially set followups_used to 2 for Python
@@ -1001,10 +1072,7 @@ def test_time_budget_forces_next():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    # Python anchor starts at 5000ms
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     # Now time reaches 5000 + 50000 = 55000ms (elapsed 50,000ms out of 100,000ms -> 50,000ms left < 60,000ms)
@@ -1040,9 +1108,7 @@ def test_tts_text_equals_recorded_text():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     state, _ = step(state, TurnEnd(text="We use asyncio extensively for task cancellation patterns in our services.", turn_id="t_py", now_ms=5500))
@@ -1082,9 +1148,7 @@ def test_stale_decision_token_ignored():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     state, _ = step(state, TurnEnd(text="We use asyncio for our microservices and multiprocessing for CPU tasks.", turn_id="t_py", now_ms=5500))
@@ -1120,9 +1184,7 @@ def test_resume_from_serialized_state_in_await_decision():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     state, _ = step(state, TurnEnd(text="We use asyncio for background task cancellation in our services.", turn_id="t_py", now_ms=5500))
@@ -1169,9 +1231,7 @@ def test_clarify_action_and_max_once_per_skill():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     # Vague answer (<15 words) on Python anchor
@@ -1235,9 +1295,7 @@ def test_deterministic_fallback_uses_clarify_and_never_escalation():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
     # Candidate gives a short 4-word answer with NO keyword overlap to probe triggers
@@ -1273,9 +1331,25 @@ def test_acks_appear_in_every_spoken_reply_including_intro():
     intro_ans = "I have five years of backend engineering experience with Python and distributed systems."
     state, _ = step(state, TurnEnd(text=intro_ans, turn_id="t_intro", now_ms=4000))
     state, effects = step(state, Tick(now_ms=4300))
+    intro_req = next(e for e in effects if isinstance(e, RequestDecision))
+    anchor_q = state.skill_questions.get("Python", {}).get("anchor")
+    intro_ack = "Thanks for sharing your backend engineering background."
+    state, dec_effects = step(
+        state,
+        DecisionReady(
+            token=intro_req.token,
+            decision={
+                "action": "new_topic",
+                "ack": intro_ack,
+                "target_skill": "Python",
+                "question": anchor_q.question_text if anchor_q else "",
+            },
+            now_ms=4400,
+        ),
+    )
     assert state.phase == ConductorPhase.SKILL_ANCHOR
 
-    speak_eff = next(e for e in effects if isinstance(e, Speak))
+    speak_eff = next(e for e in dec_effects if isinstance(e, Speak))
     # Spoken text must contain the ack
     assert speak_eff.ack_text != ""
     assert speak_eff.ack_text in speak_eff.text
@@ -1414,9 +1488,7 @@ def test_mid_interview_clarification_rephrase_pattern():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
     orig_q_index = state.current_question_index
 
@@ -1447,9 +1519,7 @@ def test_mid_interview_clarification_decision_action_rephrase():
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
-    state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
-    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
+    state = complete_intro_and_advance(state)
     assert state.phase == ConductorPhase.SKILL_ANCHOR
     orig_q_index = state.current_question_index
 
@@ -1493,7 +1563,23 @@ def _advance_to_skill_anchor(custom_plan: Dict[str, Any] = None) -> Tuple[Conduc
     state, _ = step(state, ReadyButton(now_ms=2100))
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
     state, _ = step(state, TurnEnd(text="I have five years of backend engineering experience with Python.", turn_id="t_intro", now_ms=4000))
-    state, _ = step(state, Tick(now_ms=4300))
+    state, effects = step(state, Tick(now_ms=4300))
+    intro_req = next((e for e in effects if isinstance(e, RequestDecision)), None)
+    if intro_req:
+        anchor_q = state.skill_questions.get("Python", {}).get("anchor")
+        state, _ = step(
+            state,
+            DecisionReady(
+                token=intro_req.token,
+                decision={
+                    "action": "new_topic",
+                    "ack": "Thanks for sharing.",
+                    "target_skill": "Python",
+                    "question": anchor_q.question_text if anchor_q else "",
+                },
+                now_ms=4400,
+            ),
+        )
     state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=5000))
     # Candidate answers anchor question
     state, _ = step(state, TurnEnd(text="We use asyncio for concurrency with event loop and celery for background workers.", turn_id="t_ans_anchor", now_ms=5500))
@@ -1983,7 +2069,7 @@ def test_phase_a3_second_no_experience_advances_with_warm_transition():
 
 
 def test_phase_a3_welcome_spoken_script_role_title_and_duration():
-    """Welcome spoken script formats role title and duration from plan."""
+    """Greeting spoken script formats role title naturally."""
     plan = make_test_plan()
     # Remove canned welcome text to test fallback template
     for q in plan["questions"]:
@@ -1996,8 +2082,8 @@ def test_phase_a3_welcome_spoken_script_role_title_and_duration():
     state, effects = step(state, SessionStart(session_id="test_welcome_a3", plan=plan, now_ms=1000))
     speak = next(e for e in effects if isinstance(e, Speak))
     assert "Staff Platform Architect" in speak.text
-    assert "40 minutes" in speak.text
-    assert "Ready to begin?" in speak.text
+    assert "Thanks for making the time today" in speak.text
+    assert "How are you?" in speak.text
 
 
 # -----------------------------------------------------------------------------

@@ -338,7 +338,9 @@ async def test_runner_resume_from_serialized_state():
     await runner1.queue.put(BotSpeechDone(speech_id="speech_2", now_ms=3000))
     await runner1.queue.put(TurnEnd(text="I am a backend engineer with five years experience.", turn_id="t1", now_ms=3500))
     await runner1.queue.put(Tick(now_ms=3800))
-    await asyncio.sleep(0.05)
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while runner1.state.phase != ConductorPhase.SKILL_ANCHOR and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
 
     assert runner1.state.phase == ConductorPhase.SKILL_ANCHOR
     await runner1.stop()
@@ -399,11 +401,20 @@ async def test_reply_ready_in_300ms_no_bridge():
     tts = FakeAuraTTSClient()
     script = make_test_script()
 
+    async def mock_llm(curr_q, ans, next_q):
+        return json.dumps({
+            "action": "new_topic",
+            "ack": "Thanks.",
+            "target_skill": "Distributed Storage",
+            "question": "How do you handle partition replication across multiple nodes?",
+        })
+
     runner = SessionRunner(
         session_id="sess_300ms_no_bridge",
         script=script,
         websocket=ws,
         aura_client=tts,
+        llm_fn=mock_llm,
     )
     await runner.start()
 
@@ -413,8 +424,11 @@ async def test_reply_ready_in_300ms_no_bridge():
     await runner.queue.put(BotSpeechDone(speech_id="speech_2", now_ms=3000))
     await runner.queue.put(TurnEnd(text="I am an experienced backend engineer.", turn_id="t1", now_ms=3500))
     await runner.queue.put(Tick(now_ms=3800))
-    await runner.queue.put(BotSpeechDone(speech_id="speech_3", now_ms=4500))
-    await asyncio.sleep(0.05)
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while runner.state.phase != ConductorPhase.SKILL_ANCHOR and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    await runner.queue.put(BotSpeechDone(speech_id=runner.state.active_speech_id or "speech_3", now_ms=4500))
+    await asyncio.sleep(0.02)
 
     # Candidate answers
     await runner.queue.put(TurnStart(now_ms=5000))
@@ -465,8 +479,11 @@ async def test_eager_candidate_speaks_more_speculation_discarded():
     await runner.queue.put(BotSpeechDone(speech_id="speech_2", now_ms=3000))
     await runner.queue.put(TurnEnd(text="I am an experienced backend engineer.", turn_id="t1", now_ms=3500))
     await runner.queue.put(Tick(now_ms=3800))
-    await runner.queue.put(BotSpeechDone(speech_id="speech_3", now_ms=4500))
-    await asyncio.sleep(0.05)
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while runner.state.phase != ConductorPhase.SKILL_ANCHOR and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    await runner.queue.put(BotSpeechDone(speech_id=runner.state.active_speech_id or "speech_3", now_ms=4500))
+    await asyncio.sleep(0.02)
 
     # 1. Candidate speaks initial words -> EagerTurnEnd fires
     await runner.queue.put(TurnStart(now_ms=5000))
@@ -523,8 +540,11 @@ async def test_speculative_exact_match_used():
     await runner.queue.put(BotSpeechDone(speech_id="speech_2", now_ms=3000))
     await runner.queue.put(TurnEnd(text="I am an experienced backend engineer.", turn_id="t1", now_ms=3500))
     await runner.queue.put(Tick(now_ms=3800))
-    await runner.queue.put(BotSpeechDone(speech_id="speech_3", now_ms=4500))
-    await asyncio.sleep(0.05)
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while runner.state.phase != ConductorPhase.SKILL_ANCHOR and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    await runner.queue.put(BotSpeechDone(speech_id=runner.state.active_speech_id or "speech_3", now_ms=4500))
+    await asyncio.sleep(0.02)
 
     # Eager text equals committed answer (modulo whitespace/punctuation)
     await runner.queue.put(TurnStart(now_ms=5000))
@@ -567,8 +587,11 @@ async def test_slow_reply_bridge_fires_at_700ms():
     await runner.queue.put(BotSpeechDone(speech_id="speech_2", now_ms=3000))
     await runner.queue.put(TurnEnd(text="I am an experienced backend engineer.", turn_id="t1", now_ms=3500))
     await runner.queue.put(Tick(now_ms=3800))
-    await runner.queue.put(BotSpeechDone(speech_id="speech_3", now_ms=4500))
-    await asyncio.sleep(0.05)
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while runner.state.phase != ConductorPhase.SKILL_ANCHOR and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    await runner.queue.put(BotSpeechDone(speech_id=runner.state.active_speech_id or "speech_3", now_ms=4500))
+    await asyncio.sleep(0.02)
 
     # Answer and commit
     await runner.queue.put(TurnStart(now_ms=5000))
@@ -694,9 +717,12 @@ async def test_runner_eager_decision_exact_match_reuse():
     await runner.queue.put(TurnStart(now_ms=3200))
     await runner.queue.put(TurnEnd(text="I have 5 years experience with Python.", turn_id="t_intro", now_ms=4000))
     await runner.queue.put(Tick(now_ms=4300))
-    await runner.queue.put(BotSpeechDone(speech_id="speech_3", now_ms=5000))
-    await asyncio.sleep(0.05)
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while runner.state.phase != ConductorPhase.SKILL_ANCHOR and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
     assert runner.state.phase == ConductorPhase.SKILL_ANCHOR
+    await runner.queue.put(BotSpeechDone(speech_id=runner.state.active_speech_id or "speech_3", now_ms=5000))
+    await asyncio.sleep(0.02)
 
     cand_text = "In our backend architecture we use asyncio event loops for non-blocking network calls."
     
@@ -711,7 +737,11 @@ async def test_runner_eager_decision_exact_match_reuse():
     # 2. Candidate finishes and commits matching text
     await runner.queue.put(TurnEnd(text=cand_text, turn_id="t_cand_commit", now_ms=6000))
     await runner.queue.put(Tick(now_ms=6300))
-    await asyncio.sleep(0.08)
+    # Wait for the reducer/effect task to consume the committed turn. A fixed
+    # sleep is flaky when checkpoint writes contend for DB connections.
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while not runner.current_metrics.speculation_used and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
 
     # Speculation must be reused!
     assert runner.current_metrics.speculation_used is True

@@ -101,9 +101,11 @@ export default function PreFlightCheckModal({
 }) {
   // Device lists
   const [audioInputs, setAudioInputs] = useState([]);
+  const [audioOutputs, setAudioOutputs] = useState([]);
   const [videoInputs, setVideoInputs] = useState([]);
   const [selectedMicId, setSelectedMicId] = useState('');
   const [selectedCamId, setSelectedCamId] = useState('');
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState('');
 
   // 5 Requirement States: 'idle' | 'checking' | 'passed' | 'failed'
   const [micStatus, setMicStatus] = useState('idle');
@@ -204,7 +206,7 @@ export default function PreFlightCheckModal({
     }
   }, []);
 
-  const runAllChecks = async () => {
+  const runAllChecks = async (micIdOverride, camIdOverride) => {
     cleanupMedia();
     setMicStatus('checking');
     setCamStatus('checking');
@@ -218,13 +220,16 @@ export default function PreFlightCheckModal({
     setMicSoundDetected(false);
     setSpeakerSoundPlayed(false);
 
+    const micId = micIdOverride !== undefined ? micIdOverride : selectedMicId;
+    const camId = camIdOverride !== undefined ? camIdOverride : selectedCamId;
+
     // 1 & 2: Microphone & Camera Permission + Device Enumeration
     let stream = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: selectedMicId
+        audio: micId
           ? {
-              deviceId: { exact: selectedMicId },
+              deviceId: { exact: micId },
               echoCancellation: true,
               noiseSuppression: true,
               autoGainControl: true,
@@ -234,7 +239,7 @@ export default function PreFlightCheckModal({
               noiseSuppression: true,
               autoGainControl: true,
             },
-        video: selectedCamId ? { deviceId: { exact: selectedCamId } } : true,
+        video: camId ? { deviceId: { exact: camId } } : true,
       });
       mediaStreamRef.current = stream;
 
@@ -246,16 +251,21 @@ export default function PreFlightCheckModal({
       // Enumerate devices
       const devices = await navigator.mediaDevices.enumerateDevices();
       const mics = devices.filter((d) => d.kind === 'audioinput');
+      const speakers = devices.filter((d) => d.kind === 'audiooutput');
       const cams = devices.filter((d) => d.kind === 'videoinput');
 
       setAudioInputs(mics);
+      setAudioOutputs(speakers);
       setVideoInputs(cams);
 
-      if (mics.length > 0 && !selectedMicId) {
+      if (mics.length > 0 && !micId) {
         setSelectedMicId(mics[0].deviceId);
       }
-      if (cams.length > 0 && !selectedCamId) {
+      if (cams.length > 0 && !camId) {
         setSelectedCamId(cams[0].deviceId);
+      }
+      if (speakers.length > 0 && !selectedSpeakerId) {
+        setSelectedSpeakerId(speakers[0].deviceId);
       }
 
       setMicStatus('passed');
@@ -386,10 +396,20 @@ export default function PreFlightCheckModal({
     }
   };
 
-  const playTestSpeakerSound = () => {
+  const playTestSpeakerSound = async () => {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       const ctx = new AudioCtx();
+      if (selectedSpeakerId && typeof ctx.setSinkId === 'function') {
+        try {
+          await ctx.setSinkId(selectedSpeakerId);
+        } catch (sinkErr) {
+          console.warn('Could not route preflight chime to selected speaker:', sinkErr);
+        }
+      }
+      if (ctx.state === 'suspended') {
+        await ctx.resume().catch(() => {});
+      }
       const now = ctx.currentTime;
 
       // Harmonious double chime
@@ -415,6 +435,12 @@ export default function PreFlightCheckModal({
       osc2.start(now + 0.18);
       osc2.stop(now + 0.6);
 
+      setTimeout(() => {
+        try {
+          ctx.close().catch(() => {});
+        } catch (e) {}
+      }, 1000);
+
       setSpeakerSoundPlayed(true);
       setAudioTestStatus('passed');
     } catch (err) {
@@ -433,12 +459,22 @@ export default function PreFlightCheckModal({
 
   const handleMicDeviceChange = async (deviceId) => {
     setSelectedMicId(deviceId);
-    runAllChecks();
+    setSpeechState('idle');
+    setSpeechResult(null);
+    setSpeechError('');
+    runAllChecks(deviceId, selectedCamId);
   };
 
   const handleCamDeviceChange = async (deviceId) => {
     setSelectedCamId(deviceId);
-    runAllChecks();
+    runAllChecks(selectedMicId, deviceId);
+  };
+
+  const handleSpeakerDeviceChange = (deviceId) => {
+    setSelectedSpeakerId(deviceId);
+    setSpeakerSoundPlayed(false);
+    setAudioTestError('');
+    setAudioTestStatus('idle');
   };
 
   // ------------------------------------------------------------------ R3.5 Part 4
@@ -985,6 +1021,33 @@ export default function PreFlightCheckModal({
               </div>
             </div>
 
+            {audioOutputs.length > 0 && (
+              <div className="mt-3">
+                <label
+                  htmlFor="preflight-speaker-select"
+                  className="text-[11px] font-semibold text-slate-500 dark:text-slate-400"
+                >
+                  Output Speaker ({audioOutputs.length} available):
+                </label>
+                <select
+                  id="preflight-speaker-select"
+                  data-testid="preflight-speaker-select"
+                  value={selectedSpeakerId}
+                  onChange={(e) => handleSpeakerDeviceChange(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800 shadow-sm focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                >
+                  {audioOutputs.map((d, i) => (
+                    <option key={d.deviceId || i} value={d.deviceId}>
+                      {d.label || `Speaker ${i + 1}`}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Test chime and interview audio will use this output device.
+                </p>
+              </div>
+            )}
+
             {audioTestError && (
               <div className="mt-3 rounded-xl bg-rose-50 p-3 text-xs text-rose-800 dark:bg-rose-950/30 dark:text-rose-300">
                 {audioTestError}
@@ -1237,7 +1300,14 @@ export default function PreFlightCheckModal({
 
             <button
               type="button"
-              onClick={onProceedToInterview}
+              onClick={() =>
+                onProceedToInterview &&
+                onProceedToInterview({
+                  selectedAudioInput: selectedMicId,
+                  selectedVideoInput: selectedCamId,
+                  selectedAudioOutput: selectedSpeakerId,
+                })
+              }
               disabled={!allPassed || isEntering}
               className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 rounded-xl px-6 py-2.5 text-xs font-bold text-white transition-all shadow-md ${
                 allPassed && !isEntering
@@ -1253,7 +1323,7 @@ export default function PreFlightCheckModal({
               ) : (
                 <>
                   <Sparkles className="h-4 w-4" />
-                  <span>Enter Interview</span>
+                  <span>Start Interview</span>
                   <ArrowRight className="h-4 w-4" />
                 </>
               )}

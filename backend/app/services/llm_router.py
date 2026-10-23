@@ -624,6 +624,7 @@ async def stream_decision_with_ack_first(
     max_output_tokens: int = 160,
     temperature: float = 0.1,
     on_ack_ready: Optional[Callable[[str], None]] = None,
+    model_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """Stream decision JSON using Bedrock (primary) with failover to Gemini (secondary).
     
@@ -647,14 +648,14 @@ async def stream_decision_with_ack_first(
     # 1. Primary: Amazon Bedrock ConverseStream
     token = get_bedrock_bearer_token()
     region = get_bedrock_region()
-    model_id = get_bedrock_model_id()
+    effective_model_id = model_id or get_bedrock_model_id()
 
     if token:
         call_metrics["provider"] = "bedrock"
-        call_metrics["model_name"] = model_id
+        call_metrics["model_name"] = effective_model_id
         call_metrics["region"] = region
-        logger.info("Bedrock decision call started: Region=%s, Model=%s", region, model_id)
-        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_id}/converse-stream"
+        logger.info("Bedrock decision call started: Region=%s, Model=%s", region, effective_model_id)
+        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{effective_model_id}/converse-stream"
         payload = {
             "system": [{"text": system_prompt}],
             "messages": [{"role": "user", "content": [{"text": user_prompt}]}],
@@ -691,14 +692,16 @@ async def stream_decision_with_ack_first(
                                         ack_emitted = True
                                         call_metrics["ack_emitted_ms"] = round((time.time() - t0) * 1000.0, 1)
                                         if on_ack_ready:
-                                            on_ack_ready(parsed_action_ack)
+                                            act = str(parsed_action_ack.get("action") or "follow_up").strip()
+                                            a_text = str(parsed_action_ack.get("ack") or "").strip()
+                                            on_ack_ready((act, a_text))
                                     else:
                                         parsed_ack = extract_ack_from_json_stream(full_so_far)
                                         if parsed_ack is not None:
                                             ack_emitted = True
                                             call_metrics["ack_emitted_ms"] = round((time.time() - t0) * 1000.0, 1)
                                             if on_ack_ready:
-                                                on_ack_ready(parsed_ack)
+                                                on_ack_ready(("follow_up", str(parsed_ack).strip()))
                         except Exception:
                             pass
 
@@ -750,7 +753,9 @@ async def stream_decision_with_ack_first(
             parsed_decision = json.loads(clean_json_markdown(raw))
             if isinstance(parsed_decision, dict):
                 if on_ack_ready and "ack" in parsed_decision:
-                    on_ack_ready(str(parsed_decision.get("ack", "") or ""))
+                    act = str(parsed_decision.get("action") or "follow_up").strip()
+                    a_text = str(parsed_decision.get("ack") or "").strip()
+                    on_ack_ready((act, a_text))
                 return parsed_decision, call_metrics
         except Exception as gem_exc:
             err_str = str(gem_exc)
@@ -778,7 +783,9 @@ async def stream_decision_with_ack_first(
         parsed_decision = json.loads(clean_json_markdown(content))
         if isinstance(parsed_decision, dict):
             if on_ack_ready and "ack" in parsed_decision:
-                on_ack_ready(str(parsed_decision.get("ack", "") or ""))
+                act = str(parsed_decision.get("action") or "follow_up").strip()
+                a_text = str(parsed_decision.get("ack") or "").strip()
+                on_ack_ready((act, a_text))
             return parsed_decision, call_metrics
     except Exception as bak_exc:
         logger.error("All providers exhausted, including backup: %s", bak_exc)
