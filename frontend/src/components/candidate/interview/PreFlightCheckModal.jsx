@@ -123,6 +123,10 @@ export default function PreFlightCheckModal({
   const [micVolume, setMicVolume] = useState(0);
   const [micSoundDetected, setMicSoundDetected] = useState(false);
   const [speakerSoundPlayed, setSpeakerSoundPlayed] = useState(false);
+  // A chime can "play" successfully from the browser's perspective while the
+  // tab/site is muted or the output device is wrong — no JS API can detect
+  // either. The candidate's explicit confirmation is the only honest pass gate.
+  const [speakerConfirmed, setSpeakerConfirmed] = useState(false);
   const [networkRtt, setNetworkRtt] = useState(null);
   // Consent must be an explicit opt-in action, never pre-checked.
   const [consentAccepted, setConsentAccepted] = useState(false);
@@ -469,8 +473,25 @@ export default function PreFlightCheckModal({
         } catch (e) {}
       }, 1000);
 
+      if (ctx.state !== 'running') {
+        // Autoplay policy kept the context suspended: nothing was audible.
+        // Never mark this green — that false pass follows the candidate into
+        // the live interview as a silent interviewer.
+        setSpeakerSoundPlayed(false);
+        setSpeakerConfirmed(false);
+        setAudioTestStatus('failed');
+        setAudioTestError(
+          'Your browser blocked audio playback. Click "Play Sound" again directly (not via keyboard), and if it still fails, right-click the site and check sound permissions or the speaker icon in the address bar.'
+        );
+        return;
+      }
+
+      // Context is running, so the chime reached the output route. Whether it
+      // was AUDIBLE (tab not muted, correct device, volume up) only the
+      // candidate can confirm — ask explicitly below.
       setSpeakerSoundPlayed(true);
-      setAudioTestStatus('passed');
+      setSpeakerConfirmed(false);
+      setAudioTestError('');
     } catch (err) {
       console.error('Speaker playback error:', err);
       setAudioTestError('Unable to play audio through your output device. Please check sound settings.');
@@ -478,12 +499,21 @@ export default function PreFlightCheckModal({
     }
   };
 
-  // Evaluate audio test: passes when mic detected sound OR speaker sound played
-  useEffect(() => {
-    if (micSoundDetected && speakerSoundPlayed) {
-      setAudioTestStatus('passed');
-    }
-  }, [micSoundDetected, speakerSoundPlayed]);
+  const confirmSpeakerHeard = () => {
+    setSpeakerConfirmed(true);
+    setAudioTestStatus('passed');
+    setAudioTestError('');
+  };
+
+  const reportSpeakerNotHeard = () => {
+    setSpeakerConfirmed(false);
+    setAudioTestStatus('failed');
+    setAudioTestError(
+      'Check these in order: (1) the speaker icon in the browser address bar — sound must not be muted for this site; ' +
+        '(2) your system volume/output is up and unmuted; (3) the selected output device below is where you expect to hear sound; ' +
+        '(4) pick a different output device and play the chime again. The interviewer\'s voice uses this same output during the interview.'
+    );
+  };
 
   const handleMicDeviceChange = async (deviceId) => {
     setSelectedMicId(deviceId);
@@ -501,6 +531,7 @@ export default function PreFlightCheckModal({
   const handleSpeakerDeviceChange = (deviceId) => {
     setSelectedSpeakerId(deviceId);
     setSpeakerSoundPlayed(false);
+    setSpeakerConfirmed(false);
     setAudioTestError('');
     setAudioTestStatus('idle');
   };
@@ -1060,21 +1091,47 @@ export default function PreFlightCheckModal({
               </div>
 
               {/* Speaker sound test */}
-              <div className="rounded-xl bg-slate-50 p-3.5 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 flex items-center justify-between">
-                <div>
-                  <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">Speaker Test</div>
-                  <div className="text-[11px] text-slate-400">
-                    {speakerSoundPlayed ? 'Sound played successfully' : 'Hear test sound'}
+              <div className="rounded-xl bg-slate-50 p-3.5 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">Speaker Test</div>
+                    <div className="text-[11px] text-slate-400">
+                      {speakerConfirmed
+                        ? 'Chime confirmed — output verified'
+                        : speakerSoundPlayed
+                          ? 'Did you hear the chime?'
+                          : 'Hear test sound'}
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={playTestSpeakerSound}
+                    className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition-colors shadow-sm"
+                  >
+                    <Volume2 className="h-4 w-4" />
+                    {speakerSoundPlayed ? 'Play Again' : 'Play Sound'}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={playTestSpeakerSound}
-                  className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition-colors shadow-sm"
-                >
-                  <Volume2 className="h-4 w-4" />
-                  {speakerSoundPlayed ? 'Play Again' : 'Play Sound'}
-                </button>
+                {speakerSoundPlayed && !speakerConfirmed && (
+                  <div className="mt-2.5 flex items-center gap-2">
+                    <button
+                      type="button"
+                      data-testid="speaker-heard-yes"
+                      onClick={confirmSpeakerHeard}
+                      className="rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-500 transition-colors"
+                    >
+                      Yes, I heard it
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="speaker-heard-no"
+                      onClick={reportSpeakerNotHeard}
+                      className="rounded-lg bg-rose-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-rose-500 transition-colors"
+                    >
+                      No sound
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 

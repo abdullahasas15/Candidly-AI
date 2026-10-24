@@ -640,6 +640,7 @@ class BlueprintGenerationError(RuntimeError):
 import hashlib
 
 _SECTION_CACHE: Dict[str, Dict[str, Any]] = {}
+_SECTION_CACHE_MAX_ENTRIES = 256
 
 
 def compute_section_input_hash(
@@ -669,9 +670,130 @@ def compute_section_input_hash(
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+_GENERIC_OPENING_PREFIXES = [
+    "Tell me, ",
+    "I'm curious — ",
+    "Consider this: ",
+]
+
+# First words that are safe to decapitalize when prepending a generic lead-in.
+_SAFE_DECAPITALIZE_WORDS = {
+    "how", "what", "when", "where", "why", "who", "which", "if", "suppose",
+    "imagine", "describe", "explain", "tell", "walk", "give", "have", "could",
+    "can", "would", "should", "did", "do", "are", "is", "was", "were",
+}
+
+
+def _decapitalize_first_word(text: str) -> str:
+    """Lowercase the leading word only when it is a common question opener."""
+    if not text:
+        return text
+    first, _, rest = text.partition(" ")
+    if first.lower().strip("',") in _SAFE_DECAPITALIZE_WORDS:
+        return first.lower() + (" " + rest if rest else "")
+    return text
+
+
+def _rewrite_question_opening(orig_text: str, cycle: int) -> str:
+    """Rewrite a question opening, preferring grammatical family rules and
+    falling back to a generic spoken lead-in. Never returns a question longer
+    than 45 words (the hard ceiling enforced elsewhere)."""
+    orig_clean = orig_text.strip()
+    word_budget = 45
+    candidates = [
+        _diversify_anchor_text(orig_clean, c)
+        for c in range(cycle, cycle + 4)
+    ]
+    for prefix in _GENERIC_OPENING_PREFIXES:
+        if prefix == "Consider this: ":
+            candidates.append(prefix + orig_clean)
+        else:
+            candidates.append(prefix + _decapitalize_first_word(orig_clean))
+    seen: set = set()
+    for cand in candidates:
+        cand = cand.strip()
+        if not cand or cand == orig_clean or cand in seen:
+            continue
+        seen.add(cand)
+        # Normalize to exactly one trailing '?'
+        cand = re.sub(r"[\.,;:!?\s]+$", "", cand)
+        cand = re.sub(r"\?+", "?", cand) + "?"
+        if len(cand.split()) <= word_budget:
+            return cand
+    return orig_clean
+
+
 def _diversify_anchor_text(orig_text: str, cycle: int) -> str:
     """Grammatically replace repetitive anchor openings preserving verb and noun structure."""
     orig_clean = orig_text.strip()
+    # 0a. "how would you"
+    if re.search(r"^how would you\s+", orig_clean, flags=re.IGNORECASE):
+        variants = [
+            "Walk me through how you would ",
+            "Could you explain how you would ",
+            "Describe how you would ",
+            "I'm curious — how would you ",
+        ]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^how would you\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0b. "how do you"
+    if re.search(r"^how do you\s+", orig_clean, flags=re.IGNORECASE):
+        variants = [
+            "Tell me, how do you ",
+            "Could you explain how you ",
+            "Walk me through how you ",
+        ]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^how do you\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0c. "how did you" / "how have you"
+    m_how_past = re.match(r"^how (did|have) you\s+(\S.*)$", orig_clean, flags=re.IGNORECASE)
+    if m_how_past:
+        tense = m_how_past.group(1).lower()
+        if tense == "have":
+            variants = ["Tell me, how have you ", "I'm curious — how have you ", "Could you describe how you "]
+        else:
+            variants = ["Tell me, how did you ", "I'm curious — how did you ", "Could you share how you "]
+        var = variants[cycle % len(variants)]
+        return var + m_how_past.group(2)
+    # 0d. "what is your" / "what are your"
+    if re.search(r"^what (is|are) your\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me about your ", "Describe your ", "Could you share your "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^what (is|are) your\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0e. "what are the" / "what is the"
+    if re.search(r"^what (is|are) the\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me about the ", "Could you explain the ", "Walk me through the "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^what (is|are) the\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0f. "what would you"
+    if re.search(r"^what would you\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me, what would you ", "Walk me through what you would ", "I'm curious — what would you "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^what would you\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0g. "describe how you" / "explain how you" / "tell me how"
+    if re.search(r"^(describe|explain) how you\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me how you ", "Could you describe how you ", "Walk me through how you "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^(describe|explain) how you\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    if re.search(r"^tell me how\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Could you explain how ", "Walk me through how ", "Describe for me how "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^tell me how\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0h. "give me an example of" / "give an example of"
+    if re.search(r"^give (me )?an example of\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Could you share an example of ", "Tell me about one time ", "I'm curious about an example of "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^give (me )?an example of\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0i. "have you ever"
+    if re.search(r"^have you ever\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me about a time you ", "I'm curious whether you have ever ", "Could you describe an occasion you "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^have you ever\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0j. "if you were"
+    if re.search(r"^if you were\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Imagine you were ", "Suppose you were ", "Say you were "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^if you were\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
     # 1. "walk me through a/an"
     if re.search(r"^walk me through an?\s+", orig_clean, flags=re.IGNORECASE):
         variants = ["Could you describe ", "Tell me about ", "Could you share details on "]
@@ -740,8 +862,11 @@ def auto_repair_blueprint_questions(sections: List[Dict[str, Any]]) -> int:
     """Deterministically auto-repair:
     1. Trailing punctuation: ensure every question ends with a single '?' without trailing dots/spaces/multiple marks.
     2. Verbose preamble trimming: trim redundant verbal filler if word count > 38.
-    3. Anchor opening variety: if > 40% of anchors share the same 3-word opening (e.g. 'walk me through' or 'suppose you are'),
-       diversify them using natural technical spoken openings.
+    3. Duplicate escalation / repeated probe repair.
+    4. Opening variety across ALL questions (anchors, anchor_alt, escalation, probes):
+       if more than 35% of questions (min 4) share the same 3-word opening — the exact
+       condition the validator warns on — diversify the surplus questions so the
+       blueprint no longer trips validate_blueprint's 'questions.variety' warning.
     Returns count of repaired items.
     """
     repairs_count = 0
@@ -875,7 +1000,121 @@ def auto_repair_blueprint_questions(sections: List[Dict[str, Any]]) -> int:
             else:
                 seen_probes.add(ptxt.lower())
 
+    # 4. Cross-section question opening variety (mirrors validator rule: >35% share, >=4 questions)
+    repairs_count += repair_blueprint_opening_variety(sections)
+
     return repairs_count
+
+
+_VARIETY_ROLE_RANK = {"probe": 0, "anchor_alt": 1, "escalation": 2, "anchor": 3}
+
+
+def _collect_blueprint_question_items(sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collect every skill-section question (both the in-memory `content` shape used
+    during generation and the serialized `questions`-dict shape used on update/regenerate)
+    so opening-variety repair can reason across the whole blueprint exactly like
+    validate_blueprint does."""
+    items: List[Dict[str, Any]] = []
+    for s_idx, s in enumerate(sections):
+        if s.get("section_type") != "skill":
+            continue
+        content = s.get("content")
+        if content is not None and not isinstance(content, dict):
+            for role in ("anchor", "anchor_alt", "escalation"):
+                q = getattr(content, f"{role}_question", None)
+                if q is not None and getattr(q, "question_text", None):
+                    items.append({"obj": q, "role": role, "sec": s_idx, "is_dict": False})
+            for p in getattr(content, "probes", []) or []:
+                if getattr(p, "question_text", None):
+                    items.append({"obj": p, "role": "probe", "sec": s_idx, "is_dict": False})
+        else:
+            for q in s.get("questions") or []:
+                if isinstance(q, dict) and q.get("question_text"):
+                    items.append({
+                        "obj": q,
+                        "role": str(q.get("question_role") or "probe"),
+                        "sec": s_idx,
+                        "is_dict": True,
+                    })
+    return items
+
+
+def _question_item_text(item: Dict[str, Any]) -> str:
+    if item["is_dict"]:
+        return str(item["obj"].get("question_text") or "")
+    return str(getattr(item["obj"], "question_text") or "")
+
+
+def _set_question_item_text(item: Dict[str, Any], new_text: str) -> None:
+    if item["is_dict"]:
+        item["obj"]["question_text"] = new_text
+    else:
+        item["obj"].question_text = new_text
+
+
+def repair_blueprint_opening_variety(sections: List[Dict[str, Any]], max_passes: int = 4) -> int:
+    """Diversify over-represented question openings so the blueprint satisfies
+    validate_blueprint's variety guideline (<=35% of questions sharing the same
+    first three words). Deterministic, grammar-preserving, and word-budget aware;
+    rewrites probes before anchor questions and later sections before earlier ones.
+    Handles both the generation-time `content` shape and the serialized
+    `questions`-dict shape. Returns the number of questions rewritten."""
+    items = _collect_blueprint_question_items(sections)
+    total = len(items)
+    if total < 5:
+        return 0
+
+    max_allowed = int(0.35 * total)
+    repaired = 0
+    cycle = 0
+
+    for _pass in range(max_passes):
+        openings: Dict[str, List[Dict[str, Any]]] = {}
+        for it in items:
+            text = _question_item_text(it)
+            pref = " ".join(text.strip().lower().split()[:3])
+            it["pref"] = pref
+            openings.setdefault(pref, []).append(it)
+
+        targets = [
+            (pref, members)
+            for pref, members in openings.items()
+            if len(members) >= 4 and len(members) / total > 0.35
+        ]
+        if not targets:
+            return repaired
+
+        targets.sort(key=lambda kv: -len(kv[1]))
+        for pref, members in targets:
+            need = len(members) - max_allowed
+            if need <= 0:
+                continue
+            # Rewrite the most dispensable questions first: probes, then anchor_alt,
+            # escalation, and anchors last; within a role prefer later (lower-priority) sections.
+            victims = sorted(
+                members,
+                key=lambda it: (_VARIETY_ROLE_RANK.get(it["role"], 0), -it["sec"]),
+            )
+            for it in victims[:need]:
+                old_text = _question_item_text(it)
+                new_text = _rewrite_question_opening(old_text, cycle)
+                cycle += 1
+                if new_text and new_text != old_text:
+                    _set_question_item_text(it, new_text)
+                    repaired += 1
+
+    remaining = 0
+    openings = {}
+    for it in items:
+        pref = " ".join(_question_item_text(it).strip().lower().split()[:3])
+        openings[pref] = openings.get(pref, 0) + 1
+    remaining = sum(c for c in openings.values() if c >= 4 and c / total > 0.35)
+    if remaining:
+        logger.warning(
+            "Opening variety repair left %d questions in over-represented openings after %d passes",
+            remaining, max_passes,
+        )
+    return repaired
 
 
 def _get_target_models() -> List[str]:
@@ -1113,6 +1352,10 @@ def _generate_single_skill_sync(
 
     logger.info("Section '%s' passed deterministic validation", s_name)
 
+    if len(_SECTION_CACHE) >= _SECTION_CACHE_MAX_ENTRIES:
+        # FIFO eviction: drop the oldest inserted entries to keep memory bounded
+        for stale_key in list(_SECTION_CACHE.keys())[: len(_SECTION_CACHE) - _SECTION_CACHE_MAX_ENTRIES + 1]:
+            del _SECTION_CACHE[stale_key]
     _SECTION_CACHE[cache_key] = {
         "content": section_content,
         "model_used": model_used,

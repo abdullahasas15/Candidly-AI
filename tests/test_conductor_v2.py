@@ -1017,7 +1017,8 @@ def test_covered_expectations_forces_next():
     assert state.phase == ConductorPhase.SKILL_ANCHOR
     dist_anchor = next(q for q in state.questions if q.kind == "anchor" and q.skill_name == "Distributed Systems")
     speak_eff = next(e for e in effects if isinstance(e, Speak))
-    assert speak_eff.question_text == f"Let's move on to {dist_anchor.skill_name}. {dist_anchor.question_text}"
+    assert dist_anchor.question_text in speak_eff.question_text
+    assert dist_anchor.skill_name in speak_eff.question_text
 
 
 # -----------------------------------------------------------------------------
@@ -2189,7 +2190,7 @@ def test_phase_a4_transitions_next_skill():
         ),
     )
     speak = next(e for e in effects if isinstance(e, Speak))
-    assert "Let's move on to Distributed Systems." in speak.text
+    assert "Distributed Systems" in speak.text
 
 
 def test_phase_a4_off_topic_reask_prefix():
@@ -2277,14 +2278,20 @@ def test_phase_a5_is_ack_grounded_positive():
 
 
 def test_phase_a5_is_ack_grounded_negative_echoing_question_only():
-    """Ack that only repeats words present in the question without candidate-novel words fails grounding."""
+    """Question-only echo with NO answer overlap fails grounding; but an ack
+    that echoes words the candidate actually said (even if those words also
+    appear in the question) is accepted — that is a natural restatement, and
+    rejecting it forced a second LLM call on the hot path."""
     from backend.app.services.interview_v2.conductor import is_ack_grounded
 
     q_text = "How do you handle concurrency in Python using asyncio versus multiprocessing?"
     cand_ans = "We use concurrency in Python."
-    ack = "Right, concurrency in Python."
-    assert is_ack_grounded(ack, cand_ans, q_text) is False
-
+    # Candidate said these words: natural restatement -> grounded
+    assert is_ack_grounded("Right, concurrency in Python.", cand_ans, q_text) is True
+    # Echo of question machinery the candidate NEVER said -> still rejected
+    assert is_ack_grounded("Right, asyncio versus multiprocessing.", cand_ans, q_text) is False
+    # Verbatim 5+ word copy of the question -> rejected
+    assert is_ack_grounded("So you handle concurrency in Python using asyncio versus multiprocessing.", cand_ans, q_text) is False
 
 def test_phase_a5_is_ack_grounded_negative_hallucinated():
     """Ack mentioning unrelated or hallucinated topics not in candidate answer fails grounding."""
@@ -2375,3 +2382,98 @@ def test_no_knowledge_answer_never_probed():
     speak2 = next(e for e in effects if isinstance(e, Speak))
     assert "What about locks?" not in speak2.text
     assert "move on" in speak2.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Repeat-request / connectivity + question-echo guards (post-manual-test fixes)
+# ---------------------------------------------------------------------------
+
+def test_repeat_request_answer_reasks_question_instead_of_advancing():
+    """Candidate stuck on 'Connecting...' says they never saw the question —
+    the interviewer must re-ask it, never advance (regression from a real
+    session where the question was skipped one second after reconnect)."""
+    state, _ = start_session()
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
+    state, _ = step(state, ReadyButton(now_ms=2100))
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
+    state = complete_intro_and_advance(state)
+    assert state.phase == ConductorPhase.SKILL_ANCHOR
+    idx_before = state.current_question_index
+
+    state, _ = step(state, TurnEnd(
+        text="Till now I didn't see the question. I just got the question now, I'm reading the question.",
+        turn_id="t_rr", now_ms=5500,
+    ))
+    state, effects = step(state, Tick(now_ms=5800))
+    req = next(e for e in effects if isinstance(e, RequestDecision))
+    state, effects = step(
+        state,
+        DecisionReady(
+            token=req.token,
+            decision={"action": "advance", "ack": "Understood."},
+            now_ms=5900,
+        ),
+    )
+    speak_eff = next(e for e in effects if isinstance(e, Speak))
+    anchor_q = state.skill_questions.get("Python", {}).get("anchor")
+    assert anchor_q.question_text in speak_eff.text, "must re-ask the current question"
+    assert state.current_question_index == idx_before, "must stay on the same question"
+
+
+def test_question_echo_answer_reasks_question():
+    """Candidate reads the question text back as their 'answer' — re-ask, do
+    not advance and do not grade the echo."""
+    state, _ = start_session()
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=2000))
+    state, _ = step(state, ReadyButton(now_ms=2100))
+    state, _ = step(state, BotSpeechDone(speech_id=state.active_speech_id, now_ms=3000))
+    state = complete_intro_and_advance(state)
+    assert state.phase == ConductorPhase.SKILL_ANCHOR
+    idx_before = state.current_question_index
+
+    anchor_q = state.skill_questions.get("Python", {}).get("anchor")
+    base_echo = anchor_q.question_text.rstrip("?").lower()
+    echo_answer = f"{base_echo} {base_echo}."  # terminal period -> COMPLETE commit
+    state, _ = step(state, TurnEnd(text=echo_answer, turn_id="t_echo", now_ms=5500))
+    state, effects = step(state, Tick(now_ms=5800))
+    req = next(e for e in effects if isinstance(e, RequestDecision))
+    state, effects = step(
+        state,
+        DecisionReady(
+            token=req.token,
+            decision={"action": "advance", "ack": "Understood."},
+            now_ms=5900,
+        ),
+    )
+    speak_eff = next(e for e in effects if isinstance(e, Speak))
+    assert anchor_q.question_text in speak_eff.text
+    assert state.current_question_index == idx_before
+
+
+def test_looks_like_repeat_request_detector():
+    from backend.app.services.interview_v2.conductor import looks_like_repeat_request
+    assert looks_like_repeat_request("Sorry, can you repeat the question?")
+    assert looks_like_repeat_request("I didn't see the question until now")
+    assert looks_like_repeat_request("I'm reading the question right now")
+    assert looks_like_repeat_request("Sorry, I can't hear you properly")
+    assert not looks_like_repeat_request("I used a trie for autocomplete because prefix lookups are fast and the dataset fits in memory")
+    assert not looks_like_repeat_request("")
+
+
+def test_conductor_uses_weight_proportional_followup_caps():
+    """SessionStart must populate max_followups_per_skill from each anchor's
+    declared follow_up_depth_allowed (replacing the old hardcoded cap of 2)."""
+    plan = {
+        "questions": [
+            {"question_index": 0, "kind": "greeting", "skill_name": "", "question_text": "Hello! Ready?"},
+            {"question_index": 2, "kind": "anchor", "skill_name": "Python",
+             "question_text": "How do you handle Python concurrency?",
+             "follow_up_depth_allowed": 4,
+             "rubric_levels": {"L3": "Explains locks", "L4": "GIL trade-offs"}},
+            {"question_index": 4, "kind": "anchor", "skill_name": "Distributed Systems",
+             "question_text": "Design a rate limiter?", "follow_up_depth_allowed": 1},
+        ]
+    }
+    state, _ = step(ConductorState(), SessionStart(session_id="s_caps", plan=plan, now_ms=1000))
+    assert state.max_followups_per_skill.get("Python") == 4
+    assert state.max_followups_per_skill.get("Distributed Systems") == 1

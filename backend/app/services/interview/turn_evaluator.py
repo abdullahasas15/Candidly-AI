@@ -6,7 +6,7 @@ import re
 from statistics import median
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -81,6 +81,23 @@ class JudgeLLMOutput(BaseModel):
     strengths: list[str] = Field(default_factory=list)
     concerns: list[str] = Field(default_factory=list)
     candidate_summary: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_skills_dict(cls, data):
+        """Judge models intermittently return `skills` as an object keyed by
+        skill name instead of an array. Coerce both shapes — a validation
+        crash here used to fail the ENTIRE post-interview evaluation."""
+        if isinstance(data, dict) and isinstance(data.get("skills"), dict):
+            coerced = []
+            for skill_name, payload in data["skills"].items():
+                if isinstance(payload, dict):
+                    item = dict(payload)
+                    item.setdefault("skill_name", skill_name)
+                    coerced.append(item)
+            data = dict(data)
+            data["skills"] = coerced
+        return data
 
 
 def _normalize_for_quote_check(text: str) -> str:
@@ -195,7 +212,20 @@ def _build_glossary(job: JobPosting, application: Optional[JobApplication]) -> l
             terms.add(c.name)
     if application and application.resume and application.resume.parsed_structured_data:
         r_data = application.resume.parsed_structured_data
-        for sk in (r_data.get("skills") or [])[:30]:
+        # Resume parsers have emitted BOTH shapes: a flat list of skill names
+        # (legacy) and the categorized dict {"Languages": [...], ...} (current
+        # canonical). Flatten either without crashing.
+        raw_skills = r_data.get("skills") or []
+        if isinstance(raw_skills, dict):
+            flat_skills: list[Any] = []
+            for values in raw_skills.values():
+                if isinstance(values, list):
+                    flat_skills.extend(values)
+        elif isinstance(raw_skills, list):
+            flat_skills = raw_skills
+        else:
+            flat_skills = []
+        for sk in flat_skills[:30]:
             if isinstance(sk, str):
                 terms.add(sk)
         for w in (r_data.get("work_experience") or [])[:5]:
@@ -205,8 +235,8 @@ def _build_glossary(job: JobPosting, application: Optional[JobApplication]) -> l
                 for tech in (w.get("technologies") or [])[:10]:
                     terms.add(str(tech))
         for p in (r_data.get("projects") or [])[:4]:
-            if isinstance(p, dict) and p.get("title"):
-                terms.add(str(p["title"]))
+            if isinstance(p, dict) and (p.get("title") or p.get("name")):
+                terms.add(str(p.get("title") or p.get("name")))
     return sorted(terms)
 
 

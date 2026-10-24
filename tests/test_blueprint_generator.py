@@ -20,10 +20,13 @@ from backend.app.services.blueprint.generator import (
     SectionContentError,
     _apply_expectation_caps,
     _normalize_skill_section_data,
+    auto_repair_blueprint_questions,
+    repair_blueprint_opening_variety,
 )
 from backend.app.services.blueprint.prompts import build_skill_section_user_prompt
 from backend.app.services.blueprint.validator import (
     _sanitize_llm_review_issues,
+    validate_blueprint,
     validate_skill_section,
 )
 
@@ -470,3 +473,171 @@ def test_review_false_positives_are_dropped_but_real_violations_survive():
     assert len(cleaned_true.issues) == 1
     assert cleaned_true.issues[0].issue_type == "technique_leakage"
     assert cleaned_true.is_approved is False
+
+
+def _variety_q(text: str, role: str = "probe") -> QuestionDraft:
+    return QuestionDraft(
+        question_role=role,
+        question_text=text,
+        trigger_condition="Candidate gives a vague answer",
+        target_expectation_indices=[0],
+    )
+
+
+def _variety_section(name, anchor, alt, esc, probes) -> dict:
+    return {
+        "section_type": "skill",
+        "skill_name": name,
+        "allocated_minutes": 4.0,
+        "content": SkillSectionContent(
+            skill_name=name,
+            expectations=[
+                ExpectationDraft(expectation_text="Handles production failure modes", source_rubric_level="L3", importance="core"),
+                ExpectationDraft(expectation_text="Reasons about scale trade-offs", source_rubric_level="L4", importance="stretch"),
+            ],
+            anchor_question=_variety_q(anchor, "anchor"),
+            anchor_alt_question=_variety_q(alt, "anchor_alt"),
+            escalation_question=_variety_q(esc, "escalation"),
+            probes=[_variety_q(p, "probe") for p in probes],
+        ),
+    }
+
+
+def _variety_blueprint_sections():
+    """19 questions where 7 (37%) open with 'How would you' — the exact
+    failure mode reported on a real 'AI Engineer' job creation."""
+    return [
+        _variety_section(
+            "Distributed Systems",
+            "How would you design a rate limiter for a public API?",
+            "Suppose a client floods the service; how would you shed load safely?",
+            "How would you keep the limiter correct across a network partition?",
+            [
+                "How would you handle thundering herd on cache expiry?",
+                "What signals would tell you the limiter itself is the bottleneck?",
+                "Walk me through how you would size the limiter's memory?",
+                "How would you roll out a limiter config change safely?",
+            ],
+        ),
+        _variety_section(
+            "LLM Evaluation",
+            "How would you evaluate a retrieval pipeline that degrades in production?",
+            "Tell me about a time you diagnosed an eval versus prod mismatch?",
+            "Describe how you would build trust in offline metrics?",
+            [
+                "Which metrics would you trust for retrieval quality?",
+                "How would you detect silent drift in embedding distributions?",
+                "What experiment would settle a metric disagreement?",
+            ],
+        ),
+        _variety_section(
+            "API Design",
+            "Walk me through a breaking API change you shipped safely?",
+            "Suppose clients only support the old shape; what is your plan?",
+            "How would you preserve availability during a breaking rollout?",
+            [
+                "When have you deprecated a public endpoint?",
+                "What is your approach to versioning webhooks?",
+                "Which guarantees matter most to API consumers?",
+            ],
+        ),
+    ]
+
+
+def _section_question_texts(sections) -> list:
+    texts = []
+    for s in sections:
+        c = s["content"]
+        texts += [
+            c.anchor_question.question_text,
+            c.anchor_alt_question.question_text,
+            c.escalation_question.question_text,
+        ] + [p.question_text for p in c.probes]
+    return texts
+
+
+def test_opening_variety_repair_clears_validator_warning():
+    sections = _variety_blueprint_sections()
+    texts_before = _section_question_texts(sections)
+    top_before = max(
+        __import__("collections").Counter(
+            " ".join(t.strip().lower().split()[:3]) for t in texts_before
+        ).values()
+    )
+    assert top_before == 7  # reproduces the reported 37% clustering
+
+    rewrites = repair_blueprint_opening_variety(sections)
+    assert rewrites >= 1
+
+    texts_after = _section_question_texts(sections)
+    for t in texts_after:
+        assert t.endswith("?") and "??" not in t
+        assert len(t.split()) <= 45
+
+    report = validate_blueprint(
+        sections=sections,
+        job_skills=[{"name": "Distributed Systems"}, {"name": "LLM Evaluation"}, {"name": "API Design"}],
+        active_skill_time=12.0,
+        total_duration_mins=20,
+        seniority_level="senior",
+    )
+    assert not [w for w in report.warnings if "variety" in w]
+
+
+def test_auto_repair_includes_opening_variety_pass():
+    sections = _variety_blueprint_sections()
+    assert auto_repair_blueprint_questions(sections) >= 1
+    texts = _section_question_texts(sections)
+    openings = __import__("collections").Counter(
+        " ".join(t.strip().lower().split()[:3]) for t in texts
+    )
+    assert openings.most_common(1)[0][1] / len(texts) <= 0.35
+
+
+def test_opening_variety_repair_noop_below_threshold():
+    sections = _variety_blueprint_sections()
+    # Drop one 'How would you' question to 6/19 = 31.6% (below the 35% guideline)
+    sections[2]["content"].escalation_question.question_text = (
+        "What would you sacrifice to preserve availability during a breaking rollout?"
+    )
+    texts = _section_question_texts(sections)
+    assert repair_blueprint_opening_variety(sections) == 0
+    assert _section_question_texts(sections) == texts
+
+
+def test_opening_variety_repair_handles_serialized_dict_sections():
+    dict_sections = [
+        {
+            "section_type": "skill",
+            "skill_name": "Queues",
+            "questions": [
+                {"question_role": "anchor", "question_text": "How would you design a queue?"},
+                {"question_role": "anchor_alt", "question_text": "How would you replay events?"},
+                {"question_role": "escalation", "question_text": "How would you bound memory?"},
+                {"question_role": "probe", "question_text": "How would you handle retries?"},
+                {"question_role": "probe", "question_text": "How would you detect poison messages?"},
+                {"question_role": "probe", "question_text": "What alerts matter here?"},
+            ],
+        },
+        {
+            "section_type": "skill",
+            "skill_name": "Migrations",
+            "questions": [
+                {"question_role": "anchor", "question_text": "Walk me through a migration?"},
+                {"question_role": "anchor_alt", "question_text": "Suppose a shard is hot; what then?"},
+                {"question_role": "escalation", "question_text": "How would you verify ordering?"},
+                {"question_role": "probe", "question_text": "How would you monitor lag?"},
+                {"question_role": "probe", "question_text": "When have you tuned batching?"},
+                {"question_role": "probe", "question_text": "Which configs bite at scale?"},
+            ],
+        },
+    ]
+    assert repair_blueprint_opening_variety(dict_sections) >= 1
+    from collections import Counter
+    openings = Counter(
+        " ".join(qd["question_text"].strip().lower().split()[:3])
+        for s in dict_sections
+        for qd in s["questions"]
+    )
+    total = sum(len(s["questions"]) for s in dict_sections)
+    assert openings.most_common(1)[0][1] / total <= 0.35

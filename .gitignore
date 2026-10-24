@@ -115,4 +115,10 @@ tests/__pycache__/
 *.pyc
 scripts/
 docs/
+tests/
 
+
+/tests
+/tests
+tests/test_live_plan_integration_v2.py
+tests/test_conductor_v2.py

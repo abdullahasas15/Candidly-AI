@@ -122,6 +122,13 @@ BRIDGE_PHRASES: List[str] = list(dict.fromkeys(list(BRIDGES) + [
     "Thank you.",
 ]))
 
+# Timers that measure CANDIDATE presence (silence ladder + answer commit grace).
+# They are held while no WebSocket client is connected so a disconnect can never
+# silently consume the candidate's question while they stare at "Connecting...".
+_CLIENT_PRESENCE_TIMER_NAMES = {"silence", "greeting_silence", "agenda_silence", "commit"}
+# Fresh silence window granted after a reconnect before held ladder rungs fire.
+RECONNECT_LADDER_GRACE_S = 15.0
+
 # In-memory pre-synthesized bridge audio cache: phrase -> 24kHz linear16 PCM bytes
 BRIDGE_AUDIO_CACHE: Dict[str, bytes] = {}
 
@@ -216,12 +223,19 @@ def build_script(session: Any) -> Dict[str, Any]:
             # Include all slots so anchor_alt is indexed and available for no-experience/hypothetical paths
             all_slots = list(plan.slots)
             for slot in all_slots:
+                # Background-family slots must NOT carry a pseudo skill name:
+                # naming them by stage ("Background") used to register a fake
+                # skill in the conductor's skill map, polluting skill order.
+                if slot.stage == "background":
+                    slot_skill_name = slot.skill_name
+                else:
+                    slot_skill_name = slot.skill_name or ("Custom Screening" if slot.stage == "custom_screening" else ("General" if slot.stage in ("greeting", "closing") else slot.stage.title()))
                 plan_questions.append({
                     "id": slot.id,
                     "question_index": slot.index,
                     "stage": slot.stage,
                     "kind": slot.kind,
-                    "skill_name": slot.skill_name or ("Custom Screening" if slot.stage == "custom_screening" else ("General" if slot.stage in ("greeting", "closing") else slot.stage.title())),
+                    "skill_name": slot_skill_name,
                     "question_text": slot.question_text,
                     "priority_tier": "P0" if slot.is_required else "P1",
                     "section_id": slot.skill_id,
@@ -232,6 +246,11 @@ def build_script(session: Any) -> Dict[str, Any]:
                     "variant_group": slot.variant_group,
                     "parent_question_id": slot.parent_question_id,
                     "probe_id": slot.id,
+                    "follow_up_depth_allowed": slot.follow_up_depth_allowed,
+                    "escalation_question": slot.escalation_question,
+                    "anchor_alt_question": slot.anchor_alt_question,
+                    "rubric_levels": dict(slot.rubric_levels or {}),
+                    "candidate_hooks": list(slot.candidate_hooks or []),
                 })
         except Exception as e:
             logger.warning("Error building script from script_plan: %s", e)
@@ -609,9 +628,37 @@ class SessionRunner:
         # Authoritative Outbound Speech Ledger (Phase A6)
         self.speech_ledger: OutboundSpeechLedger = OutboundSpeechLedger(session_id=session_id)
 
-        # Bounded-Agentic State Tracking (Recent turns deque and ScriptPlan)
-        self.recent_turns: deque = deque(maxlen=2)
+        # Bounded-Agentic State Tracking (last 4 turns for the decision LLM)
+        self.recent_turns: deque = deque(maxlen=4)
         self.script_plan: Optional[ScriptPlan] = None
+
+        # Resume-aware candidate summary + structured dossier (hydrated in
+        # start()): the live decision LLM always knows whose work it is probing.
+        self.candidate_summary: Optional[str] = None
+        self.candidate_dossier: Dict[str, Any] = {}
+
+        # In-flight STT capture: latest interim transcript + when it arrived.
+        # Used by on_commit_button so "Done Answering" captures speech whose
+        # Flux final hasn't landed yet, and by the post-commit quiet window
+        # (stt_drop_until_ms) so late finals can't become ghost answers.
+        self.last_partial_transcript: str = ""
+        self.last_partial_at_ms: int = 0
+        self.stt_drop_until_ms: int = 0
+        # Recently committed answers (normalized): Flux finals for speech that
+        # was already committed sometimes arrive MANY seconds late (observed
+        # 37s in production). The quiet window can't catch those, so any final
+        # whose text was already committed verbatim is a ghost and is dropped.
+        self.recent_committed_answers: "deque[str]" = deque(maxlen=3)
+        # True after a StartOfTurn (new live speech began). Ghost-final
+        # detection only applies to tails of OLD speech, which arrive WITHOUT
+        # a StartOfTurn since the last commit — a candidate legitimately
+        # repeating the same sentence on NEW speech must never be dropped.
+        self.new_turn_started: bool = False
+
+        # Live client presence: gates candidate-presence timers (silence ladder,
+        # commit grace). Defaults to True so WS-less runs (simulator, harnesses)
+        # keep flowing; the WS router explicitly marks disconnects False.
+        self.client_connected: bool = True
         if "script_plan" in self.script and isinstance(self.script["script_plan"], dict):
             try:
                 self.script_plan = ScriptPlan.model_validate(self.script["script_plan"])
@@ -742,6 +789,25 @@ class SessionRunner:
         except Exception as seq_err:
             logger.debug("Could not initialize transcript sequence: %s", seq_err)
 
+        # Hydrate the resume-aware candidate dossier once per runner lifetime.
+        # Non-fatal: the decision loop falls back to a job-only summary.
+        if not self.candidate_summary:
+            try:
+                from backend.app.services.interview_v2.context_hydrator import hydrate_interview_context
+                async with AsyncSessionLocal() as db:
+                    sess_res = await db.execute(
+                        select(InterviewSession.id, InterviewSession.application_id).where(
+                            InterviewSession.id == self.session_id
+                        )
+                    )
+                    sess_row = sess_res.first()
+                    if sess_row and sess_row.application_id:
+                        ctx = await hydrate_interview_context(db, sess_row.application_id)
+                        self.candidate_summary = ctx.to_live_turn_summary()
+                        self.candidate_dossier = ctx.to_live_candidate_dossier()
+            except Exception as ctx_err:
+                logger.debug("Could not hydrate candidate summary for live loop: %s", ctx_err)
+
         # Initialize script if at start or aborted welcome (COMPLETED is NOT reset)
         if self.state.phase in (ConductorPhase.INIT, ConductorPhase.WELCOME):
             self.state = ConductorState()
@@ -754,7 +820,12 @@ class SessionRunner:
         self.runner_task = asyncio.create_task(self._run_loop())
 
     async def _reconnect_resync(self) -> None:
-        """On active session reconnection, send UIStatus and re-speak current question if bot was speaking."""
+        """On active session reconnection, send UIStatus and re-speak current question.
+
+        The candidate may have missed the question entirely while disconnected
+        (stuck on "Connecting..."), so when a question is pending in an
+        answering phase we re-ask it with a short apology instead of assuming
+        they heard it the first time."""
         await asyncio.sleep(0.15)
         curr_q = _get_current_question(self.state)
         text = curr_q.question_text if curr_q else ""
@@ -779,11 +850,26 @@ class SessionRunner:
                         "topic_count": self.state.topic_count,
                     },
                 })
-                if self.state.bot_speaking and text:
+                question_phases = (
+                    ConductorPhase.INTRO,
+                    ConductorPhase.SKILL_ANCHOR,
+                    ConductorPhase.SKILL_FOLLOWUP,
+                )
+                if text and (self.state.bot_speaking or self.state.phase in question_phases):
                     self.state.speech_seq += 1
                     speech_id = f"speech_{self.state.speech_seq}"
                     self.state.active_speech_id = speech_id
-                    await self._handle_speak(Speak(text=text, speech_id=speech_id, question_text=text))
+                    if self.state.bot_speaking:
+                        # Was mid-speech when the link dropped: repeat verbatim.
+                        await self._handle_speak(Speak(text=text, speech_id=speech_id, question_text=text))
+                    else:
+                        # Candidate should be answering but may never have heard
+                        # the question — re-ask it kindly and continue from here.
+                        await self._handle_speak(Speak(
+                            text=f"Sorry about that — let me repeat the question. {text}",
+                            speech_id=speech_id,
+                            question_text=text,
+                        ))
             except Exception as e:
                 logger.debug("Failed reconnect resync: %s", e)
 
@@ -1410,32 +1496,12 @@ class SessionRunner:
                     else:
                         self.spec_decision["ack"] = ""
                 elif spec_ack and spec_action != "qa_reply":
-                    logger.info("Speculative ack '%s' failed validation/grounding. Regenerating once...", spec_ack)
-                    regen_ack = await self._regenerate_grounded_ack(effect.answer_text, effect.question_text, spec_ack)
-                    if regen_ack and is_ack_grounded(regen_ack, effect.answer_text, effect.question_text):
-                        val_regen, _ = validate_and_format_ack(
-                            raw_ack=regen_ack,
-                            last_opener=getattr(effect, "last_ack_opener", None),
-                            candidate_answer=effect.answer_text,
-                            question_text=effect.question_text,
-                            action=spec_action,
-                            no_experience=self.spec_decision.get("no_experience", False),
-                        )
-                        if val_regen:
-                            self.spec_decision["ack"] = val_regen
-                            await self.queue.put(AckReady(
-                                token=effect.token,
-                                text=val_regen,
-                                action=spec_action,
-                                no_experience=self.spec_decision.get("no_experience", False),
-                                snapshot=self.spec_snapshot,
-                                now_ms=self.now_ms(),
-                            ))
-                        else:
-                            self.spec_decision["ack"] = ""
-                    else:
-                        logger.info("Regenerated ack for speculative decision failed grounding check; speaking NO ack.")
-                        self.spec_decision["ack"] = ""
+                    # Ack failed grounding/shape validation. Drop it immediately
+                    # (0ms) — a second sequential LLM call here used to add
+                    # 500-900ms of dead air on the voice path. No ack is spoken;
+                    # the bridge/question still lands naturally.
+                    logger.info("Speculative ack '%s' failed validation/grounding; speaking NO ack.", spec_ack)
+                    self.spec_decision["ack"] = ""
                 else:
                     self.spec_decision["ack"] = ""
 
@@ -1779,7 +1845,10 @@ class SessionRunner:
                                     alternative_slot = s
                                     break
 
-                        cand_summary = self.script.get("job_summary")
+                        # Prefer the resume-aware summary (name, companies, roles,
+                        # key skills) so follow-ups can reference the candidate's
+                        # actual experience; fall back to the job-only summary.
+                        cand_summary = self.candidate_summary or self.script.get("job_summary")
                         if not cand_summary:
                             job_rec = self.state.job_record or self.script.get("job_record", {})
                             cand_summary = f"Job: {job_rec.get('title', 'Software Engineer')} ({job_rec.get('seniority', 'Mid')}, {self.script.get('duration_planned_mins', 20)}m). Focus Skills: {', '.join(self.state.skill_names[:4])}."
@@ -1816,6 +1885,16 @@ class SessionRunner:
                             ),
                             followups_remaining=max(0, getattr(current_slot, "follow_up_depth_allowed", 2) - effect.followups_used),
                             remaining_time_mins=max(0.0, effect.time_left_ms / 60000.0),
+                            # Competency-driven enrichment: rubric anchors,
+                            # escalation question, and the candidate's own hooks
+                            # so follow-ups probe THEIR real work.
+                            skill_rubric=dict(getattr(current_slot, "rubric_levels", {}) or {}) if current_slot else {},
+                            escalation_question=(getattr(current_slot, "escalation_question", None) if current_slot else None),
+                            candidate_hooks=list(getattr(current_slot, "candidate_hooks", []) or []) if current_slot else [],
+                            covered_expectations=list(self.state.covered_expectations_per_skill.get(effect.skill, []) or []),
+                            hint_or_alt_used_on_skill=bool(self.state.hypothetical_used_per_skill.get(effect.skill, False)),
+                            candidate_dossier=dict(self.candidate_dossier or {}),
+                            last_estimated_level=self.state.estimated_level_per_skill.get(effect.skill),
                         )
 
                         # Ack-first streaming: the ack reaches the candidate as soon as
@@ -1837,6 +1916,11 @@ class SessionRunner:
                             on_stream_ack=_ack_sink,
                         )
                         metrics.update(sel_metrics)
+                        # Carry the estimated rubric level across turns so the
+                        # escalation ladder continues (L2 shown → probe L3/L4).
+                        if selector_out.estimated_rubric_level:
+                            self.state.estimated_level_per_skill[effect.skill] = selector_out.estimated_rubric_level
+                        covered = [str(c) for c in (selector_out.covered_expectations or [])]
                         if held_qa_acks and selector_out.decision != "CANDIDATE_QA":
                             for payload in held_qa_acks:
                                 on_stream_ack(payload)
@@ -1847,6 +1931,31 @@ class SessionRunner:
                                 match_s = self.script_plan.get_slot_by_id(selector_out.planned_question_id)
                                 if match_s:
                                     target_slot = match_s
+                            # Coverage guard: the agentic selector may target any
+                            # slot, but it must never strand a whole competency —
+                            # if it points at an ALREADY-asked skill while an
+                            # unvisited skill remains earlier in the plan, route
+                            # to that unvisited skill's anchor instead.
+                            if target_slot and self.script_plan and target_slot.kind == "anchor" and target_slot.skill_name:
+                                asked_texts = {normalize_text_for_hash(q) for q in self.state.asked_questions_history}
+                                asked_skills = set()
+                                for s in self.script_plan.slots:
+                                    if s.kind == "anchor" and normalize_text_for_hash(s.question_text) in asked_texts:
+                                        asked_skills.add(s.skill_name)
+                                if target_slot.skill_name in asked_skills:
+                                    for s in self.script_plan.get_ordered_slots():
+                                        if (
+                                            s.kind == "anchor"
+                                            and s.skill_name
+                                            and s.skill_name not in asked_skills
+                                            and normalize_text_for_hash(s.question_text) not in asked_texts
+                                        ):
+                                            target_slot = s
+                                            logger.info(
+                                                "Coverage guard: routing ADVANCE to unvisited skill '%s'",
+                                                s.skill_name,
+                                            )
+                                            break
                             if target_slot:
                                 decision_dict = {
                                     "action": "new_topic",
@@ -1854,7 +1963,7 @@ class SessionRunner:
                                     "target_skill": target_slot.skill_name or effect.skill,
                                     "ack": selector_out.ack or "",
                                     "transition": selector_out.bridge or "",
-                                    "covered_expectations": [],
+                                    "covered_expectations": covered,
                                     "planned_question_id": target_slot.id,
                                 }
                             else:
@@ -1863,7 +1972,7 @@ class SessionRunner:
                                     "question": "Thank you so much for your time today. We will be in touch shortly.",
                                     "ack": selector_out.ack or "",
                                     "transition": "",
-                                    "covered_expectations": [],
+                                    "covered_expectations": covered,
                                 }
                         elif selector_out.decision == "FOLLOW_UP":
                             fol_q = (selector_out.follow_up_question or "").strip()
@@ -1882,7 +1991,7 @@ class SessionRunner:
                                         "target_skill": next_slot.skill_name or effect.skill,
                                         "ack": selector_out.ack or "",
                                         "transition": selector_out.bridge or "",
-                                        "covered_expectations": [],
+                                        "covered_expectations": covered,
                                         "planned_question_id": next_slot.id,
                                     }
                                 else:
@@ -1891,7 +2000,7 @@ class SessionRunner:
                                         "question": "Thank you so much for your time today. We will be in touch shortly.",
                                         "ack": selector_out.ack or "",
                                         "transition": "",
-                                        "covered_expectations": [],
+                                        "covered_expectations": covered,
                                     }
 
                             if not decision_dict:
@@ -1901,7 +2010,7 @@ class SessionRunner:
                                     "target_skill": effect.skill,
                                     "ack": selector_out.ack or "",
                                     "transition": selector_out.bridge or "",
-                                    "covered_expectations": [],
+                                    "covered_expectations": covered,
                                 }
                         elif selector_out.decision == "CLARIFY_OR_REPEAT":
                             decision_dict = {
@@ -1910,7 +2019,7 @@ class SessionRunner:
                                 "target_skill": effect.skill,
                                 "ack": selector_out.ack or "",
                                 "transition": "",
-                                "covered_expectations": [],
+                                "covered_expectations": covered,
                             }
                         elif selector_out.decision == "SWAP_QUESTION":
                             # Candidate signaled no knowledge: hand off to the
@@ -1925,7 +2034,7 @@ class SessionRunner:
                                 "target_skill": effect.skill,
                                 "ack": selector_out.ack or "",
                                 "transition": selector_out.bridge or "No problem.",
-                                "covered_expectations": [],
+                                "covered_expectations": covered,
                             }
                         elif selector_out.decision == "CANDIDATE_QA":
                             # Candidate Q&A: answer the candidate's actual question using authoritative job facts
@@ -1989,7 +2098,7 @@ class SessionRunner:
                                 "target_skill": "Candidate Q&A",
                                 "ack": eff_ack,
                                 "transition": "",
-                                "covered_expectations": [],
+                                "covered_expectations": covered,
                                 "source_facts": verified_facts,
                             }
                         elif selector_out.decision == "END_INTERVIEW":
@@ -2005,7 +2114,7 @@ class SessionRunner:
                                 "target_skill": effect.skill,
                                 "ack": selector_out.ack or "",
                                 "transition": "",
-                                "covered_expectations": [],
+                                "covered_expectations": covered,
                             }
 
                         # Dedupe guard: the speculative lookahead may have recorded this
@@ -2053,33 +2162,11 @@ class SessionRunner:
                                         now_ms=self.now_ms(),
                                     ))
                             else:
-                                logger.info("Ack '%s' failed validation/grounding against candidate answer. Regenerating once...", raw_ack)
-                                regen_ack = await self._regenerate_grounded_ack(effect.answer_text, effect.question_text, raw_ack)
-                                if regen_ack and is_ack_grounded(regen_ack, effect.answer_text, effect.question_text):
-                                    val_regen, _ = validate_and_format_ack(
-                                        raw_ack=regen_ack,
-                                        last_opener=getattr(effect, "last_ack_opener", None),
-                                        candidate_answer=effect.answer_text,
-                                        question_text=effect.question_text,
-                                        action=decision_dict.get("action", ""),
-                                        no_experience=decision_dict.get("no_experience", False),
-                                    )
-                                    if val_regen:
-                                        decision_dict["ack"] = val_regen
-                                        if not self.state.spoken_ack_token and not ack_emitted:
-                                            await self.queue.put(AckReady(
-                                                token=effect.token,
-                                                text=val_regen,
-                                                action=decision_dict.get("action", ""),
-                                                no_experience=decision_dict.get("no_experience", False),
-                                                snapshot=getattr(effect, "snapshot", None),
-                                                now_ms=self.now_ms(),
-                                            ))
-                                    else:
-                                        decision_dict["ack"] = ""
-                                else:
-                                    logger.info("Regenerated ack failed grounding check; speaking NO ack.")
-                                    decision_dict["ack"] = ""
+                                # Ack failed validation/grounding: drop it (0ms)
+                                # instead of a second sequential LLM call that
+                                # used to add 500-900ms of dead air.
+                                logger.info("Ack '%s' failed validation/grounding; speaking NO ack.", raw_ack)
+                                decision_dict["ack"] = ""
         except Exception as e:
             logger.warning("Outer Decision LLM call error: %s", e)
             decision_dict = None
@@ -2279,6 +2366,22 @@ class SessionRunner:
             delay_s = (delay_ms / 1000.0) if delay_ms > 0 else max(0.0, (at_ms - self.now_ms()) / 1000.0)
             try:
                 await asyncio.sleep(delay_s)
+                if name in _CLIENT_PRESENCE_TIMER_NAMES:
+                    # Silence-ladder and commit-grace timers must not consume the
+                    # candidate's question while they have no live connection
+                    # (e.g. stuck on "Connecting..."). Hold the tick until the
+                    # client is back, then give a fresh grace window before the
+                    # rung fires so a just-reconnected candidate isn't nudged
+                    # instantly. Held ticks fire with a fresh now_ms so the
+                    # conductor evaluates them coherently.
+                    held = False
+                    while not self.client_connected:
+                        held = True
+                        await asyncio.sleep(1.0)
+                    if held:
+                        await asyncio.sleep(RECONNECT_LADDER_GRACE_S)
+                        await self.queue.put(Tick(now_ms=self.now_ms(), token=token))
+                        return
                 await self.queue.put(Tick(now_ms=at_ms, token=token))
             except asyncio.CancelledError:
                 pass
@@ -2296,6 +2399,18 @@ class SessionRunner:
 
     async def _handle_persist(self, turn: Dict[str, Any]) -> None:
         """Persist turn to database and session trace."""
+        # Arm the post-commit STT quiet window: finals for speech that was
+        # already committed (still in flight inside Flux) must be dropped so
+        # they cannot become a ghost answer on the next question. The bot
+        # speaks for several seconds after every commit, so legitimate new
+        # speech cannot produce an EndOfTurn inside this window.
+        self.stt_drop_until_ms = self.now_ms() + 2500
+        self.last_partial_transcript = ""
+        self.last_partial_at_ms = 0
+        committed_norm = normalize_text_for_hash(turn.get("answer", "") or "")
+        if len(committed_norm) >= 20:
+            self.recent_committed_answers.append(committed_norm)
+        self.new_turn_started = False
         # Log to trace.py
         turn_id = f"turn_{turn.get('turn_index', 0)}"
         self.trace.log_commit(
@@ -2348,6 +2463,39 @@ class SessionRunner:
                         await db.commit()
             except Exception as e:
                 logger.warning("Could not persist dynamic InterviewQuestion to DB: %s", e)
+
+        # Keep per-question state accurate for the recruiter dashboard and the
+        # post-interview evaluator: every answered turn advances the matching
+        # InterviewQuestion row (state, follow-up count, expectation coverage).
+        try:
+            q_idx = turn.get("question_index")
+            if isinstance(q_idx, int) and 0 <= q_idx < 1000:
+                skill = turn.get("skill_name") or ""
+                covered_now = list(self.state.covered_expectations_per_skill.get(skill, []) or [])
+                async with AsyncSessionLocal() as db:
+                    row_q = await db.execute(
+                        select(InterviewQuestion).where(
+                            InterviewQuestion.session_id == self.session_id,
+                            InterviewQuestion.question_index == q_idx,
+                        )
+                    )
+                    db_question = row_q.scalar_one_or_none()
+                    if db_question:
+                        db_question.question_state = "candidate_turn"
+                        if turn.get("question_kind") in ("followup_dynamic", "director_question", "probe", "followup"):
+                            db_question.question_state = "follow_up"
+                        db_question.follow_up_count = int(turn.get("followups_used", 0) or 0)
+                        if covered_now:
+                            merged = dict(db_question.coverage_status or {})
+                            for exp in covered_now:
+                                merged[str(exp)[:200]] = "covered"
+                            db_question.coverage_status = merged
+                        db_question.evidence_turn_ids = list(
+                            set(list(db_question.evidence_turn_ids or []) + [turn_id])
+                        )
+                        await db.commit()
+        except Exception as e:
+            logger.debug("Could not update InterviewQuestion state after turn: %s", e)
 
         # Persist to database (InterviewTranscriptTurn)
         try:
@@ -2417,6 +2565,21 @@ class SessionRunner:
         await self.queue.put(ReadyButton(now_ms=self.now_ms()))
 
     async def on_commit_button(self) -> None:
+        """Manual 'Done Answering' accelerator.
+
+        Must capture speech that is still in-flight: the conductor's
+        answer_buffer only holds FINALIZED STT text, and a long answer with no
+        pause produces no Flux EndOfTurn before the click. Inject the latest
+        interim transcript when the buffer is empty so the candidate's spoken
+        answer is never recorded as '[Skipped by candidate]' (production bug:
+        the late final then attached itself to the NEXT question)."""
+        buf = (getattr(self.state, "answer_buffer", "") or "").strip()
+        if not buf:
+            partial = (self.last_partial_transcript or "").strip()
+            fresh = (self.now_ms() - self.last_partial_at_ms) < 15_000
+            if partial and fresh:
+                logger.info("CommitButton: injecting in-flight interim transcript (%d words)", len(partial.split()))
+                self.state.answer_buffer = partial
         await self.queue.put(CommitButton(now_ms=self.now_ms()))
 
     async def on_repeat_button(self) -> None:
@@ -2439,14 +2602,38 @@ class SessionRunner:
         if self.flux_client:
             await self.flux_client.send_audio(raw_bytes)
 
+    def _is_ghost_final(self, text: str) -> bool:
+        """True when a late STT final's text was already committed earlier —
+        Flux re-delivers the full prior-turn transcript long after the commit,
+        and committing it again duplicated answers across questions (seen in
+        production as the same answer appearing under the next question)."""
+        cleaned = normalize_text_for_hash(text or "")
+        if len(cleaned) < 20:
+            return False
+        for prev in self.recent_committed_answers:
+            if cleaned == prev:
+                return True
+            # Flux finals sometimes contain the whole turn: old answer + a few
+            # genuinely new words. Only treat as ghost when it is a verbatim
+            # duplicate; mixed text flows through for normal processing.
+        return False
+
     async def on_flux_event(self, event: FluxEvent) -> None:
         """Process incoming typed event from Flux STT client."""
         now = self.now_ms()
 
         if isinstance(event, StartOfTurn):
+            self.new_turn_started = True
             await self.queue.put(TurnStart(now_ms=now))
 
         elif isinstance(event, Update):
+            # Track the latest interim hypothesis server-side: a manual commit
+            # ("Done Answering") can arrive while this speech is still
+            # in-flight (no Flux EndOfTurn yet). Without this, the commit
+            # recorded "[Skipped by candidate]" and the late final then landed
+            # as an answer to the NEXT question (verified in production DB).
+            self.last_partial_transcript = event.text
+            self.last_partial_at_ms = now
             # Stream live interim hypothesis directly to connected UI
             if self.websocket:
                 try:
@@ -2456,6 +2643,14 @@ class SessionRunner:
 
         elif isinstance(event, EagerEndOfTurn):
             self.current_metrics.eager_eot_time = time.perf_counter()
+            self.last_partial_transcript = event.text
+            self.last_partial_at_ms = now
+            if now < self.stt_drop_until_ms or (self._is_ghost_final(event.text) and not self.new_turn_started):
+                # Tail of previous turn's in-flight speech (or a final whose
+                # text was already committed): drop so it cannot become a
+                # ghost answer on the next question.
+                logger.debug("Dropping stale EagerEndOfTurn (post-commit window or ghost text)")
+                return
             if self.websocket:
                 try:
                     await self.websocket.send_json({"type": "Update", "text": event.text})
@@ -2468,6 +2663,9 @@ class SessionRunner:
 
         elif isinstance(event, EndOfTurn):
             self.current_metrics.end_of_turn_time = time.perf_counter()
+            if now < self.stt_drop_until_ms or (self._is_ghost_final(event.text) and not self.new_turn_started):
+                logger.debug("Dropping stale EndOfTurn (post-commit window or ghost text)")
+                return
             if self.websocket:
                 try:
                     await self.websocket.send_json({"type": "Update", "text": event.text})

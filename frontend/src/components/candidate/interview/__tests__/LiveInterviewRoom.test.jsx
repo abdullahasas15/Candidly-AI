@@ -242,6 +242,19 @@ describe('LiveInterviewRoom Component', () => {
       }
     });
 
+    // New caption contract: question text is held back until the interviewer's
+    // audio starts (TTSStarted) so the candidate reads along with the voice.
+    act(() => {
+      if (ws.onmessage) {
+        ws.onmessage({
+          data: JSON.stringify({
+            type: 'TTSStarted',
+            speech_id: 'speech_reveal_1',
+          }),
+        });
+      }
+    });
+
     expect(screen.getByText(/SPEAKING/i)).toBeInTheDocument();
     expect(
       screen.getByText('How do you design a high-throughput event streaming pipeline?')
@@ -333,6 +346,15 @@ describe('LiveInterviewRoom Component', () => {
               question_text: 'Hi, I’m your interviewer. Thanks for making the time today. How are you?',
             },
           }),
+        });
+      }
+    });
+
+    // Caption contract: greeting text reveals when its audio starts
+    act(() => {
+      if (ws.onmessage) {
+        ws.onmessage({
+          data: JSON.stringify({ type: 'TTSStarted', speech_id: 'speech_greet_1' }),
         });
       }
     });
@@ -1344,10 +1366,15 @@ describe('LiveInterviewRoom Component', () => {
       });
       const ws = MockWebSocket.instances[0];
 
-      // Set existing question text first
+      // Set existing question text first and reveal it (audio started)
       act(() => {
         ws.onmessage({
           data: JSON.stringify({ type: 'UIStatus', payload: { question_text: 'Explain indexing' } }),
+        });
+      });
+      act(() => {
+        ws.onmessage({
+          data: JSON.stringify({ type: 'TTSStarted', speech_id: 'speech_q_1' }),
         });
       });
 

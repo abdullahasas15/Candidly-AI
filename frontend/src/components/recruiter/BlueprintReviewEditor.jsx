@@ -95,7 +95,11 @@ export default function BlueprintReviewEditor({
         const token = getRecruiterToken();
         const headers = getAuthHeaders(token);
         const res = await fetch(`/api/jobs/${job.id}/blueprint/generate/status`, { headers });
-        if (!res.ok) return;
+        if (!res.ok) {
+          // Transient server error: keep polling instead of freezing the progress UI
+          if (isSubscribed) timer = setTimeout(checkStatus, 3000);
+          return;
+        }
         const data = await res.json();
         if (!isSubscribed) return;
 
@@ -112,9 +116,13 @@ export default function BlueprintReviewEditor({
         } else if (data.status === 'failed') {
           setGenerating(false);
           setErrorMsg(data.error || 'Blueprint generation failed');
+        } else if (data.status === 'idle') {
+          setGenerating(false);
         }
       } catch (err) {
         console.warn('Status poll error:', err);
+        // Network hiccup: retry with backoff so one dropped request doesn't kill polling
+        if (isSubscribed) timer = setTimeout(checkStatus, 3000);
       }
     };
 
@@ -373,22 +381,26 @@ export default function BlueprintReviewEditor({
       if (!res.ok) {
         const err = await res.json();
         if (err.detail?.needs_confirmation || (typeof err.detail === 'string' && err.detail.includes('warnings'))) {
+          // Keep this open: the finally block below must not reset it on this path
+          setSaving(false);
           setConfirmWarningModal(true);
           return;
         }
+        setConfirmWarningModal(false);
         throw new Error(err.detail?.message || err.detail || 'Approval failed');
       }
 
       const approved = await res.json();
       setBlueprint(approved);
       setSuccessMsg('Blueprint approved! This job is now accepting candidate applications.');
+      setConfirmWarningModal(false);
       if (onApproved) onApproved(approved);
       if (onBlueprintApproved) onBlueprintApproved(approved);
     } catch (err) {
+      setConfirmWarningModal(false);
       setErrorMsg(err.message);
     } finally {
       setSaving(false);
-      setConfirmWarningModal(false);
     }
   };
 
@@ -629,18 +641,20 @@ export default function BlueprintReviewEditor({
           </div>
         )}
 
-        {validatorWarnings.length > 0 && (
-          <div className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900/60 space-y-1">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-amber-800 dark:text-amber-300">
+        {/* Warnings are pre-approval decision aids. On an approved/live blueprint
+            they are already acknowledged quality notes — re-showing them is noise. */}
+        {validatorWarnings.length > 0 && blueprint.status !== 'approved' && (
+          <details className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900/60 space-y-1">
+            <summary className="flex items-center gap-1.5 text-xs font-bold text-amber-800 dark:text-amber-300 cursor-pointer">
               <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
-              <span>Validation Warnings:</span>
-            </div>
-            <ul className="text-xs text-amber-700 dark:text-amber-400 list-disc list-inside space-y-0.5 pl-2 font-medium">
+              <span>{validatorWarnings.length} non-blocking note{validatorWarnings.length > 1 ? 's' : ''} from the quality review</span>
+            </summary>
+            <ul className="mt-2 text-xs text-amber-700 dark:text-amber-400 list-disc list-inside space-y-0.5 pl-2 font-medium">
               {validatorWarnings.map((warn, i) => (
                 <li key={i}>{warn}</li>
               ))}
             </ul>
-          </div>
+          </details>
         )}
 
         {errorMsg && (
@@ -1116,7 +1130,7 @@ export default function BlueprintReviewEditor({
           <button
             type="button"
             disabled={saving || validatorErrors.length > 0}
-            onClick={() => handleApprove(false)}
+            onClick={() => (validatorWarnings.length > 0 ? setConfirmWarningModal(true) : handleApprove(false))}
             className={`inline-flex items-center gap-2 px-6 py-2.5 rounded-xl font-bold text-xs shadow-md transition-all ${
               validatorErrors.length > 0
                 ? 'bg-[#18181B] text-zinc-500 cursor-not-allowed'

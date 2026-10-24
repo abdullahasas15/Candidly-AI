@@ -44,6 +44,7 @@ ALLOWED_REASON_CODES = [
     "no_knowledge",
     "time_limit",
     "plan_complete",
+    "depth_probe",
 ]
 
 
@@ -63,6 +64,19 @@ class SelectorInput(BaseModel):
     followups_remaining: int = 1
     remaining_time_mins: float = 10.0
     allowed_actions: List[str] = Field(default_factory=lambda: list(ALLOWED_ACTIONS))
+    # Competency-driven enrichment (backward compatible defaults):
+    skill_rubric: Dict[str, str] = Field(default_factory=dict, description="L1-L5 anchors for the active skill")
+    escalation_question: Optional[str] = None
+    candidate_hooks: List[str] = Field(default_factory=list, description="Candidate projects/claims for this skill")
+    covered_expectations: List[str] = Field(default_factory=list)
+    hint_or_alt_used_on_skill: bool = False
+    # Structured candidate dossier (stable per session; lives in the cached
+    # prompt prefix so the interviewer always knows whose work it is probing).
+    candidate_dossier: Dict[str, Any] = Field(default_factory=dict)
+    # Last rubric level estimated on this skill — lets the escalation ladder
+    # CONTINUE across turns (L2 shown → probe toward L3/L4 next) instead of
+    # re-estimating blind each turn.
+    last_estimated_level: Optional[str] = None
 
 
 class SelectorOutput(BaseModel):
@@ -75,6 +89,8 @@ class SelectorOutput(BaseModel):
     reason_code: str = "planned_next"
     rationale: Optional[str] = None
     confidence: float = 0.9
+    estimated_rubric_level: Optional[str] = None
+    covered_expectations: List[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -114,6 +130,13 @@ class SelectorOutput(BaseModel):
         if rc not in ALLOWED_REASON_CODES:
             rc = "planned_next"
         data["reason_code"] = rc
+
+        # Normalize estimated rubric level (L1-L5 or UNASSESSED)
+        lvl = str(data.get("estimated_rubric_level") or "").upper().strip()
+        if lvl in ("L1", "L2", "L3", "L4", "L5", "UNASSESSED"):
+            data["estimated_rubric_level"] = lvl
+        else:
+            data.pop("estimated_rubric_level", None)
 
         # Sanitize ack and bridge: strip question marks
         if data.get("ack"):
@@ -219,8 +242,24 @@ async def select_next_interview_action(
         followups_remaining=str(input_data.followups_remaining),
         remaining_time_mins=f"{input_data.remaining_time_mins:.1f}",
         allowed_actions_json=json.dumps(input_data.allowed_actions),
+        skill_rubric_json=json.dumps(input_data.skill_rubric, indent=2) if input_data.skill_rubric else "{}",
+        escalation_question=input_data.escalation_question or "(none)",
+        candidate_hooks_json=json.dumps(input_data.candidate_hooks, indent=2) if input_data.candidate_hooks else "[]",
+        covered_expectations_json=json.dumps(input_data.covered_expectations, indent=2) if input_data.covered_expectations else "[]",
+        hint_or_alt_used_on_skill="true" if input_data.hint_or_alt_used_on_skill else "false",
+        candidate_dossier_json=json.dumps(input_data.candidate_dossier, indent=2) if input_data.candidate_dossier else "{}",
+        last_estimated_level=input_data.last_estimated_level or "UNASSESSED",
+        followups_used_on_skill=str(int(input_data.current_question.get("followup_count", 0) or 0)),
+        max_followups_on_skill=str(int(input_data.current_question.get("max_followup_depth", 2) or 2)),
     )
     system_prompt = render_prompt("interview/selector_system")
+
+    # Stable/volatile split for provider prefix caching: everything above the
+    # LIVE TURN marker is identical across consecutive turns of the same skill.
+    split_marker = "=== LIVE TURN"
+    stable_prefix, marker, volatile_suffix = user_prompt.partition(split_marker)
+    user_stable = stable_prefix if marker else None
+    user_volatile = marker + volatile_suffix if marker else None
 
     raw_dict: Optional[Dict[str, Any]] = None
 
@@ -243,14 +282,21 @@ async def select_next_interview_action(
             logger.warning("Mock LLM selector call failed: %s", mock_err)
     else:
         try:
-            parsed_json, call_metrics = await director.stream_decision_with_ack_first(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                max_output_tokens=300,
-                temperature=0.1,
-                on_ack_ready=on_stream_ack,
-                model_id=metrics["model_name"],
-            )
+            call_kwargs: Dict[str, Any] = {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "max_output_tokens": 300,
+                "temperature": 0.1,
+                "on_ack_ready": on_stream_ack,
+                "model_id": metrics["model_name"],
+            }
+            # Prefix-caching split: pass stable/volatile parts when available so
+            # the router can attach provider cache points.
+            if user_stable and user_volatile:
+                call_kwargs["user_stable_prefix"] = user_stable
+                call_kwargs["user_volatile_suffix"] = user_volatile
+                call_kwargs.pop("user_prompt", None)
+            parsed_json, call_metrics = await director.stream_decision_with_ack_first(**call_kwargs)
             raw_dict = parsed_json
             metrics.update({
                 "model_name": call_metrics.get("model_name", metrics["model_name"]),
@@ -340,6 +386,63 @@ async def select_next_interview_action(
             reason_code="no_knowledge",
             rationale="Candidate indicated no knowledge; swapping question",
             confidence=0.9,
+        )
+
+    # Ladder step 1 enforcement: on the FIRST admission for a skill (no hint or
+    # alternative used yet), even an ADVANCE becomes a warm swap — the candidate
+    # deserves the easier angle before the topic is dropped.
+    if (
+        input_data.no_knowledge_signal
+        and not input_data.hint_or_alt_used_on_skill
+        and candidate_output.decision == "ADVANCE"
+        and (input_data.alternative_question or {}).get("text")
+    ):
+        candidate_output = SelectorOutput(
+            decision="SWAP_QUESTION",
+            follow_up_question=input_data.alternative_question["text"],
+            ack=candidate_output.ack,
+            bridge=candidate_output.bridge or "No problem.",
+            reason_code="no_knowledge",
+            rationale="First no-knowledge admission; offering the simpler alternative before moving on",
+            confidence=0.85,
+        )
+
+    # Conversational-depth guard: an interview must not feel like a rapid-fire
+    # quiz. When the candidate just gave a substantive answer that has NOT yet
+    # demonstrated L4/L5 depth, follow-up depth remains, and time allows, one
+    # probing follow-up takes precedence over advancing. When the model already
+    # assessed the answer at L4/L5, its ADVANCE is respected — never interrogate
+    # a proven topic.
+    answer_words = len((input_data.candidate_answer or "").split())
+    already_proven = (candidate_output.estimated_rubric_level or "").upper() in ("L4", "L5")
+    if (
+        candidate_output.decision == "ADVANCE"
+        and not input_data.no_knowledge_signal
+        and not already_proven
+        and answer_words >= 15
+        and input_data.followups_remaining > 0
+        and (input_data.remaining_time_mins or 0) > 2.0
+        and not candidate_output.follow_up_question
+    ):
+        grounded = None
+        if input_data.escalation_question:
+            grounded = input_data.escalation_question
+        for probe in input_data.optional_prepared_followups or []:
+            if probe.get("text"):
+                grounded = probe["text"]
+                break
+        if not grounded:
+            grounded = "Can you take that one level deeper — the trade-offs or failure cases?"
+        candidate_output = SelectorOutput(
+            decision="FOLLOW_UP",
+            follow_up_question=grounded,
+            ack=candidate_output.ack,
+            bridge=candidate_output.bridge,
+            reason_code="depth_probe",
+            rationale="Substantive answer below L4 depth with follow-up room; probing before advancing",
+            confidence=0.7,
+            estimated_rubric_level=candidate_output.estimated_rubric_level,
+            covered_expectations=candidate_output.covered_expectations,
         )
 
     metrics["validation_passed"] = True

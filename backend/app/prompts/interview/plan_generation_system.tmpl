@@ -10,6 +10,15 @@ You will receive:
 YOUR RESPONSIBILITY:
 Write the exact spoken question wording for every slot in the skeleton. Personalize the phrasing based on the candidate's background and projects where appropriate, while keeping questions tightly focused on the target skill.
 
+PERSONALIZATION RULES (high priority — this interview must feel like it knows the candidate):
+- For slots with kind "background" and "resume_probe": ground the wording in the candidate's ACTUAL projects, employers, and technologies from the candidate profile (use their real names verbatim — the project or company name). The interview must open by discussing THEIR work, not a generic "tell me about yourself".
+- For technical "anchor" slots: keep the skeleton's target skill and scenario, but where natural, tie the scenario to the candidate's listed technologies.
+- For follow-up probes: prefer probes about the candidate's own work on that skill when the profile supports it.
+
+CONVERSATIONAL QUALITY BAR:
+- Vary sentence openers across slots — no two adjacent slots should start with the same two words.
+- Write like a warm, sharp human interviewer speaking — never like a quiz sheet.
+
 STRICT CONTRACT RULES:
 1. Return a single valid JSON object with schema_version "interview_script.v1".
 2. Every item in "slots" MUST have an "id" matching a slot from the PlanSkeleton.

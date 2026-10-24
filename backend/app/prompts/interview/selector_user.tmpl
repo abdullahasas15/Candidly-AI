@@ -1,34 +1,62 @@
 Evaluate the candidate's answer and choose the next action.
 
-=== CONTEXT ===
-Candidate & Job: $candidate_and_job_summary
-Remaining Time: $remaining_time_mins minutes
-Follow-ups Remaining on Current Question: $followups_remaining
+=== STABLE CONTEXT (cached across turns) ===
 
-=== RECENT TURNS (MAX 2) ===
-$past_two_turns_json
+--- CANDIDATE & JOB ---
+$candidate_and_job_summary
 
-=== CURRENT QUESTION ===
-$current_question_json
+--- CANDIDATE DOSSIER (their real work — probe THIS) ---
+$candidate_dossier_json
 
-=== CANDIDATE ANSWER ===
-$candidate_answer
+--- ACTIVE SKILL RUBRIC (L1-L5 anchors) ---
+$skill_rubric_json
 
-=== NO_KNOWLEDGE_SIGNAL ===
-$no_knowledge_signal
-(If true, the candidate admitted they do not know this topic. You MUST choose "SWAP_QUESTION" — never FOLLOW_UP or CLARIFY_OR_REPEAT.)
+--- ESCALATION QUESTION (harder, same skill) ---
+$escalation_question
 
-=== ALTERNATIVE QUESTION (SAME SKILL) ===
-$alternative_question_json
+--- CANDIDATE HOOKS (projects/claims for this skill) ---
+$candidate_hooks_json
 
-=== NEXT PLANNED QUESTION(S) ===
-$next_planned_question_json
-
-=== OPTIONAL PREPARED FOLLOW-UPS ===
+--- OPTIONAL PREPARED FOLLOW-UPS ---
 $optional_prepared_followups_json
 
-=== ALLOWED ACTIONS ===
+--- NEXT PLANNED QUESTION (pointer for ADVANCE; do NOT read it aloud as-is when a better pivot exists in the plan) ---
+$next_planned_question_json
+
+--- ALTERNATIVE QUESTION (SAME SKILL, for warm swaps) ---
+$alternative_question_json
+
+--- ALLOWED ACTIONS ---
 $allowed_actions_json
+
+=== LIVE TURN (fresh every call) ===
+
+--- LAST 4 TURNS ---
+$past_two_turns_json
+
+--- CURRENT QUESTION ---
+$current_question_json
+
+--- CANDIDATE ANSWER ---
+$candidate_answer
+
+--- COVERED EXPECTATIONS SO FAR (this skill) ---
+$covered_expectations_json
+
+--- LAST ESTIMATED RUBRIC LEVEL ON THIS SKILL ---
+$last_estimated_level
+(Continue the ladder from here: if L2/L3 was shown, probe toward L3/L4; if L4 was shown, go L5 or advance.)
+
+--- NO_KNOWLEDGE_SIGNAL ---
+$no_knowledge_signal
+(If true and hint_or_alt_used_on_skill is false: choose "SWAP_QUESTION" with a warm normalizing bridge. If true and hint_or_alt_used_on_skill is true: choose "ADVANCE" with a reassuring bridge — never grill an admitted gap.)
+
+--- HINT/ALT ALREADY USED ON THIS SKILL ---
+$hint_or_alt_used_on_skill
+
+--- TURN BUDGET ---
+Follow-ups used: $followups_used_on_skill of max $max_followups_on_skill (remaining: $followups_remaining)
+Time remaining: $remaining_time_mins minutes
 
 Return ONLY valid JSON matching this schema:
 {
@@ -36,9 +64,11 @@ Return ONLY valid JSON matching this schema:
   "planned_question_id": "required for ADVANCE, otherwise null",
   "follow_up_question": "required for FOLLOW_UP, otherwise null",
   "clarify_text": "required for CLARIFY_OR_REPEAT, otherwise null",
-  "ack": "optional brief grounded gist, max 8 words, no question mark, or null",
+  "ack": "optional brief grounded gist, max 12 words, no question mark, or null",
   "bridge": "optional transition, max 12 words, no question mark, or null",
-  "reason_code": "planned_next | answer_gap | ambiguity | transcription_issue | candidate_question | no_knowledge | time_limit | plan_complete",
+  "estimated_rubric_level": "L1 | L2 | L3 | L4 | L5 | UNASSESSED",
+  "covered_expectations": ["expectation text the answer satisfied, if any"],
+  "reason_code": "planned_next | answer_gap | ambiguity | transcription_issue | candidate_question | no_knowledge | time_limit | plan_complete | depth_probe",
   "rationale": "optional <= 20 words, or null",
   "confidence": 0.9
 }

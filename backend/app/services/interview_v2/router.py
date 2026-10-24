@@ -420,6 +420,9 @@ async def ws_interview_endpoint(
         })
 
         flux_task = asyncio.create_task(_forward_flux_loop())
+        # Client presence gate: silence-ladder / commit-grace timers hold while
+        # no client is connected so a disconnect never consumes a question.
+        runner.client_connected = True
         await runner.start()
 
         # Inbound WebSocket message loop
@@ -468,8 +471,12 @@ async def ws_interview_endpoint(
 
     except (WebSocketDisconnect, RuntimeError):
         logger.info("Interview WebSocket disconnected for session %s", session_id)
+        if runner:
+            runner.client_connected = False
     except Exception as e:
         logger.error("Error in Interview WebSocket lifecycle for %s: %s", session_id, e, exc_info=True)
+        if runner:
+            runner.client_connected = False
         try:
             await websocket.send_json({
                 "type": "SessionError",

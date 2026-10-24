@@ -620,18 +620,30 @@ def _extract_message_text(msg: Any) -> str:
 # ---------------------------------------------------------------------------
 async def stream_decision_with_ack_first(
     system_prompt: str,
-    user_prompt: str,
+    user_prompt: Optional[str] = None,
     max_output_tokens: int = 160,
     temperature: float = 0.1,
     on_ack_ready: Optional[Callable[[str], None]] = None,
     model_id: Optional[str] = None,
+    user_stable_prefix: Optional[str] = None,
+    user_volatile_suffix: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """Stream decision JSON using Bedrock (primary) with failover to Gemini (secondary).
-    
+
     Emits on_ack_ready(ack_text) the instant the '"ack": "..."' string closes.
     Returns (parsed_json_dict, call_metrics).
+
+    Prefix caching: when user_stable_prefix/user_volatile_suffix are provided
+    (and INTERVIEW_BEDROCK_PROMPT_CACHE!=0), the Bedrock payload attaches
+    cachePoint blocks after the stable system+user prefix so consecutive turns
+    of the same skill reuse cached KV tokens (lower latency + cost). If the
+    model/region rejects cachePoint, the call retries once uncached.
     """
     t0 = time.time()
+    # Split-path callers (selector) may omit the joined prompt; reconstruct it
+    # so the Gemini failover and any legacy consumer still sees full text.
+    if not user_prompt and user_stable_prefix and user_volatile_suffix:
+        user_prompt = f"{user_stable_prefix}{user_volatile_suffix}"
     call_metrics: Dict[str, Any] = {
         "ttft_ms": None,
         "ack_emitted_ms": None,
@@ -656,23 +668,41 @@ async def stream_decision_with_ack_first(
         call_metrics["region"] = region
         logger.info("Bedrock decision call started: Region=%s, Model=%s", region, effective_model_id)
         url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{effective_model_id}/converse-stream"
-        payload = {
-            "system": [{"text": system_prompt}],
-            "messages": [{"role": "user", "content": [{"text": user_prompt}]}],
-            "inferenceConfig": {"maxTokens": max_output_tokens, "temperature": temperature},
-        }
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
 
-        try:
+        use_prompt_cache = (
+            bool(user_stable_prefix)
+            and bool(user_volatile_suffix)
+            and os.getenv("INTERVIEW_BEDROCK_PROMPT_CACHE", "1").lower() not in ("0", "false", "off")
+        )
+
+        async def _bedrock_attempt(with_cache: bool) -> Optional[Dict[str, Any]]:
+            """One Bedrock ConverseStream attempt; returns parsed dict or raises."""
+            if with_cache:
+                system_blocks = [{"text": system_prompt}, {"cachePoint": {"type": "default"}}]
+                content_blocks = [
+                    {"text": user_stable_prefix},
+                    {"cachePoint": {"type": "default"}},
+                    {"text": user_volatile_suffix},
+                ]
+            else:
+                system_blocks = [{"text": system_prompt}]
+                full_user = user_prompt or f"{user_stable_prefix or ''}{user_volatile_suffix or ''}"
+                content_blocks = [{"text": full_user}]
+            attempt_payload = {
+                "system": system_blocks,
+                "messages": [{"role": "user", "content": content_blocks}],
+                "inferenceConfig": {"maxTokens": max_output_tokens, "temperature": temperature},
+            }
             client = BEDROCK_CLIENT.get_async_client()
             buffer = EventStreamBuffer()
             tokens: List[str] = []
             ack_emitted = False
 
-            async with client.stream("POST", url, headers=headers, json=payload, timeout=5.0) as resp:
+            async with client.stream("POST", url, headers=headers, json=attempt_payload, timeout=5.0) as resp:
                 resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
                     buffer.add_data(chunk)
@@ -706,17 +736,28 @@ async def stream_decision_with_ack_first(
                             pass
 
             full_text = "".join(tokens).strip()
-            call_metrics["total_ms"] = round((time.time() - t0) * 1000.0, 1)
-
-            # Parse full JSON output
             cleaned_json = clean_json_markdown(full_text)
-            parsed_decision = json.loads(cleaned_json)
-            if isinstance(parsed_decision, dict):
-                return parsed_decision, call_metrics
+            parsed = json.loads(cleaned_json)
+            return parsed if isinstance(parsed, dict) else None
 
-        except Exception as bed_exc:
-            logger.warning("Amazon Bedrock stream call failed (%s); falling back to Gemini rotation", bed_exc)
-            call_metrics["error"] = str(bed_exc)[:120]
+        for with_cache in ((True, False) if use_prompt_cache else (False,)):
+            try:
+                parsed_decision = await _bedrock_attempt(with_cache)
+                call_metrics["total_ms"] = round((time.time() - t0) * 1000.0, 1)
+                call_metrics["prompt_cache"] = with_cache
+                if isinstance(parsed_decision, dict):
+                    return parsed_decision, call_metrics
+            except Exception as bed_exc:
+                err_str = str(bed_exc)
+                if with_cache and any(
+                    marker in err_str.lower()
+                    for marker in ("cachepoint", "cache point", "cache", "400", "validation")
+                ):
+                    logger.warning("Bedrock rejected cachePoint payload (%s); retrying without prompt caching", err_str[:120])
+                    continue
+                logger.warning("Amazon Bedrock stream call failed (%s); falling back to Gemini rotation", bed_exc)
+                call_metrics["error"] = str(bed_exc)[:120]
+                break
 
     # 2. Secondary: Google Gemini (3-Key Rotation)
     call_metrics["provider"] = "google"

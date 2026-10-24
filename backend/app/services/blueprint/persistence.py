@@ -554,6 +554,14 @@ async def regenerate_blueprint_section(
             s["questions"] = q_list
             break
 
+    # A freshly regenerated section can reintroduce an over-represented opening
+    # across the blueprint; re-run the deterministic variety repair (LLM output
+    # only — recruiter-authored manual edits are never silently reworded).
+    from backend.app.services.blueprint.generator import repair_blueprint_opening_variety
+    variety_repairs = repair_blueprint_opening_variety(serialized["sections"])
+    if variety_repairs:
+        logger.info("Opening-variety repair rewrote %d questions after section regeneration", variety_repairs)
+
     # Update or fork
     return await update_or_fork_job_blueprint(
         db=db,

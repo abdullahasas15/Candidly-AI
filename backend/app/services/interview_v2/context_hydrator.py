@@ -166,6 +166,41 @@ class HydratedInterviewContext:
             f"Key Focus Skills: {skill_str}. Tone: {self.interviewer_tone}"
         )
 
+    def to_live_candidate_dossier(self) -> Dict[str, Any]:
+        """Compact candidate dossier (~250-350 tokens) for the live selector:
+        who they are, what they built, and which claims to verify. This is the
+        grounding the interviewer needs to probe the candidate's REAL work."""
+        work = []
+        for w in self.resume_work_experience[:3]:
+            role = w.get("role") or w.get("title") or "Engineer"
+            comp = w.get("company") or w.get("organization") or ""
+            highlight = ""
+            highlights = w.get("highlights") or []
+            if highlights and isinstance(highlights[0], str):
+                highlight = highlights[0][:120]
+            entry = f"{role} at {comp}" if comp else role
+            if highlight:
+                entry += f": {highlight}"
+            work.append(entry)
+
+        projects = []
+        for p in self.resume_projects[:3]:
+            name = p.get("name") or p.get("title") or ""
+            if not name:
+                continue
+            techs = p.get("technologies") or []
+            stack = f" ({', '.join(str(t) for t in techs[:4])})" if techs else ""
+            desc = (p.get("description") or "")[:140]
+            projects.append(f"{name}{stack}: {desc}" if desc else f"{name}{stack}")
+
+        return {
+            "name": self.candidate_first_name,
+            "years_of_experience": self.self_reported_experience_years,
+            "work_experience": work,
+            "notable_projects": projects,
+            "claims_to_verify": [str(c) for c in (self.claims_to_verify or [])[:4]],
+        }
+
 
 def _safe_parse_resume_data(resume: Optional[CandidateResume]) -> Dict[str, Any]:
     """Extract structured resume fields safely handling string or dict encodings."""

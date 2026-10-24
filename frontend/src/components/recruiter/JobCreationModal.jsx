@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 
 const BlueprintReviewEditor = React.lazy(() => import('./BlueprintReviewEditor'));
+const SimpleBlueprintStatus = React.lazy(() => import('./SimpleBlueprintStatus'));
 
 const VAGUE_SKILL_NAMES = new Set([
   'projects', 'project', 'work', 'general', 'misc', 'miscellaneous',
@@ -832,7 +833,7 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
     { num: 3, label: 'Competencies & Rubrics', icon: Layers },
     { num: 4, label: 'Interviewer Policy', icon: Settings2 },
     { num: 5, label: 'Screening Questions', icon: HelpCircle },
-    { num: 6, label: 'Interview Blueprint', icon: Sparkles }
+    { num: 6, label: 'Go Live', icon: Sparkles }
   ];
 
   return (
@@ -1857,10 +1858,11 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   </div>
                   <div className="max-w-md mx-auto space-y-1">
                     <h3 className="text-base font-extrabold text-white">
-                      Synthesize Role Interview Blueprint
+                      Review &amp; Publish
                     </h3>
                     <p className="text-xs text-zinc-400">
-                      Save calibrated role parameters to synthesize anchor questions, escalation challenges, probes, and live time budgeting.
+                      Save the role — the AI interview (questions, rubrics, and timing) is set up
+                      automatically and the job goes live immediately.
                     </p>
                   </div>
                   <button
@@ -1872,12 +1874,12 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                     {submitting ? (
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Saving Job & Opening Blueprint...</span>
+                        <span>Creating job…</span>
                       </>
                     ) : (
                       <>
                         <Sparkles className="w-4 h-4" />
-                        <span>Save Role & Generate Blueprint</span>
+                        <span>Create Job &amp; Go Live</span>
                       </>
                     )}
                   </button>
@@ -1887,13 +1889,17 @@ export default function JobCreationModal({ isOpen, onClose, onJobCreated }) {
                   fallback={
                     <div className="p-12 text-center text-teal-400 font-semibold space-y-2">
                       <RefreshCw className="w-6 h-6 animate-spin mx-auto text-teal-400" />
-                      <p className="text-xs text-zinc-400">Loading Blueprint Editor...</p>
+                      <p className="text-xs text-zinc-400">Preparing interview setup…</p>
                     </div>
                   }
                 >
-                  <BlueprintReviewEditor
+                  <SimpleBlueprintStatus
                     job={createdJob}
-                    onApproved={(approvedBp) => {
+                    onReady={() => {
+                      setBlueprintApproved(true);
+                      onJobCreated(createdJob);
+                    }}
+                    onCustomized={() => {
                       setBlueprintApproved(true);
                       onJobCreated(createdJob);
                     }}

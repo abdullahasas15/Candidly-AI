@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+import asyncio
 from sqlalchemy import select
 
 from backend.app.database import AsyncSessionLocal
@@ -141,6 +143,15 @@ def test_prompt_loader_substitutes_variables():
         followups_remaining="2",
         remaining_time_mins="14.5",
         allowed_actions_json='["ADVANCE", "FOLLOW_UP", "CLARIFY_OR_REPEAT", "SWAP_QUESTION", "CANDIDATE_QA", "END_INTERVIEW"]',
+        skill_rubric_json='{"L3": "Explains asyncio concurrency"}',
+        escalation_question="How would you scale that to 10k rps?",
+        candidate_hooks_json='["AI Recruiter Platform (FastAPI)"]',
+        covered_expectations_json="[]",
+        hint_or_alt_used_on_skill="false",
+        candidate_dossier_json='{"name": "Jane", "notable_projects": ["AI Recruiter Platform"]}',
+        last_estimated_level="L2",
+        followups_used_on_skill="1",
+        max_followups_on_skill="2",
     )
     assert "Job: Senior Python Dev" in rendered_user
     assert "How do you handle asyncio concurrency?" in rendered_user
@@ -826,3 +837,317 @@ async def test_no_knowledge_fallback_swaps_instead_of_probing():
     out, _ = _generate_plan_aware_fallback(inp, "llm_error")
     assert out.decision == "SWAP_QUESTION"
     assert out.reason_code == "no_knowledge"
+
+
+# ---------------------------------------------------------------------------
+# Conversational-depth guard + resume-grounded plan slots (post-manual-test)
+# ---------------------------------------------------------------------------
+
+def _depth_input(answer_words=25, followups_remaining=2, remaining_mins=8.0):
+    from backend.app.services.interview_v2.selector import SelectorInput
+    answer = " ".join(f"word{i}" for i in range(answer_words))
+    return SelectorInput(
+        candidate_and_job_summary="Candidate: Mohammad. Applying for: SDE.",
+        past_two_turns=[],
+        current_question={
+            "id": "q1", "stage": "technical", "skill_id": "s1", "skill_name": "Data Structures",
+            "text": "How would you power search autocomplete?", "expected_key_points": ["trie"],
+            "followup_count": 1, "max_followup_depth": 2,
+        },
+        candidate_answer=answer,
+        next_planned_question={"id": "q2", "stage": "technical", "skill_id": "s2", "skill_name": "CS Fundamentals", "text": "Next question?"},
+        optional_prepared_followups=[{"id": "p1", "text": "How would you handle memory limits?"}],
+        followups_remaining=followups_remaining,
+        remaining_time_mins=remaining_mins,
+    )
+
+
+def test_advance_on_substantive_answer_coerced_to_follow_up():
+    from backend.app.services.interview_v2.selector import select_next_interview_action
+    inp = _depth_input()
+    out, metrics = asyncio.run(select_next_interview_action(
+        inp, llm_fn=lambda **kw: {"decision": "ADVANCE", "planned_question_id": "q2", "ack": "Got it.", "reason_code": "planned_next", "rationale": "sufficient"}
+    ))
+    assert out.decision == "FOLLOW_UP"
+    assert out.reason_code == "depth_probe"
+    assert out.follow_up_question
+
+
+def test_advance_allowed_when_depth_exhausted():
+    from backend.app.services.interview_v2.selector import select_next_interview_action
+    inp = _depth_input(followups_remaining=0)
+    out, _ = asyncio.run(select_next_interview_action(
+        inp, llm_fn=lambda **kw: {"decision": "ADVANCE", "planned_question_id": "q2", "ack": "Got it.", "reason_code": "planned_next", "rationale": "done"}
+    ))
+    assert out.decision == "ADVANCE"
+
+
+def test_advance_allowed_when_time_short():
+    from backend.app.services.interview_v2.selector import select_next_interview_action
+    inp = _depth_input(remaining_mins=1.5)
+    out, _ = asyncio.run(select_next_interview_action(
+        inp, llm_fn=lambda **kw: {"decision": "ADVANCE", "planned_question_id": "q2", "ack": "Got it.", "reason_code": "planned_next", "rationale": "time"}
+    ))
+    assert out.decision == "ADVANCE"
+
+
+def test_short_answer_advances_without_depth_probe():
+    from backend.app.services.interview_v2.selector import select_next_interview_action
+    inp = _depth_input(answer_words=6)
+    out, _ = asyncio.run(select_next_interview_action(
+        inp, llm_fn=lambda **kw: {"decision": "ADVANCE", "planned_question_id": "q2", "ack": "Got it.", "reason_code": "planned_next", "rationale": "short"}
+    ))
+    assert out.decision == "ADVANCE"
+
+
+def test_plan_skeleton_seeds_resume_grounding():
+    """With resume projects/companies in context, the skeleton must include a
+    dedicated projects-walkthrough slot and resume-grounded follow-up probes —
+    the structural fix for 'no questions based on my resume'."""
+    from backend.app.services.interview_v2.context_hydrator import HydratedInterviewContext
+    from backend.app.services.interview_v2.plan_schema import build_plan_skeleton
+
+    ctx = HydratedInterviewContext(
+        application_id="app-1", job_id="job-1",
+        candidate_full_name="Mohammad Abdullah", candidate_first_name="Mohammad",
+        resume_projects=[
+            {"name": "Agentic Growth Controller", "description": "", "technologies": ["FastAPI", "WebSockets"]},
+            {"name": "AI Recruiter Platform", "description": "", "technologies": []},
+        ],
+        resume_work_experience=[{"company": "Barclays", "role": "Technology Developer Intern"}],
+        job_title="SDE", seniority_level="entry",
+        interview_duration_mins=30, max_followup_depth=2,
+        skills=[
+            {"id": "sk1", "name": "Data Structures & Problem Solving", "priority_tier": "P0", "weight_percentage": 40},
+            {"id": "sk2", "name": "Project & Experience Deep-Dive", "priority_tier": "P0", "weight_percentage": 20},
+        ],
+    )
+    plan = build_plan_skeleton(ctx)
+    kinds = [(s.kind, s.question_text) for s in plan.slots]
+
+    resume_slots = [s for s in plan.slots if s.kind == "resume_probe"]
+    assert resume_slots, "a projects-walkthrough slot must exist when the resume has projects"
+    assert "Agentic Growth Controller" in resume_slots[0].question_text
+    assert resume_slots[0].follow_up_depth_allowed >= 1
+
+    ds_slot = next(s for s in plan.slots if s.skill_name == "Data Structures & Problem Solving" and s.kind == "anchor")
+    assert any("Agentic Growth Controller" in p for p in ds_slot.followup_probes), \
+        "per-skill probes must include a resume-grounded option"
+
+    pd_slot = [s for s in plan.slots if s.skill_name == "Project & Experience Deep-Dive"]
+    assert not pd_slot or not any("come into play" in p for p in pd_slot[0].followup_probes), \
+        "the projects competency itself must not get a 'come into play in project' probe"
+
+
+# ---------------------------------------------------------------------------
+# Rubric- & weight-driven interviewer (spec upgrade)
+# ---------------------------------------------------------------------------
+
+def test_weight_proportional_followup_budgets():
+    """A 45% P0 skill earns more follow-up depth than a 15% P2 skill, budgets
+    respect usable time, and every PlanSlot carries rubric/escalation data."""
+    from backend.app.services.interview_v2.context_hydrator import HydratedInterviewContext
+    from backend.app.services.interview_v2.plan_schema import build_plan_skeleton
+
+    ctx = HydratedInterviewContext(
+        application_id="app-1", job_id="job-1",
+        candidate_full_name="Jane Doe", candidate_first_name="Jane",
+        job_title="SDE", seniority_level="mid",
+        interview_duration_mins=30, max_followup_depth=2,
+        skills=[
+            {"id": "s1", "name": "Distributed Systems", "priority_tier": "P0", "weight_percentage": 45,
+             "rubric_l1": "l1", "rubric_l2": "l2", "rubric_l3": "l3", "rubric_l4": "l4", "rubric_l5": "l5"},
+            {"id": "s2", "name": "Tooling", "priority_tier": "P2", "weight_percentage": 15},
+            {"id": "s3", "name": "Debugging", "priority_tier": "P1", "weight_percentage": 40},
+        ],
+    )
+    plan = build_plan_skeleton(ctx)
+    anchors = {s.skill_name: s for s in plan.slots if s.kind == "anchor"}
+    assert anchors["Distributed Systems"].follow_up_depth_allowed >= anchors["Tooling"].follow_up_depth_allowed
+    assert anchors["Distributed Systems"].rubric_levels.get("L4") == "l4"
+    assert anchors["Tooling"].rubric_levels.get("L4") in ("", None)
+    # Time-clamped: total follow-up budget cannot explode past usable time
+    total_budget = sum(s.follow_up_depth_allowed for s in anchors.values()) + len(anchors)
+    assert total_budget <= max(6, round(30 * 60 * 0.6 / 90)) + len(anchors) + 4
+
+
+def test_selector_receives_rubric_and_hooks_in_prompt():
+    """The selector user prompt must carry rubric anchors, escalation question,
+    and candidate hooks so decisions are competency-driven."""
+    import asyncio
+    from backend.app.services.interview_v2.selector import select_next_interview_action
+
+    inp = _depth_input()
+    inp = inp.model_copy(update={
+        "skill_rubric": {"L3": "Explains trie trade-offs", "L4": "Handles memory bounds"},
+        "escalation_question": "How would that scale to 10M terms?",
+        "candidate_hooks": ["AI Recruiter Platform (FastAPI, WebSockets)"],
+        "hint_or_alt_used_on_skill": False,
+    })
+    seen = {}
+    async def capture_llm(**kw):
+        seen["user_prompt"] = kw.get("user_prompt", "")
+        return {"decision": "ADVANCE", "planned_question_id": "q2", "ack": "Got it.",
+                "reason_code": "planned_next", "rationale": "ok",
+                "estimated_rubric_level": "L4", "covered_expectations": ["trie trade-offs"]}
+    out, _ = asyncio.run(select_next_interview_action(inp, llm_fn=capture_llm))
+    assert "Explains trie trade-offs" in seen["user_prompt"]
+    assert "How would that scale to 10M terms?" in seen["user_prompt"]
+    assert "AI Recruiter Platform" in seen["user_prompt"]
+    # L4-assessed ADVANCE is respected (no depth-probe coercion)
+    assert out.decision == "ADVANCE"
+    assert out.estimated_rubric_level == "L4"
+    assert out.covered_expectations == ["trie trade-offs"]
+
+
+# ---------------------------------------------------------------------------
+# Production agentic-loop verification (dossier / level carry / prompt split)
+# ---------------------------------------------------------------------------
+
+def test_selector_prompt_is_stable_first_and_carries_dossier_and_level():
+    """The prompt must place stable context (dossier, rubric, hooks) BEFORE the
+    volatile live turn, carry the dossier and last estimated level, and split
+    cleanly at the LIVE TURN marker for provider prefix caching."""
+    import asyncio
+    from backend.app.services.interview_v2.selector import select_next_interview_action
+
+    inp = _depth_input()
+    inp = inp.model_copy(update={
+        "skill_rubric": {"L3": "Explains trie trade-offs"},
+        "candidate_dossier": {
+            "name": "Mohammad",
+            "notable_projects": ["Agentic Growth Controller (FastAPI, WebSockets)"],
+            "claims_to_verify": ["Built realtime interview engine"],
+        },
+        "candidate_hooks": ["Agentic Growth Controller (FastAPI, WebSockets)"],
+        "last_estimated_level": "L2",
+    })
+    seen = {}
+
+    async def capture_llm(**kw):
+        seen["user_prompt"] = kw.get("user_prompt", "")
+        return {"decision": "FOLLOW_UP", "follow_up_question": "How did you handle lag there?",
+                "ack": "Right.", "reason_code": "answer_gap", "rationale": "probe",
+                "estimated_rubric_level": "L3"}
+
+    out, _ = asyncio.run(select_next_interview_action(inp, llm_fn=capture_llm))
+    p = seen["user_prompt"]
+    assert "Agentic Growth Controller" in p
+    assert "L2" in p and "Continue the ladder" in p
+    # Stable content must precede the volatile live turn for prefix caching
+    assert p.index("CANDIDATE DOSSIER") < p.index("=== LIVE TURN") < p.index("CANDIDATE ANSWER")
+    assert "LAST 4 TURNS" in p
+
+
+def test_bedrock_cachepoint_payload_and_uncached_retry(monkeypatch):
+    """The router attaches cachePoint blocks after the stable prefix and
+    retries once uncached when the provider rejects caching."""
+    import asyncio
+    import json as _json
+    import backend.app.services.llm_router as lr
+
+    calls = {"n": 0, "payloads": []}
+    BODY = _json.dumps({"delta": {"text": '{"decision":"ADVANCE","ack":"Got it."}'}}).encode()
+
+    class FakeStreamCtx:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def __aenter__(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("400 ValidationException: cachePoint not supported")
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield BODY
+
+    class FakeClient:
+        def stream(self, method, url, headers=None, json=None, timeout=None):
+            calls["payloads"].append(json)
+            return FakeStreamCtx(json)
+
+    class FakeBedrockClientMgr:
+        def get_async_client(self):
+            return FakeClient()
+
+    class FakeEventStreamBuffer:
+        def __init__(self):
+            self.chunks = []
+
+        def add_data(self, data):
+            self.chunks.append(data)
+
+        def __iter__(self):
+            class Ev:
+                def __init__(self, payload):
+                    self.payload = payload
+            return iter([Ev(c) for c in self.chunks])
+
+    async def fake_token():
+        return "tok"
+
+    monkeypatch.setattr(lr, "BEDROCK_CLIENT", FakeBedrockClientMgr())
+    monkeypatch.setattr(lr, "EventStreamBuffer", FakeEventStreamBuffer)
+    monkeypatch.setattr(lr, "get_bedrock_bearer_token", fake_token)
+    monkeypatch.setattr(lr, "get_bedrock_region", lambda: "ap-southeast-2")
+    monkeypatch.setattr(lr, "get_bedrock_model_id", lambda: "apac.amazon.nova-pro-v1:0")
+
+    async def run():
+        return await lr.stream_decision_with_ack_first(
+            system_prompt="sys",
+            user_prompt=None,
+            user_stable_prefix="STABLE PREFIX ",
+            user_volatile_suffix="VOLATILE",
+            max_output_tokens=50,
+        )
+
+    asyncio.run(run())
+    assert calls["n"] == 2, "must retry once after cachePoint rejection"
+    first, second = calls["payloads"]
+    assert any("cachePoint" in b for b in first["messages"][0]["content"])
+    assert "cachePoint" in first["system"][1]
+    assert second["messages"][0]["content"] == [{"text": "STABLE PREFIX VOLATILE"}]
+
+
+def test_first_no_knowledge_advance_coerced_to_swap():
+    """Ladder step 1: on the FIRST 'I don't know' for a skill, even an ADVANCE
+    decision becomes a warm swap to the prepared alternative — the easier
+    angle is offered before the topic is dropped (verified gap from e2e run)."""
+    import asyncio
+    from backend.app.services.interview_v2.selector import SelectorInput, select_next_interview_action
+
+    inp = SelectorInput(
+        candidate_and_job_summary="Job: SDE.",
+        past_two_turns=[],
+        current_question={"id": "q1", "stage": "technical", "skill_id": "s1", "skill_name": "Prompting",
+                          "text": "Compare prompt strategies?", "expected_key_points": ["strategies"],
+                          "followup_count": 1, "max_followup_depth": 2},
+        candidate_answer="I don't know, I have never formally compared prompt strategies.",
+        next_planned_question={"id": "q2", "stage": "technical", "skill_id": "s2", "skill_name": "Data", "text": "Next?"},
+        alternative_question={"id": "alt1", "text": "Imagine a simpler scenario — how would you approach it?", "skill_name": "Prompting"},
+        no_knowledge_signal=True,
+        hint_or_alt_used_on_skill=False,
+        followups_remaining=1,
+        remaining_time_mins=10.0,
+    )
+    out, _ = asyncio.run(select_next_interview_action(
+        inp, llm_fn=lambda **kw: {"decision": "ADVANCE", "planned_question_id": "q2", "ack": "Okay.",
+                                  "reason_code": "planned_next", "rationale": "done"}
+    ))
+    assert out.decision == "SWAP_QUESTION"
+    assert "Imagine a simpler scenario" in (out.follow_up_question or "")
+
+    # Second admission (hint/alt already used): ADVANCE is respected
+    inp2 = inp.model_copy(update={"hint_or_alt_used_on_skill": True})
+    out2, _ = asyncio.run(select_next_interview_action(
+        inp2, llm_fn=lambda **kw: {"decision": "ADVANCE", "planned_question_id": "q2", "ack": "Okay.",
+                                   "reason_code": "planned_next", "rationale": "move on"}
+    ))
+    assert out2.decision == "ADVANCE"

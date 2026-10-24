@@ -688,6 +688,12 @@ class PlanQuestion:
     variant_group: Optional[str] = None
     parent_question_id: Optional[str] = None
     followup_probes: List[str] = field(default_factory=list)
+    # Competency-driven enrichment (defaults keep legacy plans working)
+    follow_up_depth_allowed: int = 2
+    escalation_question: Optional[str] = None
+    anchor_alt_question: Optional[str] = None
+    rubric_levels: Dict[str, str] = field(default_factory=dict)
+    candidate_hooks: List[str] = field(default_factory=list)
 
     @classmethod
     def from_raw(cls, q: Any) -> "PlanQuestion":
@@ -709,6 +715,11 @@ class PlanQuestion:
                 variant_group=q.get("variant_group"),
                 parent_question_id=q.get("parent_question_id"),
                 followup_probes=list(q.get("followup_probes", []) or []),
+                follow_up_depth_allowed=int(q.get("follow_up_depth_allowed", 2) or 2),
+                escalation_question=q.get("escalation_question"),
+                anchor_alt_question=q.get("anchor_alt_question"),
+                rubric_levels=dict(q.get("rubric_levels", {}) or {}),
+                candidate_hooks=list(q.get("candidate_hooks", []) or []),
             )
         return cls(
             question_index=getattr(q, "question_index", 0),
@@ -727,6 +738,11 @@ class PlanQuestion:
             variant_group=getattr(q, "variant_group", None),
             parent_question_id=getattr(q, "parent_question_id", None),
             followup_probes=list(getattr(q, "followup_probes", []) or []),
+            follow_up_depth_allowed=int(getattr(q, "follow_up_depth_allowed", 2) or 2),
+            escalation_question=getattr(q, "escalation_question", None),
+            anchor_alt_question=getattr(q, "anchor_alt_question", None),
+            rubric_levels=dict(getattr(q, "rubric_levels", {}) or {}),
+            candidate_hooks=list(getattr(q, "candidate_hooks", []) or []),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -763,6 +779,12 @@ class ConductorState:
     off_topic_retries_per_question: Dict[int, int] = field(default_factory=dict)
     hypothetical_used_per_skill: Dict[str, bool] = field(default_factory=dict)
     insufficient_evidence_per_skill: Dict[str, bool] = field(default_factory=dict)
+    # Weight-proportional follow-up caps per skill (from each anchor's
+    # follow_up_depth_allowed); replaces the old hardcoded cap of 2.
+    max_followups_per_skill: Dict[str, int] = field(default_factory=dict)
+    # Last L1-L5 level the selector estimated per skill — lets the escalation
+    # ladder CONTINUE across turns instead of re-estimating blind.
+    estimated_level_per_skill: Dict[str, str] = field(default_factory=dict)
 
     # Ack-First streaming tracking
     spoken_ack_token: Optional[str] = None
@@ -892,6 +914,8 @@ class ConductorState:
         data.setdefault("followups_used_per_skill", {})
         data.setdefault("clarify_used_per_skill", {})
         data.setdefault("covered_expectations_per_skill", {})
+        data.setdefault("max_followups_per_skill", {})
+        data.setdefault("estimated_level_per_skill", {})
         data.setdefault("asked_questions_history", [])
         data.setdefault("job_record", {})
         data.setdefault("qa_rounds_used", 0)
@@ -1204,6 +1228,8 @@ INTRO_FILTER_WORDS: Set[str] = {
 # partial knowledge worth probing).
 NO_KNOWLEDGE_STRONG_PHRASES: List[str] = [
     "i don't know", "i dont know", "i do not know", "no idea",
+    "i have no idea", "no clue", "never heard of it", "never heard of that",
+    "don't know about that", "dont know about that",
     "no experience", "never used", "never worked", "not familiar",
     "haven't used", "have not used", "not aware", "no exposure",
 ]
@@ -1230,6 +1256,57 @@ def looks_like_no_knowledge_answer(text: str) -> bool:
     if len(words) <= 8 and any(p in cleaned for p in NO_KNOWLEDGE_WEAK_PHRASES):
         return True
     return False
+
+
+# Short utterances where the "answer" is really a repeat request or a
+# connectivity complaint (the candidate never saw/heard the question — e.g.
+# stuck on "Connecting..." while the interview kept running). The interviewer
+# must re-ask the current question, never advance past it.
+REPEAT_REQUEST_PHRASES: List[str] = [
+    "repeat the question", "repeat that", "repeat the same", "can you repeat",
+    "could you repeat", "please repeat", "say that again", "say it again",
+    "come again", "pardon",
+    "didn't see the question", "did not see the question",
+    "didn't hear the question", "did not hear the question",
+    "didn't get the question", "did not get the question",
+    "can't hear you", "cant hear you", "can you hear me",
+    "reading the question", "just got the question", "got the question now",
+    "question just appeared", "see the question now", "didn't see anything",
+    "still loading", "still connecting", "screen is blank", "screen is not",
+    "nothing is showing", "nothing is coming", "no sound",
+]
+
+
+def looks_like_repeat_request(text: str) -> bool:
+    """True when a short committed utterance is a repeat request or a
+    connectivity complaint rather than an answer to the current question."""
+    if not text:
+        return False
+    cleaned = unicodedata.normalize("NFKC", text).strip().lower()
+    cleaned = cleaned.replace("’", "'").replace("‘", "'")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    words = cleaned.split()
+    if not words or len(words) > 30:
+        return False
+    return any(p in cleaned for p in REPEAT_REQUEST_PHRASES)
+
+
+def answer_echoes_question(answer: str, question: str) -> bool:
+    """True when the committed answer largely repeats the question's own words —
+    the candidate read the question back (STT capture of the on-screen text or
+    a stall) instead of answering it. The interviewer should re-ask, not grade."""
+    if not answer or not question:
+        return False
+    if not (8 <= len(answer.split()) <= 45):
+        return False
+    a_words = [w for w in re.findall(r"[a-z']+", normalize_text(answer)) if len(w) > 2 and w not in STOPWORDS]
+    if len(a_words) < 5:
+        return False
+    q_words = set(re.findall(r"[a-z']+", normalize_text(question)))
+    if not q_words:
+        return False
+    overlap = sum(1 for w in a_words if w in q_words) / len(a_words)
+    return overlap >= 0.6
 
 
 def is_qa_done_phrase(text: str) -> bool:
@@ -1285,20 +1362,58 @@ def extract_content_words(text: str) -> Set[str]:
     return {w for w in raw_words if len(w) >= 3 and w not in COMMON_STOP_WORDS}
 
 
+NEUTRAL_ACK_TEXTS: Set[str] = {
+    "understood", "got it", "no problem", "right", "okay", "ok", "thanks",
+    "thank you", "sure", "of course", "i see", "makes sense", "fair enough",
+    "alright", "all right", "noted", "absolutely",
+}
+
+
+def _shares_word_run(ack: str, source: str, run_len: int = 5) -> bool:
+    """True if ack copies `run_len`+ consecutive words verbatim from source."""
+    def words(t: str) -> List[str]:
+        return re.findall(r"[a-z0-9']+", t.lower())
+    a, s = words(ack), words(source)
+    if not a or not s:
+        return False
+    for i in range(len(a) - run_len + 1):
+        if a[i : i + run_len] in [s[j : j + run_len] for j in range(len(s) - run_len + 1)]:
+            return True
+    return False
+
+
 def is_ack_grounded(ack: str, candidate_answer: str, question_text: str = "") -> bool:
-    """True if ack shares >= 1 content word with candidate answer that is NOT in current question text."""
+    """True if the ack is safe to speak over voice.
+
+    Grounding rules (relaxed so the hot path never needs a second LLM call):
+    1. Short neutral acknowledgments are always safe.
+    2. An ack sharing >= 1 content word with the candidate's answer is safe,
+       even if that technical term also appeared in the question.
+    3. An ack copying 5+ consecutive words from the question (echo) or the
+       answer (parroting) is never safe.
+    """
     if not ack or not candidate_answer:
+        return False
+    ack_norm = re.sub(r"[^a-z0-9' ]", "", ack.lower()).strip()
+    if ack_norm in NEUTRAL_ACK_TEXTS:
+        return True
+    if question_text and _shares_word_run(ack, question_text, 5):
+        return False
+    if _shares_word_run(ack, candidate_answer, 5):
         return False
     ans_words = extract_content_words(candidate_answer)
     if not ans_words:
         return False
+    ack_words = extract_content_words(ack)
+    if ack_words.intersection(ans_words):
+        return True
+    # Legacy distinct-word rule as a final fallback: answer words that never
+    # appeared in the question are the strongest grounding signal.
     q_words = extract_content_words(question_text)
     distinct_ans_words = ans_words - q_words
     if not distinct_ans_words:
         return False
-    ack_words = extract_content_words(ack)
-    shared = ack_words.intersection(distinct_ans_words)
-    return len(shared) >= 1
+    return len(ack_words.intersection(distinct_ans_words)) >= 1
 
 
 FORBIDDEN_ACK_PHRASES: List[str] = [
@@ -1656,11 +1771,14 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         questions.sort(key=lambda q: q.question_index)
         new_state.questions = questions
 
-        # Index skill sections
+        # Index skill sections. Background-family slots (intro, resume-probe
+        # walkthrough) are NOT skills — indexing them by a stage-derived name
+        # used to register a fake "Background" skill with no anchor, corrupting
+        # skill order and swallowing the projects walkthrough.
         skill_dict: Dict[str, Dict[str, Any]] = {}
         skill_names_ordered: List[str] = []
         for q in questions:
-            if q.kind in ("anchor", "anchor_alt", "escalation", "probe", "resume_probe", "custom"):
+            if q.kind in ("anchor", "anchor_alt", "escalation", "probe", "custom"):
                 s_name = q.skill_name or ("Custom Screening" if q.kind == "custom" else "General")
                 if s_name not in skill_dict:
                     skill_dict[s_name] = {"probes": []}
@@ -1680,6 +1798,11 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         new_state.followups_used_per_skill = {s: 0 for s in skill_names_ordered}
         new_state.clarify_used_per_skill = {s: False for s in skill_names_ordered}
         new_state.covered_expectations_per_skill = {s: [] for s in skill_names_ordered}
+        # Weight-proportional follow-up caps from each skill's anchor slot
+        new_state.max_followups_per_skill = {
+            s: int((skill_dict[s].get("anchor").follow_up_depth_allowed if skill_dict[s].get("anchor") else 0) or 2)
+            for s in skill_names_ordered
+        }
         new_state.qa_rounds_used = 0
 
         # Extract job_record if available in plan
@@ -2378,6 +2501,12 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
             new_state.is_committed = False
             new_state.bot_speaking = False
             new_state.active_speech_id = None
+            # Same-turn continuation: restore the committed text so resumed
+            # speech merges with it (the commit boundary cleared the buffer to
+            # block cross-turn ghosts, but a late TurnStart before
+            # BotAudioStarted is still the SAME candidate turn).
+            if not new_state.answer_buffer and new_state.committed_answer:
+                new_state.answer_buffer = new_state.committed_answer
             effects.append(EmitUI(status="uncommitted", payload={"answer": new_state.answer_buffer}))
 
         # Cancel pending commit timer and keep accumulating
@@ -2893,6 +3022,13 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
     state.question_index_before_commit = state.current_question_index
     state.is_committed = True
     state.committed_answer = state.answer_buffer
+    # A committed buffer must NEVER seed the next answer: STT finals for later
+    # speech used to append onto it, re-committing the accumulated text as a
+    # new answer (production transcript showed each answer containing all the
+    # previous ones). The next question's BotSpeechDone resets it again; this
+    # is the authoritative reset at the commit boundary.
+    state.answer_buffer = ""
+    state.seen_turn_ids.clear()
     state.is_accumulating = False
     state.accumulation_started_ms = 0
     state.turn_counter += 1
@@ -2918,7 +3054,11 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
     }
     effects.append(Persist(turn=turn_record))
 
-    # Schedule conversational bridge timer after commit (default 700ms)
+    # Schedule conversational bridge timer after commit. 1400ms: the streamed
+    # ack typically starts within 400-1200ms of commit — at 700ms the bridge
+    # used to fire FIRST and then the ack played on top of it, producing the
+    # "Thanks. Understood. <question>" filler chatter heard in production.
+    # The bridge is a gap-filler for SLOW decisions only; the ack wins the race.
     state.bridge_played_for_commit = False
     state.spoken_ack_token = None
     state.spoken_ack_text = ""
@@ -2927,7 +3067,7 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
     state.commit_at_ms = now_ms
     state.timer_seq += 1
     bridge_token = f"bridge_{state.timer_seq}"
-    b_delay = getattr(state, "bridge_delay_ms", 700) or 700
+    b_delay = getattr(state, "bridge_delay_ms", 1400) or 1400
     state.active_timers["bridge"] = {"at_ms": now_ms + b_delay, "token": bridge_token}
     effects.append(ScheduleTimer(name="bridge", at_ms=now_ms + b_delay, token=bridge_token, delay_ms=b_delay))
 
@@ -3112,6 +3252,9 @@ def validate_and_apply_decision(
     answer = state.committed_answer
     time_left = get_skill_time_left_ms(state, curr_skill, now_ms)
     followups_used = getattr(state, "followups_used", 0) or state.followups_used_per_skill.get(curr_skill, 0)
+    # Weight-proportional cap: each skill earns depth from its recruiter weight,
+    # not a flat constant (falls back to 2 for legacy plans without caps).
+    max_followups = int(state.max_followups_per_skill.get(curr_skill, 2) or 2)
     core_expectations = curr_q.expected_key_points if curr_q else []
 
     is_valid = False
@@ -3225,22 +3368,60 @@ def validate_and_apply_decision(
         state.decision_start_ms = 0
         return state, effects
 
-    # 2.5 Intro phase override: Intro answer always transitions to the first skill topic (new_topic)
+    # 2.5 Intro phase override: Intro answer always transitions toward the first skill topic (new_topic)
     if state.phase_before_commit == ConductorPhase.INTRO or state.phase == ConductorPhase.INTRO:
         action = "new_topic"
-        # The intro always targets the first planned skill. Ignore any model-selected
-        # target skill so the candidate follows the prepared plan order.
-        if state.skill_names:
-            target_skill = state.skill_names[0]
-        elif not target_skill:
+        # Background-family continuation: if the projects walkthrough
+        # (resume_probe) or another background question follows in plan order
+        # and hasn't been asked, ask it next instead of jumping to skills —
+        # the interview opens with the candidate's own work, as designed.
+        next_bg = None
+        for q in sorted(state.questions, key=lambda x: x.question_index):
+            if (
+                q.question_index > state.current_question_index
+                and q.kind in ("background", "resume_probe")
+                and q.question_text not in state.asked_questions_history
+            ):
+                next_bg = q
+                break
+        if next_bg is not None:
+            question_text = next_bg.question_text
             target_skill = ""
-        anchor_q = state.skill_questions.get(target_skill, {}).get("anchor") if target_skill else None
-        if anchor_q:
+            if not transition_prefix:
+                transition_prefix = "Great to meet you."
+        else:
             # The intro must always deliver the exact stored anchor wording; never a
             # model-authored question that would bypass the prepared script.
-            question_text = anchor_q.question_text
-        if not transition_prefix:
-            transition_prefix = f"Let's begin with {target_skill}."
+            if state.skill_names:
+                target_skill = state.skill_names[0]
+            elif not target_skill:
+                target_skill = ""
+            anchor_q = state.skill_questions.get(target_skill, {}).get("anchor") if target_skill else None
+            if anchor_q:
+                question_text = anchor_q.question_text
+            if not transition_prefix:
+                transition_prefix = f"Let's begin with {target_skill}."
+
+    # 2.6 Repeat-request / connectivity guard: when the committed "answer" is
+    # actually the candidate saying they never saw or heard the question (e.g.
+    # they were stuck reconnecting), or the answer merely echoes the question
+    # back, the only humane decision is to re-ask the current question — never
+    # advance past it. Applies to every decision source (LLM, repair,
+    # deterministic fallback) because it overrides the incoming action entirely.
+    if (
+        state.phase != ConductorPhase.CANDIDATE_QA
+        and curr_q is not None
+        and (
+            looks_like_repeat_request(answer)
+            or answer_echoes_question(answer, curr_q.question_text)
+        )
+    ):
+        action = "rephrase"
+        question_text = curr_q.question_text
+        ack = "Of course."
+        transition_prefix = ""
+        probe_id = None
+        is_valid = True
 
     # 2.7 No-knowledge guard: a candidate who admits they don't know the topic
     # must never be probed deeper or asked to clarify that admission. Coerce the
@@ -3411,7 +3592,11 @@ def validate_and_apply_decision(
                 action = "follow_up"
             state.escalation_used_for_skill[curr_skill] = True
 
-        elif followups_used >= 2 or time_left < 60000 or (all_core_covered and (all_stretch_covered or not stretch_expectations)):
+        elif (
+            followups_used >= max_followups
+            or time_left < 60000
+            or (all_core_covered and (all_stretch_covered or not stretch_expectations))
+        ):
             action = "new_topic"
             question_text = ""
             target_skill = ""
@@ -3452,21 +3637,37 @@ def validate_and_apply_decision(
         ack = "Understood."
         if state.phase_before_commit == ConductorPhase.INTRO or state.phase == ConductorPhase.INTRO:
             action = "new_topic"
-            # Context-aware fallback: check candidate answer for mentioned skills
-            ans_lower = (state.committed_answer or "").lower()
-            target_skill = ""
-            for s in state.skill_names:
-                if s.lower() in ans_lower or any(w.lower() in ans_lower for w in s.split() if len(w) > 4 and w.lower() not in STOPWORDS):
-                    target_skill = s
+            # Background-family continuation first (projects walkthrough):
+            # identical rule to the validated-decision intro override.
+            next_bg_fb = None
+            for q in sorted(state.questions, key=lambda x: x.question_index):
+                if (
+                    q.question_index > state.current_question_index
+                    and q.kind in ("background", "resume_probe")
+                    and q.question_text not in state.asked_questions_history
+                ):
+                    next_bg_fb = q
                     break
-            if not target_skill and state.skill_names:
-                target_skill = state.skill_names[0]
+            if next_bg_fb is not None:
+                question_text = next_bg_fb.question_text
+                target_skill = ""
+                transition_prefix = "Great to meet you."
+            else:
+                # Context-aware fallback: check candidate answer for mentioned skills
+                ans_lower = (state.committed_answer or "").lower()
+                target_skill = ""
+                for s in state.skill_names:
+                    if s.lower() in ans_lower or any(w.lower() in ans_lower for w in s.split() if len(w) > 4 and w.lower() not in STOPWORDS):
+                        target_skill = s
+                        break
+                if not target_skill and state.skill_names:
+                    target_skill = state.skill_names[0]
 
-            # Explicitly mark degraded intro path in director memory
-            state.director_memory["degraded_intro"] = True
-            anchor_q = state.skill_questions.get(target_skill, {}).get("anchor") if target_skill else None
-            question_text = anchor_q.question_text if anchor_q else ""
-            transition_prefix = f"Thanks for sharing that background. Let's start with {target_skill}."
+                # Explicitly mark degraded intro path in director memory
+                state.director_memory["degraded_intro"] = True
+                anchor_q = state.skill_questions.get(target_skill, {}).get("anchor") if target_skill else None
+                question_text = anchor_q.question_text if anchor_q else ""
+                transition_prefix = f"Thanks for sharing that background. Let's start with {target_skill}."
         else:
             # No-knowledge guard for the deterministic fallback too: never pick a
             # probe or a clarify when the candidate just said they don't know.
@@ -3568,6 +3769,10 @@ def validate_and_apply_decision(
             state.current_skill_index = matched_idx
         elif (state.phase_before_commit == ConductorPhase.INTRO or state.phase == ConductorPhase.INTRO) and state.skill_names:
             state.current_skill_index = 0
+        elif curr_q is not None and curr_q.kind in ("background", "resume_probe") and state.skill_names:
+            # Leaving the projects walkthrough: the first REAL skill starts at
+            # index 0 (the walkthrough ran before any skill, not after one).
+            state.current_skill_index = 0
         else:
             state.current_skill_index += 1
 
@@ -3615,7 +3820,16 @@ def validate_and_apply_decision(
                 if state.phase_before_commit == ConductorPhase.INTRO:
                     transition_prefix = f"Let's begin with {next_skill}."
                 else:
-                    transition_prefix = f"Let's move on to {next_skill}."
+                    # Rotate the topic-transition phrasing so consecutive topic
+                    # changes never sound identical (viva-style repetition).
+                    variants = [
+                        f"Let's move on to {next_skill}.",
+                        f"Next up: {next_skill}.",
+                        f"Alright, let's talk about {next_skill}.",
+                        f"Now I'd like to hear your take on {next_skill}.",
+                        f"Shifting gears a little — {next_skill}.",
+                    ]
+                    transition_prefix = variants[state.speech_seq % len(variants)]
         else:
             qa_q = next((q for q in state.questions if q.kind == "candidate_qa"), None)
             state.phase = ConductorPhase.CANDIDATE_QA

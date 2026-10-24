@@ -51,7 +51,8 @@ from backend.app.services.auth import (
     get_current_user, get_optional_current_user, require_role
 )
 from backend.app.services.resume_parser import (
-    extract_text_from_file, parse_structured_resume_data, detect_discrepancies
+    extract_text_from_file, parse_structured_resume_data, parse_resume_with_llm,
+    detect_discrepancies
 )
 from backend.app.services.question_generation.provider import check_ai_provider_health
 from backend.app.services.question_generation.persistence import generate_for_application
@@ -107,6 +108,22 @@ class BlueprintGenerationTask:
 
 _ACTIVE_BLUEPRINT_TASKS: Dict[str, BlueprintGenerationTask] = {}
 _BLUEPRINT_GENERATION_LOCKS: dict[str, asyncio.Lock] = {}
+_BLUEPRINT_TASK_TTL_SECONDS = 3600  # terminal tasks are pruned after 1h so polling clients still see the result
+
+
+def _prune_terminal_blueprint_tasks() -> None:
+    """Drop completed/failed tasks past the TTL so finished blueprints don't
+    accumulate in process memory (each task retains a serialized blueprint)."""
+    now = time.time()
+    expired = [
+        job_id
+        for job_id, t in _ACTIVE_BLUEPRINT_TASKS.items()
+        if t.status != "in_progress" and now - t.updated_at > _BLUEPRINT_TASK_TTL_SECONDS
+    ]
+    for job_id in expired:
+        del _ACTIVE_BLUEPRINT_TASKS[job_id]
+    if expired:
+        logger.debug("Pruned %d expired blueprint generation tasks", len(expired))
 
 
 async def _run_blueprint_generation_background(
@@ -117,8 +134,13 @@ async def _run_blueprint_generation_background(
     skills_data: List[Dict[str, Any]],
     job_description: str,
     task: BlueprintGenerationTask,
+    recruiter_id: Optional[str] = None,
 ):
-    """Background worker for job blueprint generation with live progress reporting."""
+    """Background worker for job blueprint generation with live progress reporting.
+
+    Zero-touch flow: when generation finishes with no validation errors the
+    blueprint is approved automatically (warnings auto-confirmed). Recruiters
+    only see an approval step when they customize a generated blueprint."""
     try:
         def on_progress(stage: str, progress: float, section_data: Optional[Dict[str, Any]] = None):
             task.current_stage = stage
@@ -151,6 +173,31 @@ async def _run_blueprint_generation_background(
                 blueprint_data=blueprint_data,
                 auto_approve=False,
             )
+
+            # Zero-touch auto-approval: a freshly generated blueprint with no
+            # errors goes live immediately so the job accepts applications
+            # without any manual review step. Non-blocking warnings are quality
+            # signals for engineers, not decisions a recruiter needs to make.
+            report = (getattr(blueprint, "validation_report", None) or {})
+            if not report.get("errors"):
+                try:
+                    blueprint = await approve_job_blueprint(
+                        db=session,
+                        job_id=job_id,
+                        blueprint_id=blueprint.id,
+                        user_id=recruiter_id or getattr(curr_job, "recruiter_id", None),
+                        confirmed_warnings=True,
+                    )
+                    logger.info("Auto-approved blueprint %s for job %s", blueprint.id, job_id)
+                except Exception as appr_exc:
+                    # Generation itself succeeded; approval stays available in the UI.
+                    logger.warning("Auto-approval failed for job %s (recruiter can approve manually): %s", job_id, appr_exc)
+            else:
+                logger.warning(
+                    "Blueprint for job %s has validation errors; leaving as draft for manual fix: %s",
+                    job_id, report.get("errors"),
+                )
+
             task.blueprint = serialize_blueprint(blueprint, current_job=curr_job)
             task.status = "completed"
             task.progress = 1.0
@@ -1067,6 +1114,7 @@ async def generate_blueprint_for_job_endpoint(
     ]
 
     task = BlueprintGenerationTask(job_id)
+    _prune_terminal_blueprint_tasks()
     _ACTIVE_BLUEPRINT_TASKS[job_id] = task
 
     asyncio.create_task(
@@ -1078,6 +1126,7 @@ async def generate_blueprint_for_job_endpoint(
             skills_data=skills_data,
             job_description=job.job_description or "",
             task=task,
+            recruiter_id=current_user.id,
         )
     )
 
@@ -2986,8 +3035,11 @@ async def upload_application_resume(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(e)}")
 
-    # 5. Extract Structured Data
-    structured_data = parse_structured_resume_data(extracted_text)
+    # 5. Extract Structured Data — hybrid: deterministic regex base + LLM
+    # (Bedrock Nova-Pro primary, Gemini failover) for semantic fields. Contact
+    # info and experience-year math stay deterministic; any LLM failure falls
+    # back to the regex result so uploads are never blocked.
+    structured_data = await parse_resume_with_llm(extracted_text)
 
     # Auto-populate application coordinates if empty
     contact_info = structured_data.get("contact_info", {})

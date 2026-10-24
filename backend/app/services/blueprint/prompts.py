@@ -74,6 +74,10 @@ CRITICAL VOICE & QUALITY RULES (MANDATORY):
 13. JOB DESCRIPTION GROUNDING:
    - Use the concrete systems, responsibilities, technologies, and constraints named in the job description.
    - Do not copy role-template expectation text verbatim; adapt it to the actual JD and rubric.
+14. OPENING VARIETY:
+   - No two questions in this section may begin with the same first three words.
+   - Do not open several questions with the same stem (e.g. repeated "How would you ..." or "Tell me about ...").
+   - Mix openings naturally: "Walk me through...", "Suppose...", "What factors...", "Describe how you...", "When have you...".
 """
 
 
@@ -86,6 +90,15 @@ def _competency_scenario_guidance(comp_name: str, comp_desc: str, rubric_summary
     """
     text = f"{comp_name} {comp_desc} {rubric_summary}".lower()
 
+    if any(term in text for term in ("project", "experience deep", "walkthrough of the candidate")):
+        return (
+            "This competency assesses the candidate's OWN work, not a hypothetical. The anchor asks them to walk "
+            "through their most significant project (professional, academic, personal, or hackathon all count — "
+            "never assume production experience): what it does, their specific role, and the stack. Escalation "
+            "stresses that same project (10x scale, breaking component). Probes dig into what the candidate just "
+            "described: stack choice rationale, hardest bug, verification, and what they would rebuild. Do NOT "
+            "invent project details; the question must work for ANY candidate's project."
+        )
     if any(term in text for term in ("debug", "testing", "test suite", "flaky", "quality assurance", "qa ")):
         return (
             "Present a failing or unreliable software behavior: for example, a service returns stale data after "
@@ -178,6 +191,7 @@ def build_skill_section_user_prompt(
         anchor_instructions = """2. Anchor Question (kind='anchor'):
    - Verbal problem-solving or hypothetical scenario answerable with ZERO prior work experience.
    - The scenario MUST come from the Competency-Specific Scenario Guidance below. Do NOT default to a generic data-stream question when the competency is debugging, testing, APIs, databases, or another domain.
+   - Exception: if the Scenario Guidance explicitly asks about the candidate's OWN project (Project & Experience Deep-Dive), ask about their most significant project — academic, personal, or hackathon projects all count; never assume production experience.
    - Never ask "Walk me through a project where you in production...".
    - Under 35 words. Exactly 1 question mark. Does NOT leak expected answers or ask to write code.
 3. Anchor Alt Question (kind='anchor_alt'):

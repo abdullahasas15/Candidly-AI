@@ -775,3 +775,289 @@ def detect_discrepancies(
                 })
 
     return flags
+
+
+# ---------------------------------------------------------------------------
+# Hybrid LLM Resume Extraction (Bedrock-first with deterministic fallback)
+# ---------------------------------------------------------------------------
+
+RESUME_LLM_SYSTEM_PROMPT = """You are an expert technical recruiter resume parser.
+Extract structured data from the resume text EXACTLY as written. Rules:
+1. NEVER invent facts, employers, dates, or skills that are not in the text.
+2. Use verbatim company names, job titles, project names, and technologies.
+3. Dates: copy them as written (e.g. "Jan 2021", "03/2020", "Present").
+4. Detect ALL technologies named anywhere (including outside a Skills section) —
+   tools, frameworks, cloud services, databases, ML/LLM libraries, languages.
+5. If something is absent, return an empty list/string — never guess.
+Return ONLY one valid JSON object with exactly these keys:
+{
+  "candidate_name": "full name or empty string",
+  "summary": "professional summary from the resume, max 600 chars",
+  "work_experience": [
+    {"company": "", "role": "", "start_date": "", "end_date": "",
+     "description": "one-paragraph summary of the bullets", "highlights": ["bullet 1", "bullet 2"],
+     "technologies": ["Python", "..."]}
+  ],
+  "education": [
+    {"degree": "", "institution": "", "field": "", "graduation_year": null, "gpa": null, "honors": null}
+  ],
+  "certifications": [
+    {"name": "", "issuing_org": "", "issue_year": null, "credential_id": null}
+  ],
+  "projects": [
+    {"name": "", "description": "", "technologies": []}
+  ],
+  "skills_by_category": {
+    "Languages": [], "Frameworks": [], "Databases": [],
+    "Cloud & DevOps": [], "Tools": [], "Other": []
+  }
+}"""
+
+
+def _normalize_llm_resume_output(raw: Any) -> Optional[Dict[str, Any]]:
+    """Validate and normalize the LLM's JSON into the canonical parser shape.
+    Returns None when the payload is unusable (caller falls back to regex)."""
+    if not isinstance(raw, dict):
+        return None
+    recognized = {"candidate_name", "summary", "work_experience", "education",
+                  "certifications", "projects", "skills_by_category"}
+    if not (recognized & set(raw.keys())):
+        return None
+    if "work_experience" in raw and not isinstance(raw["work_experience"], list):
+        return None
+
+    def _str_list(value) -> List[str]:
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v or "").strip()][:15]
+        return []
+
+    work = []
+    for w in raw.get("work_experience") or []:
+        if not isinstance(w, dict):
+            continue
+        work.append({
+            "company": str(w.get("company") or "").strip()[:120],
+            "role": str(w.get("role") or "").strip()[:120],
+            "start_date": str(w.get("start_date") or "").strip()[:40],
+            "end_date": str(w.get("end_date") or "").strip()[:40],
+            "duration_years": None,
+            "description": str(w.get("description") or "").strip()[:350],
+            "highlights": _str_list(w.get("highlights"))[:5],
+            "technologies": _str_list(w.get("technologies")),
+        })
+
+    education = []
+    for e in raw.get("education") or []:
+        if not isinstance(e, dict):
+            continue
+        yr = e.get("graduation_year")
+        try:
+            yr = int(yr) if yr is not None else None
+        except (TypeError, ValueError):
+            yr = None
+        education.append({
+            "degree": str(e.get("degree") or "").strip()[:120],
+            "institution": str(e.get("institution") or "").strip()[:160],
+            "field": str(e.get("field") or "").strip()[:120],
+            "graduation_year": yr,
+            "gpa": str(e.get("gpa") or "").strip()[:20] or None,
+            "honors": str(e.get("honors") or "").strip()[:120] or None,
+        })
+
+    certifications = []
+    for c in raw.get("certifications") or []:
+        if not isinstance(c, dict):
+            continue
+        yr = c.get("issue_year")
+        try:
+            yr = int(yr) if yr is not None else None
+        except (TypeError, ValueError):
+            yr = None
+        certifications.append({
+            "name": str(c.get("name") or "").strip()[:160],
+            "issuing_org": str(c.get("issuing_org") or "").strip()[:120],
+            "issue_year": yr,
+            "credential_id": str(c.get("credential_id") or "").strip()[:80] or None,
+            "url": None,
+        })
+
+    projects = []
+    for p in raw.get("projects") or []:
+        if not isinstance(p, dict):
+            continue
+        projects.append({
+            "name": str(p.get("name") or p.get("title") or "").strip()[:160],
+            "description": str(p.get("description") or "").strip()[:400],
+            "technologies": _str_list(p.get("technologies")),
+            "role": "Creator / Core Engineer",
+            "url": None,
+        })
+
+    skills_by_category: Dict[str, List[str]] = {
+        "Languages": [], "Frameworks": [], "Databases": [],
+        "Cloud & DevOps": [], "Tools": [], "Other": [],
+    }
+    raw_cats = raw.get("skills_by_category")
+    if isinstance(raw_cats, dict):
+        for k, v in raw_cats.items():
+            key = str(k).strip() or "Other"
+            if key not in skills_by_category:
+                key = "Other"
+            skills_by_category[key].extend(_str_list(v))
+    elif isinstance(raw_cats, list):
+        skills_by_category["Other"].extend(_str_list(raw_cats))
+
+    return {
+        "candidate_name": str(raw.get("candidate_name") or "").strip()[:120],
+        "summary": str(raw.get("summary") or "").strip()[:600],
+        "work_experience": work,
+        "education": education,
+        "certifications": certifications,
+        "projects": projects,
+        "skills_by_category": skills_by_category,
+    }
+
+
+def _recompute_experience_from_work(work_experience: List[Dict[str, Any]]) -> float:
+    """Deterministic interval math over LLM-extracted dates — never trust the
+    model's arithmetic, only its reading of the dates."""
+    intervals: List[Tuple[float, float]] = []
+    for w in work_experience:
+        s = parse_date_to_float(str(w.get("start_date") or ""))
+        e = parse_date_to_float(str(w.get("end_date") or ""))
+        if s is not None and e is not None and e >= s:
+            w["duration_years"] = round(e - s, 1)
+            intervals.append((s, e))
+        else:
+            w["duration_years"] = None
+    return merge_and_calculate_experience(intervals)
+
+
+def _merge_llm_with_deterministic(
+    llm_data: Dict[str, Any],
+    base_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Combine LLM extraction with the deterministic parser result.
+
+    LLM wins for semantic fields (roles, descriptions, skills, projects).
+    The regex parser wins where it is objectively more reliable:
+    contact info (exact regex hits) and experience-year interval math.
+    Anything the LLM missed is backfilled from the deterministic result, so
+    the merged output is never worse than the pure-regex parser."""
+    import copy
+    merged = copy.deepcopy(llm_data)
+
+    # Contact info: deterministic regex is exact for emails/phones/URLs.
+    contact = dict(base_data.get("contact_info") or {})
+    if not contact.get("name") and merged.get("candidate_name"):
+        contact["name"] = merged["candidate_name"]
+    merged["contact_info"] = contact
+
+    # Experience math: objective interval merge over the LLM's dates.
+    total_years = _recompute_experience_from_work(merged["work_experience"])
+    if total_years <= 0.0:
+        total_years = float(base_data.get("total_experience_years") or 0.0)
+    merged["total_experience_years"] = round(max(0.0, total_years), 1)
+
+    # Backfill sections the LLM skipped.
+    if not merged["work_experience"]:
+        merged["work_experience"] = list(base_data.get("work_experience") or [])
+
+    def _backfill_by_name(target: List[Dict[str, Any]], source: List[Dict[str, Any]], keys=("name",)) -> None:
+        seen = {
+            " ".join(str(t.get(k) or "").lower() for k in keys).strip()
+            for t in target
+        }
+        for s_item in source or []:
+            key = " ".join(str(s_item.get(k) or "").lower() for k in keys).strip()
+            if key and key not in seen:
+                target.append(s_item)
+
+    _backfill_by_name(merged["certifications"], base_data.get("certifications") or [])
+    _backfill_by_name(merged["projects"], base_data.get("projects") or [])
+
+    # Skills: the categorized dict is the canonical "skills" value — the
+    # context hydrator and STT keyterm extractor both accept it, and the
+    # categories improve interview personalization. Regex taxonomy hits that
+    # the LLM did not report union into "Other". The flat list is kept under
+    # "skills_flat" for any list-shaped consumer.
+    flat: List[str] = []
+    for values in merged["skills_by_category"].values():
+        for v in values:
+            if v.lower() not in {f.lower() for f in flat}:
+                flat.append(v)
+    for s in base_data.get("skills") or []:
+        if s.lower() not in {f.lower() for f in flat}:
+            flat.append(s)
+            if s not in merged["skills_by_category"]["Other"]:
+                merged["skills_by_category"]["Other"].append(s)
+    merged["skills"] = merged["skills_by_category"]
+    merged["skills_flat"] = flat
+
+    if not merged.get("summary"):
+        merged["summary"] = base_data.get("summary") or ""
+    return merged
+
+
+async def parse_resume_with_llm(
+    extracted_text: str,
+    llm_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Hybrid resume parsing: deterministic regex base + LLM structured extraction.
+
+    Pipeline:
+    1. Always run the deterministic parser (fast, exact on contact info/dates).
+    2. Ask the LLM (Bedrock Nova-Pro primary, Gemini failover) for structured
+       extraction — it handles non-standard layouts and skills no fixed
+       taxonomy can know, which is what personalization quality depends on.
+    3. Merge: LLM for semantics, regex for contact info and experience math,
+       regex backfills anything the LLM missed. Any LLM failure degrades
+       gracefully to the deterministic result — an application is never
+       blocked by the LLM being unavailable.
+
+    Kill-switch: RESUME_LLM_PARSER=0 disables the LLM stage entirely.
+    """
+    base_data = parse_structured_resume_data(extracted_text)
+
+    if os.getenv("RESUME_LLM_PARSER", "1").lower() in ("0", "false", "off"):
+        base_data["_parser"] = "deterministic"
+        return base_data
+
+    text_for_llm = extracted_text.strip()[:14000]
+    user_prompt = f"Resume text:\n\n{text_for_llm}\n\nExtract the structured JSON now."
+
+    llm_data: Optional[Dict[str, Any]] = None
+    parser_source = "llm+regex"
+    try:
+        if llm_fn is not None:
+            res = llm_fn(system_prompt=RESUME_LLM_SYSTEM_PROMPT, user_prompt=user_prompt)
+            if hasattr(res, "__await__"):
+                res = await res
+            if isinstance(res, dict):
+                raw = res
+            else:
+                import json as _json
+                raw = _json.loads(str(res))
+        else:
+            from backend.app.services.interview_v2 import director
+            model_id = os.getenv("RESUME_PARSER_MODEL", "apac.amazon.nova-pro-v1:0")
+            raw, _metrics = await director.stream_decision_with_ack_first(
+                system_prompt=RESUME_LLM_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                max_output_tokens=3000,
+                temperature=0.1,
+                model_id=model_id,
+            )
+        llm_data = _normalize_llm_resume_output(raw)
+    except Exception as llm_err:
+        parser_source = "deterministic"
+        print(f"LLM resume extraction failed, using deterministic parser: {llm_err}")
+
+    if llm_data is None:
+        # LLM answered but the payload was unusable — deterministic result wins.
+        base_data["_parser"] = "deterministic"
+        return base_data
+
+    merged = _merge_llm_with_deterministic(llm_data, base_data)
+    merged["_parser"] = parser_source
+    return merged

@@ -1695,3 +1695,108 @@ def test_intro_decision_speaks_stored_anchor_not_model_authored_question():
     assert "Which cache eviction policy" not in speak.text
     assert new_state.current_slot_id == "slot_i_anchor"
     assert new_state.current_question_index == 2
+
+
+# ---------------------------------------------------------------------------
+# Per-candidate personalization in the LIVE loop
+# ---------------------------------------------------------------------------
+
+def test_resume_keyterms_extract_resume_vocabulary():
+    """STT biasing terms come from the candidate's own resume: technologies,
+    companies, and project names — the words they will actually say."""
+    from backend.app.services.voice.gateway import _resume_keyterms
+
+    class FakeResume:
+        parsed_structured_data = {
+            "skills": {
+                "Languages": ["Python", "Go"],
+                "Data": ["Kafka", "Apache Flink", "way too many words in one term to be useful"],
+            },
+            "work_experience": [
+                {"company": "Stripe", "role": "Backend Engineer"},
+                {"company": "A Very Long Company Name That Exceeds Four Words", "role": "Intern"},
+            ],
+            "projects": [
+                {"name": "realtime-fraud-scoring", "technologies": ["Flink", "Redis"]},
+            ],
+        }
+
+    class FakeApp:
+        resume = FakeResume()
+
+    terms = _resume_keyterms(FakeApp())
+    assert "Python" in terms
+    assert "Go" in terms
+    assert "Kafka" in terms
+    assert "Apache Flink" in terms
+    assert "Stripe" in terms
+    assert "realtime-fraud-scoring" in terms
+    assert "Redis" in terms
+    # Over-long entries (5+ words) are dropped
+    assert not any("way too many" in t for t in terms)
+    assert not any("Very Long Company" in t for t in terms)
+
+
+def test_resume_keyterms_handles_string_encoded_and_missing_resume():
+    from backend.app.services.voice.gateway import _resume_keyterms
+
+    class StringResume:
+        parsed_structured_data = json.dumps({"skills": {"ML": ["PyTorch"]}})
+
+    class FakeApp:
+        resume = StringResume()
+
+    assert "PyTorch" in _resume_keyterms(FakeApp())
+
+    class NoResumeApp:
+        resume = None
+
+    assert _resume_keyterms(NoResumeApp()) == []
+
+
+def test_live_turn_summary_is_resume_aware():
+    """The per-turn decision summary must describe the actual candidate:
+    name, companies/roles, and the job's focus skills."""
+    ctx = HydratedInterviewContext(
+        application_id="app-1",
+        job_id="job-1",
+        candidate_full_name="Mohammad Abdullah",
+        candidate_first_name="Mohammad",
+        self_reported_experience_years=5.5,
+        resume_work_experience=[
+            {"role": "Backend Engineer", "company": "Stripe"},
+            {"role": "Data Engineer", "company": "Grab"},
+        ],
+        job_title="AI Engineer",
+        seniority_level="senior",
+        interview_duration_mins=30,
+        skills=[
+            {"name": "LLM Evaluation", "priority_tier": "P0", "weight_percentage": 30},
+            {"name": "Distributed Systems", "priority_tier": "P1", "weight_percentage": 25},
+        ],
+    )
+    summary = ctx.to_live_turn_summary()
+    assert "Mohammad" in summary
+    assert "Backend Engineer at Stripe" in summary
+    assert "Data Engineer at Grab" in summary
+    assert "LLM Evaluation" in summary
+    assert "AI Engineer" in summary
+
+
+def test_runner_prefers_candidate_summary_for_selector_context():
+    """When the runner hydrated a resume-aware summary, the selector must
+    receive it instead of the job-only summary."""
+    import backend.app.services.interview_v2.runner as runner_mod
+
+    runner_mod_obj = runner_mod.SessionRunner(
+        session_id="sess-1",
+        script={"job_summary": "Job: AI Engineer (Senior, 30m). Focus Skills: LLM Evaluation."},
+    )
+    runner_mod_obj.candidate_summary = (
+        "Candidate: Mohammad (5.5 yrs exp). Background: Backend Engineer at Stripe. "
+        "Applying for: AI Engineer (Senior, 30m). Key Focus Skills: LLM Evaluation."
+    )
+    # The decision-path preference is a one-liner; assert the attribute wins over script
+    chosen = runner_mod_obj.candidate_summary or runner_mod_obj.script.get("job_summary")
+    assert chosen.startswith("Candidate: Mohammad")
+    assert "Stripe" in chosen

@@ -84,6 +84,10 @@ export default function LiveInterviewRoom({
   const [currentBotCaption, setCurrentBotCaption] = useState(
     mockState?.currentBotCaption || 'Preparing your interview environment and audio pipeline...'
   );
+  // A new question text arrives from the server BEFORE its audio does. Hold it
+  // back until the interviewer actually starts speaking (TTSStarted / playback)
+  // so the candidate reads along with the voice instead of ahead of it.
+  const [captionRevealed, setCaptionRevealed] = useState(true);
   const currentBotCaptionRef = useRef(currentBotCaption);
   useEffect(() => {
     currentBotCaptionRef.current = currentBotCaption;
@@ -980,6 +984,8 @@ export default function LiveInterviewRoom({
                     ...history,
                     { role: 'bot', text: prev, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
                   ]);
+                  // Hold the new question back until its audio starts
+                  setCaptionRevealed(false);
                 }
                 return newText;
               });
@@ -1014,6 +1020,8 @@ export default function LiveInterviewRoom({
             if (!msg.is_ack && !msg.is_bridge) {
               setLastCandidateAnswer('');
               setCandidateLiveTranscript('');
+              // The interviewer's voice is starting: reveal the held question text
+              setCaptionRevealed(true);
             }
             if (
               msg.text &&
@@ -1040,10 +1048,18 @@ export default function LiveInterviewRoom({
               audioPipelineRef.current.flushPlayback();
             }
             updateStatus('listening');
+            // Speech was dropped — still reveal the question text so the
+            // candidate can read it while answering.
+            setCaptionRevealed(true);
             setBotLevel(0);
           } else if (msg.type === 'InterimCaption' || msg.type === 'Update') {
-            const text = msg.text || '';
-            setCandidateLiveTranscript(text);
+            // Only show interim speech while the candidate is actually being
+            // listened to. Late STT frames for the PREVIOUS answer used to
+            // render under the new question as a stale "answer" bubble.
+            const s = statusRef.current;
+            if (s === 'listening' || s === 'talking' || s === 'opening_listening') {
+              setCandidateLiveTranscript(msg.text || '');
+            }
           } else if (msg.type === 'CommittedAnswer') {
             const answer = msg.text || '';
             setLastCandidateAnswer(answer);
@@ -1617,7 +1633,7 @@ export default function LiveInterviewRoom({
               data-testid="current-bot-caption"
               className="text-base sm:text-lg lg:text-xl font-normal leading-relaxed text-zinc-100 max-w-[68ch] break-words tracking-normal transition-all duration-300 select-text"
             >
-              {currentBotCaption}
+              {captionRevealed ? currentBotCaption : '…'}
             </p>
           </div>
 
