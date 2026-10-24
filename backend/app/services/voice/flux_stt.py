@@ -263,6 +263,7 @@ class FluxSTTClient:
         self._ws: Optional[Any] = None
         self._running: bool = False
         self._connected: bool = False
+        self._ready_event: asyncio.Event = asyncio.Event()
         self._last_send_time: float = 0.0
 
         self._eager_eot_count: int = 0
@@ -333,6 +334,13 @@ class FluxSTTClient:
         self._running = True
         self._main_task = asyncio.create_task(self._run_lifecycle())
 
+    async def wait_until_ready(self, timeout: float = 10.0) -> None:
+        """Wait until the Deepgram Flux WebSocket connection is established and ready."""
+        try:
+            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError("Timed out waiting for Deepgram Flux STT connection")
+
     async def stop(self) -> None:
         """Stop streaming and close the connection cleanly."""
         self._running = False
@@ -353,6 +361,7 @@ class FluxSTTClient:
                 pass
             self._ws = None
         self._connected = False
+        self._ready_event.clear()
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
         """Queue raw 16kHz linear16 PCM audio bytes for streaming."""
@@ -412,6 +421,7 @@ class FluxSTTClient:
                 ) as ws:
                     self._ws = ws
                     self._connected = True
+                    self._ready_event.set()
                     backoff = 0.5  # Reset backoff on successful connect
                     logger.info("Deepgram Flux connection established.")
 
@@ -444,6 +454,7 @@ class FluxSTTClient:
                 logger.warning("Flux connection error: %s", exc)
             finally:
                 self._connected = False
+                self._ready_event.clear()
                 if self._send_task and not self._send_task.done():
                     self._send_task.cancel()
                 if self._keepalive_task and not self._keepalive_task.done():

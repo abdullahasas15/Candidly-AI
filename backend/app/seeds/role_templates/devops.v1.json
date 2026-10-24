@@ -218,36 +218,223 @@
         "mid_prompt": "Walk me through a time you used tools like strace, tcpdump, or system logs to diagnose a low-level Linux performance or networking issue.",
         "senior_prompt": "Walk me through how you tuned Linux kernel socket and networking parameters to handle hundreds of thousands of concurrent client connections."
       }
+    },
+    {
+      "key": "projects_experience",
+      "name": "Project & Experience Deep-Dive",
+      "category": "Domain & Architectural",
+      "description": "Structured walkthrough of the candidate's own projects and work: scope, ownership, architecture decisions, trade-offs, and outcomes. Follow-ups probe what the candidate actually said they built.",
+      "spoken_topic_label": "Your Projects",
+      "rubric_l1": "Cannot describe any project coherently; vague about own role, stack, or outcome; claims work without substance.",
+      "rubric_l2": "Describes a project at surface level; can name the stack and own tasks but struggles with design decisions, trade-offs, or measurable outcomes.",
+      "rubric_l3": "Clearly explains a real project: goal, architecture, own ownership, technologies used, and key trade-offs with reasons; can dive one level deeper on any part when probed.",
+      "rubric_l4": "Deep command of own work: quantified outcomes, alternatives considered, failure modes handled, and how constraints shaped the design; connects project decisions to broader engineering principles.",
+      "rubric_l5": "Exceptional narrative and reflection: articulates the business/technical context, led non-trivial trade-offs, mentors others through the reasoning, and honestly separates team work from individual contribution.",
+      "expectation_bank": {
+        "l2": [
+          "Names the project goal, stack, and their own tasks."
+        ],
+        "l3": [
+          "Explains the architecture and their specific ownership area.",
+          "Justifies key design or technology choices with trade-offs."
+        ],
+        "l4": [
+          "Quantifies outcomes or impact (performance, scale, users, grades of improvement).",
+          "Handles a follow-up on any component they described without hand-waving."
+        ],
+        "l5": [
+          "Reflects on what they would change with hindsight and why."
+        ]
+      },
+      "question_patterns": {
+        "anchor": "Walk me through the most significant project you have built or contributed to — what it does, your role, and the stack you chose.",
+        "anchor_alt": "Pick any project, class assignment, or hackathon you enjoyed — what did you build and what did you personally work on?",
+        "escalation": "If that project had to serve 10x the users or data tomorrow, what would break first and what would you change?",
+        "probes": [
+          "Why did you choose that stack over the alternatives you considered?",
+          "What was the hardest bug or setback in that project, and how did you resolve it?",
+          "Which part are you proudest of, and which part would you rebuild differently now?",
+          "How did you verify it actually worked — tests, metrics, or user feedback?"
+        ]
+      }
     }
   ],
   "seniority_profiles": {
     "entry": {
-      "cicd_release": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L2", "target_level_max": "L3" },
-      "containers_k8s": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L2", "target_level_max": "L3" },
-      "linux_networking": { "included": true, "tier": "P1", "weight": 30.0, "target_level_min": "L2", "target_level_max": "L3" },
-      "cloud_iac": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" },
-      "observability_incident": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L2", "target_level_max": "L3" }
+      "cicd_release": {
+        "included": true,
+        "tier": "P0",
+        "weight": 28.0,
+        "target_level_min": "L2",
+        "target_level_max": "L3"
+      },
+      "containers_k8s": {
+        "included": true,
+        "tier": "P0",
+        "weight": 28.0,
+        "target_level_min": "L2",
+        "target_level_max": "L3"
+      },
+      "linux_networking": {
+        "included": true,
+        "tier": "P1",
+        "weight": 24.0,
+        "target_level_min": "L2",
+        "target_level_max": "L3"
+      },
+      "cloud_iac": {
+        "included": false,
+        "tier": "P2",
+        "weight": 0.0,
+        "target_level_min": "L2",
+        "target_level_max": "L3"
+      },
+      "observability_incident": {
+        "included": false,
+        "tier": "P2",
+        "weight": 0.0,
+        "target_level_min": "L2",
+        "target_level_max": "L3"
+      },
+      "projects_experience": {
+        "included": true,
+        "tier": "P0",
+        "weight": 20.0,
+        "target_level_min": "L2",
+        "target_level_max": "L3"
+      }
     },
     "mid": {
-      "cloud_iac": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
-      "containers_k8s": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L3", "target_level_max": "L4" },
-      "cicd_release": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L3", "target_level_max": "L4" },
-      "observability_incident": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L3", "target_level_max": "L4" },
-      "linux_networking": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L3", "target_level_max": "L4" }
+      "cloud_iac": {
+        "included": true,
+        "tier": "P0",
+        "weight": 24.0,
+        "target_level_min": "L3",
+        "target_level_max": "L4"
+      },
+      "containers_k8s": {
+        "included": true,
+        "tier": "P0",
+        "weight": 24.0,
+        "target_level_min": "L3",
+        "target_level_max": "L4"
+      },
+      "cicd_release": {
+        "included": true,
+        "tier": "P1",
+        "weight": 16.0,
+        "target_level_min": "L3",
+        "target_level_max": "L4"
+      },
+      "observability_incident": {
+        "included": true,
+        "tier": "P1",
+        "weight": 16.0,
+        "target_level_min": "L3",
+        "target_level_max": "L4"
+      },
+      "linux_networking": {
+        "included": false,
+        "tier": "P2",
+        "weight": 0.0,
+        "target_level_min": "L3",
+        "target_level_max": "L4"
+      },
+      "projects_experience": {
+        "included": true,
+        "tier": "P0",
+        "weight": 20.0,
+        "target_level_min": "L3",
+        "target_level_max": "L3"
+      }
     },
     "senior": {
-      "cloud_iac": { "included": true, "tier": "P0", "weight": 30.0, "target_level_min": "L4", "target_level_max": "L5" },
-      "containers_k8s": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
-      "observability_incident": { "included": true, "tier": "P1", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
-      "cicd_release": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
-      "linux_networking": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+      "cloud_iac": {
+        "included": true,
+        "tier": "P0",
+        "weight": 24.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "containers_k8s": {
+        "included": true,
+        "tier": "P0",
+        "weight": 20.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "observability_incident": {
+        "included": true,
+        "tier": "P1",
+        "weight": 20.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "cicd_release": {
+        "included": true,
+        "tier": "P1",
+        "weight": 16.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "linux_networking": {
+        "included": false,
+        "tier": "P2",
+        "weight": 0.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "projects_experience": {
+        "included": true,
+        "tier": "P0",
+        "weight": 20.0,
+        "target_level_min": "L3",
+        "target_level_max": "L4"
+      }
     },
     "lead": {
-      "cloud_iac": { "included": true, "tier": "P0", "weight": 35.0, "target_level_min": "L4", "target_level_max": "L5" },
-      "observability_incident": { "included": true, "tier": "P0", "weight": 25.0, "target_level_min": "L4", "target_level_max": "L5" },
-      "containers_k8s": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
-      "cicd_release": { "included": true, "tier": "P1", "weight": 20.0, "target_level_min": "L4", "target_level_max": "L5" },
-      "linux_networking": { "included": false, "tier": "P2", "weight": 0.0, "target_level_min": "L4", "target_level_max": "L5" }
+      "cloud_iac": {
+        "included": true,
+        "tier": "P0",
+        "weight": 28.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "observability_incident": {
+        "included": true,
+        "tier": "P0",
+        "weight": 20.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "containers_k8s": {
+        "included": true,
+        "tier": "P1",
+        "weight": 16.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "cicd_release": {
+        "included": true,
+        "tier": "P1",
+        "weight": 16.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "linux_networking": {
+        "included": false,
+        "tier": "P2",
+        "weight": 0.0,
+        "target_level_min": "L4",
+        "target_level_max": "L5"
+      },
+      "projects_experience": {
+        "included": true,
+        "tier": "P0",
+        "weight": 20.0,
+        "target_level_min": "L3",
+        "target_level_max": "L4"
+      }
     }
   }
 }

@@ -1,0 +1,14 @@
+The previously generated interview script failed validation with the following errors:
+$validation_errors
+
+=== REQUIRED SKELETON SLOTS ===
+$skeleton_json
+
+=== PREVIOUS ATTEMPT ===
+$malformed_output
+
+Repair the output so that:
+1. Every slot ID from the skeleton is present and matches exactly.
+2. No new or missing slot IDs exist.
+3. Every slot contains valid spoken "text" (under 40 words, no rubric leakage, no answers).
+4. Output is pure, valid JSON with schema_version "interview_script.v1".

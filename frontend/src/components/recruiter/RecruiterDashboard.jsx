@@ -72,6 +72,13 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
       }
       const data = await res.json();
       setJobs(data);
+      // Jobs still waiting on background blueprint generation (e.g. the page
+      // was refreshed mid-generation) keep their cards updated until live.
+      data.forEach((job) => {
+        if (!job.active_blueprint_id) {
+          refreshJobUntilLive(job.id);
+        }
+      });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -114,7 +121,41 @@ export default function RecruiterDashboard({ onBackToLanding, authUser, onSignOu
   };
 
   const handleJobCreated = (newJob) => {
-    setJobs((prev) => [newJob, ...prev]);
+    // Idempotent: the creation wizard can report the same job more than once
+    // (auto-approval ready + later customization approval). Never duplicate
+    // the card — replace-by-id keeps state fresh instead.
+    setJobs((prev) => {
+      const exists = prev.some((j) => j.id === newJob.id);
+      if (exists) {
+        return prev.map((j) => (j.id === newJob.id ? { ...j, ...newJob } : j));
+      }
+      return [newJob, ...prev];
+    });
+    // The create-time snapshot has no blueprint yet — generation runs in the
+    // background and auto-approves. Poll the job until it is live so the card
+    // badge flips from "Needs Blueprint Approval" to "Blueprint Approved"
+    // without requiring a page refresh.
+    refreshJobUntilLive(newJob.id);
+  };
+
+  const refreshJobUntilLive = async (jobId, { maxAttempts = 30, intervalMs = 4000 } = {}) => {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 2000 : intervalMs));
+        const token = getRecruiterToken();
+        const res = await fetch(`/api/jobs/${jobId}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!res.ok) return; // job deleted or auth expired — stop quietly
+        const fresh = await res.json();
+        setJobs((prev) => prev.map((j) => (j.id === fresh.id ? fresh : j)));
+        if (fresh.active_blueprint_id && fresh.blueprint_status === 'approved' && !fresh.blueprint_is_stale) {
+          return; // live — card now shows the approved badge
+        }
+      } catch (err) {
+        // transient network error: keep polling until attempts run out
+      }
+    }
   };
 
   // Filtered jobs

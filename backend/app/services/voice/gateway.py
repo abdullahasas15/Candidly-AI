@@ -34,6 +34,7 @@ from backend.app.models import (
     BlueprintSection,
     InterviewBlueprint,
     InterviewSession,
+    JobApplication,
     JobPosting,
     JobSkill,
 )
@@ -90,12 +91,78 @@ def _validate_ws_token(token: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _resume_keyterms(application) -> List[str]:
+    """Extract biasing vocabulary from the candidate's parsed resume.
+
+    The candidate will actually SAY these words (their technologies, companies,
+    project names) — biasing Deepgram toward them is the single biggest STT
+    accuracy lever available for personalized interviews.
+    """
+    resume = getattr(application, "resume", None)
+    if not resume:
+        return []
+    raw = getattr(resume, "parsed_structured_data", None)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(raw, dict):
+        return []
+
+    terms: List[str] = []
+
+    def _clean(value) -> Optional[str]:
+        text = str(value or "").strip()
+        # Keyterms must be 1-4 words to be useful biasing terms
+        if not text or len(text.split()) > 4:
+            return None
+        return text
+
+    skills = raw.get("skills") or {}
+    if isinstance(skills, dict):
+        for values in skills.values():
+            if isinstance(values, list):
+                for v in values:
+                    t = _clean(v)
+                    if t:
+                        terms.append(t)
+    elif isinstance(skills, list):
+        for v in skills:
+            t = _clean(v)
+            if t:
+                terms.append(t)
+
+    for job in raw.get("work_experience") or raw.get("experience") or []:
+        if isinstance(job, dict):
+            t = _clean(job.get("company") or job.get("name"))
+            if t:
+                terms.append(t)
+
+    for proj in raw.get("projects") or []:
+        if isinstance(proj, dict):
+            t = _clean(proj.get("name") or proj.get("title"))
+            if t:
+                terms.append(t)
+            for tech in proj.get("technologies") or proj.get("skills") or []:
+                t = _clean(tech)
+                if t:
+                    terms.append(t)
+
+    return terms
+
+
 async def get_session_keyterms(session_id: str) -> List[str]:
-    """Retrieve keyterms for the session from JobSkill names and blueprint sections.
+    """Retrieve keyterms for the session.
+
+    Priority order (highest transcription impact first):
+    1. Job competency names (the interview's scoring vocabulary)
+    2. Blueprint section skill names
+    3. Candidate resume vocabulary (technologies, companies, projects) —
+       these are the words the candidate will actually say
+    4. Acceptance keyterms ('exponential backoff', 'composite index', 'blue-green')
 
     Returns up to 20 unique keyterms (no weights).
-    Ensures acceptance keyterms ('exponential backoff', 'composite index', 'blue-green')
-    are included for verification.
     """
     keyterms: List[str] = []
     seen: Set[str] = set()
@@ -111,7 +178,7 @@ async def get_session_keyterms(session_id: str) -> List[str]:
             seen.add(lower)
             keyterms.append(cleaned)
 
-    # 1. Query database for session-specific skills and blueprint terms
+    # 1. Query database for session-specific skills, blueprint terms, and resume vocabulary
     try:
         async with AsyncSessionLocal() as db:
             result = await db.execute(
@@ -119,6 +186,7 @@ async def get_session_keyterms(session_id: str) -> List[str]:
                 .options(
                     selectinload(InterviewSession.job).selectinload(JobPosting.skills),
                     selectinload(InterviewSession.blueprint).selectinload(InterviewBlueprint.sections),
+                    selectinload(InterviewSession.application).selectinload(JobApplication.resume),
                 )
                 .filter(InterviewSession.id == session_id)
             )
@@ -132,6 +200,9 @@ async def get_session_keyterms(session_id: str) -> List[str]:
                     for section in session.blueprint.sections:
                         if section.skill_name:
                             add_term(section.skill_name)
+                if session.application:
+                    for term in _resume_keyterms(session.application):
+                        add_term(term)
     except Exception as e:
         logger.warning("Could not fetch session keyterms from database for %s: %s", session_id, e)
 

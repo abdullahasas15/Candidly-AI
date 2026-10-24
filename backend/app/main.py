@@ -10,9 +10,10 @@ import base64
 import hmac
 import re
 import time
+import uuid
 from dotenv import load_dotenv
 load_dotenv(override=True)
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
 from fastapi import BackgroundTasks, FastAPI, Depends, HTTPException, status, File, UploadFile, Form, Body, Response, Header
@@ -50,7 +51,8 @@ from backend.app.services.auth import (
     get_current_user, get_optional_current_user, require_role
 )
 from backend.app.services.resume_parser import (
-    extract_text_from_file, parse_structured_resume_data, detect_discrepancies
+    extract_text_from_file, parse_structured_resume_data, parse_resume_with_llm,
+    detect_discrepancies
 )
 from backend.app.services.question_generation.provider import check_ai_provider_health
 from backend.app.services.question_generation.persistence import generate_for_application
@@ -79,6 +81,10 @@ from backend.app.services.blueprint.contracts import (
     SuggestSkillsRequest,
     BlueprintUpdatePayload,
 )
+from backend.app.services.interview_v2.finalizer import (
+    finalize_interview_session,
+    sweep_pending_evaluations,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -102,6 +108,22 @@ class BlueprintGenerationTask:
 
 _ACTIVE_BLUEPRINT_TASKS: Dict[str, BlueprintGenerationTask] = {}
 _BLUEPRINT_GENERATION_LOCKS: dict[str, asyncio.Lock] = {}
+_BLUEPRINT_TASK_TTL_SECONDS = 3600  # terminal tasks are pruned after 1h so polling clients still see the result
+
+
+def _prune_terminal_blueprint_tasks() -> None:
+    """Drop completed/failed tasks past the TTL so finished blueprints don't
+    accumulate in process memory (each task retains a serialized blueprint)."""
+    now = time.time()
+    expired = [
+        job_id
+        for job_id, t in _ACTIVE_BLUEPRINT_TASKS.items()
+        if t.status != "in_progress" and now - t.updated_at > _BLUEPRINT_TASK_TTL_SECONDS
+    ]
+    for job_id in expired:
+        del _ACTIVE_BLUEPRINT_TASKS[job_id]
+    if expired:
+        logger.debug("Pruned %d expired blueprint generation tasks", len(expired))
 
 
 async def _run_blueprint_generation_background(
@@ -112,8 +134,13 @@ async def _run_blueprint_generation_background(
     skills_data: List[Dict[str, Any]],
     job_description: str,
     task: BlueprintGenerationTask,
+    recruiter_id: Optional[str] = None,
 ):
-    """Background worker for job blueprint generation with live progress reporting."""
+    """Background worker for job blueprint generation with live progress reporting.
+
+    Zero-touch flow: when generation finishes with no validation errors the
+    blueprint is approved automatically (warnings auto-confirmed). Recruiters
+    only see an approval step when they customize a generated blueprint."""
     try:
         def on_progress(stage: str, progress: float, section_data: Optional[Dict[str, Any]] = None):
             task.current_stage = stage
@@ -146,6 +173,31 @@ async def _run_blueprint_generation_background(
                 blueprint_data=blueprint_data,
                 auto_approve=False,
             )
+
+            # Zero-touch auto-approval: a freshly generated blueprint with no
+            # errors goes live immediately so the job accepts applications
+            # without any manual review step. Non-blocking warnings are quality
+            # signals for engineers, not decisions a recruiter needs to make.
+            report = (getattr(blueprint, "validation_report", None) or {})
+            if not report.get("errors"):
+                try:
+                    blueprint = await approve_job_blueprint(
+                        db=session,
+                        job_id=job_id,
+                        blueprint_id=blueprint.id,
+                        user_id=recruiter_id or getattr(curr_job, "recruiter_id", None),
+                        confirmed_warnings=True,
+                    )
+                    logger.info("Auto-approved blueprint %s for job %s", blueprint.id, job_id)
+                except Exception as appr_exc:
+                    # Generation itself succeeded; approval stays available in the UI.
+                    logger.warning("Auto-approval failed for job %s (recruiter can approve manually): %s", job_id, appr_exc)
+            else:
+                logger.warning(
+                    "Blueprint for job %s has validation errors; leaving as draft for manual fix: %s",
+                    job_id, report.get("errors"),
+                )
+
             task.blueprint = serialize_blueprint(blueprint, current_job=curr_job)
             task.status = "completed"
             task.progress = 1.0
@@ -220,6 +272,13 @@ async def lifespan(app: FastAPI):
                 "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS system_prompt_snapshot TEXT;",
                 "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS generation_run_id VARCHAR(36) REFERENCES interview_generation_runs(id) ON DELETE SET NULL;",
                 "ALTER TABLE interview_questions ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMP;",
+                # Exactly-one evaluation per session: dedupe legacy rows, then enforce uniqueness.
+                (
+                    "DELETE FROM interview_evaluations a USING interview_evaluations b "
+                    "WHERE a.session_id = b.session_id "
+                    "AND (a.created_at > b.created_at OR (a.created_at = b.created_at AND a.id > b.id));"
+                ),
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_interview_evaluations_session_id ON interview_evaluations (session_id);",
             ]
             for mig in migrations:
                 try:
@@ -277,7 +336,34 @@ async def lifespan(app: FastAPI):
     if os.getenv("SKIP_VOICE_WARMUP", "").lower() not in {"1", "true", "yes"}:
         asyncio.create_task(warmup_voice_models())
 
+    # Multi-worker guard: live runner state (ACTIVE_RUNNERS / SESSION_STATE_CACHE /
+    # disconnect-grace tasks) is process-local. Running more than one worker per
+    # instance without sticky WebSocket routing breaks reconnect resume and grace
+    # cancellation; the DB-backed ticket store alone is cross-worker safe.
+    web_concurrency = os.getenv("WEB_CONCURRENCY", "")
+    if web_concurrency.isdigit() and int(web_concurrency) > 1:
+        logger.warning(
+            "WEB_CONCURRENCY=%s detected. The live interview engine keeps per-session runner "
+            "state in-process. Run exactly ONE worker per instance (scale horizontally with a "
+            "sticky-routing load balancer) or reconnects and disconnect-grace cancels will misbehave.",
+            web_concurrency,
+        )
+
+    # Periodic sweeper: re-run evaluations stuck in pending (lost background task
+    # after restart, or a failed judge attempt) so scorecards never hang forever.
+    async def _evaluation_sweeper_loop() -> None:
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await sweep_pending_evaluations()
+            except Exception:
+                logger.exception("Evaluation sweeper loop error")
+
+    sweeper_task = asyncio.create_task(_evaluation_sweeper_loop())
+
     yield
+
+    sweeper_task.cancel()
     await engine.dispose()
 
 
@@ -310,7 +396,7 @@ async def _run_candidate_personalization(application_id: str) -> None:
             job = application.job
             if job.active_blueprint_id:
                 from backend.app.services.interview.personalization import generate_candidate_personalization
-                from backend.app.services.interview.plan_materializer import materialize_blueprint_session_plan
+                from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
 
                 # 1. Non-blocking candidate personalization
                 await generate_candidate_personalization(application.id, db)
@@ -336,8 +422,8 @@ async def _run_candidate_personalization(application_id: str) -> None:
                     db.add(session)
                     await db.flush()
 
-                # 3. Materialize runtime question plan from blueprint
-                await materialize_blueprint_session_plan(session, db)
+                # 3. Ensure authoritative ScriptPlan and synchronized question rows
+                await ensure_session_script_plan(db, session)
 
                 # 4. Record succeeded run so CandidateDashboard is_ready checks pass immediately
                 run_stmt = (
@@ -362,7 +448,7 @@ async def _run_candidate_personalization(application_id: str) -> None:
                     run.completed_at = datetime.utcnow()
 
                 await db.commit()
-                logger.info("Personalization and blueprint plan materialized for app %s", application.id)
+                logger.info("Personalization and script plan ensured for app %s", application.id)
             else:
                 # Fallback to legacy generator for jobs without blueprints
                 await generate_for_application(application_id, db)
@@ -370,13 +456,7 @@ async def _run_candidate_personalization(application_id: str) -> None:
         logger.exception("Candidate personalization/plan materialization failed for application %s", application_id)
 
 
-async def _run_evaluation_for_session(session_id: str) -> None:
-    """Run post-interview Judge evaluation off-request when a session completes."""
-    try:
-        async with AsyncSessionLocal() as session:
-            await evaluate_interview_session(session_id, session)
-    except Exception:
-        logger.exception("Post-interview evaluation failed for session %s", session_id)
+
 
 
 app = FastAPI(
@@ -386,10 +466,28 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware for local frontend development
+# CORS: '*' alongside allow_credentials=True is invalid per spec and leaks the API
+# to any origin. Dev defaults to the local Vite/Next ports; production must set
+# ALLOWED_ORIGINS explicitly.
+_extra_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if os.getenv("ENV", "development").lower() == "production":
+    if not _extra_origins:
+        logger.critical(
+            "ALLOWED_ORIGINS is not configured in production; cross-origin requests "
+            "from the frontend will be rejected by CORS."
+        )
+    _cors_origins = _extra_origins
+else:
+    _cors_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ] + _extra_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -447,12 +545,13 @@ def _public_job_payload(job: JobPosting) -> dict:
         "active_blueprint_id": job.active_blueprint_id,
         "blueprint_status": getattr(job, "blueprint_status", None),
         "blueprint_is_stale": getattr(job, "blueprint_is_stale", False),
+        "blueprint_has_errors": getattr(job, "blueprint_has_errors", False),
         "accepts_applications": getattr(job, "accepts_applications", False),
     }
 
 
 async def _enrich_jobs_with_blueprint_status(jobs: List[JobPosting], db: AsyncSession):
-    """Batch-enrich job instances with live blueprint status, staleness, and gate acceptance."""
+    """Batch-enrich job instances with live blueprint status, staleness, validation status, and gate acceptance."""
     bp_ids = [j.active_blueprint_id for j in jobs if j.active_blueprint_id]
     bp_map = {}
     if bp_ids:
@@ -466,12 +565,15 @@ async def _enrich_jobs_with_blueprint_status(jobs: List[JobPosting], db: AsyncSe
         if bp:
             curr_hash = compute_job_input_hash(job)
             is_stale = bp.is_stale or (bool(bp.input_hash) and bp.input_hash != curr_hash)
+            has_errors = bool((bp.validation_report or {}).get("errors"))
             job.blueprint_status = bp.status
             job.blueprint_is_stale = is_stale
-            job.accepts_applications = (bp.status == "approved" and not is_stale)
+            job.blueprint_has_errors = has_errors
+            job.accepts_applications = (bp.status == "approved" and not is_stale and not has_errors)
         else:
             job.blueprint_status = None
             job.blueprint_is_stale = False
+            job.blueprint_has_errors = False
             job.accepts_applications = False
 
 
@@ -518,11 +620,29 @@ def _candidate_application_payload(application: JobApplication) -> dict:
 
 @app.get("/api/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "service": "Candidly AI Platform Backend",
-        "database": "Connected"
-    }
+    """Liveness + real database readiness probe (used by frontend preflight)."""
+    started = time.perf_counter()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+        db_latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        return {
+            "status": "healthy",
+            "service": "Candidly AI Platform Backend",
+            "database": "Connected",
+            "database_latency_ms": db_latency_ms,
+        }
+    except Exception as exc:
+        logger.error("Health check database probe failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "unhealthy",
+                "service": "Candidly AI Platform Backend",
+                "database": "Disconnected",
+                "error": str(exc)[:200],
+            },
+        )
 
 @app.get("/api/health/ai")
 async def ai_health_check():
@@ -886,10 +1006,16 @@ async def suggest_skills_endpoint(
 async def get_job_blueprint_endpoint(
     job_id: str,
     version: Optional[int] = None,
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve active or latest blueprint for a job, enforcing ownership and candidate-safe redaction."""
+    current_user: Optional[User] = None
+    if authorization:
+        # If an Authorization header is provided, validate credentials strictly.
+        # Expired or invalid tokens must surface a 401 error, never silently fall back to public view.
+        current_user = await get_current_user(authorization=authorization, db=db)
+
     job_stmt = select(JobPosting).where(JobPosting.id == job_id).options(selectinload(JobPosting.skills))
     j_res = await db.execute(job_stmt)
     job = j_res.scalars().first()
@@ -897,7 +1023,7 @@ async def get_job_blueprint_endpoint(
         raise HTTPException(status_code=404, detail="Job posting not found")
 
     is_recruiter = current_user and current_user.role == "recruiter"
-    if is_recruiter and job.recruiter_id != current_user.id:
+    if is_recruiter and job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this job's blueprint."
@@ -949,7 +1075,7 @@ async def generate_blueprint_for_job_endpoint(
         raise HTTPException(status_code=404, detail="Job posting not found")
 
     # Security check: Recruiter must own the job
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to generate a blueprint for this job."
@@ -988,6 +1114,7 @@ async def generate_blueprint_for_job_endpoint(
     ]
 
     task = BlueprintGenerationTask(job_id)
+    _prune_terminal_blueprint_tasks()
     _ACTIVE_BLUEPRINT_TASKS[job_id] = task
 
     asyncio.create_task(
@@ -999,6 +1126,7 @@ async def generate_blueprint_for_job_endpoint(
             skills_data=skills_data,
             job_description=job.job_description or "",
             task=task,
+            recruiter_id=current_user.id,
         )
     )
 
@@ -1033,7 +1161,7 @@ async def get_blueprint_generation_status_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this job's blueprint status."
@@ -1100,7 +1228,7 @@ async def update_job_blueprint_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to modify this blueprint."
@@ -1135,7 +1263,7 @@ async def regenerate_blueprint_section_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to modify this blueprint."
@@ -1169,7 +1297,7 @@ async def approve_job_blueprint_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to approve a blueprint for this job."
@@ -1208,7 +1336,7 @@ async def list_job_blueprint_versions_endpoint(
     if not job:
         raise HTTPException(status_code=404, detail="Job posting not found")
 
-    if job.recruiter_id != current_user.id:
+    if job.recruiter_id and job.recruiter_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this job's blueprint history."
@@ -1339,6 +1467,15 @@ async def create_interview_session(
         system_prompt_snapshot=payload.system_prompt_snapshot
     )
     db.add(session)
+    await db.flush()
+
+    if application.job and application.job.active_blueprint_id and payload.status != "practice":
+        from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
+        try:
+            await ensure_session_script_plan(db, session)
+        except Exception as e:
+            logger.warning("Could not auto-generate plan during session creation: %s", e)
+
     await db.commit()
 
     stmt = (
@@ -1349,6 +1486,7 @@ async def create_interview_session(
             selectinload(InterviewSession.job),
         )
         .where(InterviewSession.id == session.id)
+        .execution_options(populate_existing=True)
     )
     res = await db.execute(stmt)
     created_session = res.scalars().first()
@@ -1381,9 +1519,29 @@ async def get_application_interview_session(
         .order_by(InterviewSession.created_at.desc())
     )
     session = (await db.execute(session_stmt)).scalars().first()
-    if not session:
+    if session:
+        is_blueprint_backed = bool(application.job and application.job.active_blueprint_id)
+        has_plan = bool(session.runtime_state and session.runtime_state.get("script_plan"))
+        has_questions = bool(session.questions)
+        if is_blueprint_backed and session.status == "scheduled" and (not has_plan or not has_questions):
+            from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
+            await ensure_session_script_plan(db, session)
+            await db.commit()
+            # Re-select with relationships to avoid stale cached objects
+            session_stmt_fresh = (
+                select(InterviewSession)
+                .where(InterviewSession.id == session.id)
+                .options(
+                    selectinload(InterviewSession.questions),
+                    selectinload(InterviewSession.application),
+                    selectinload(InterviewSession.job),
+                )
+                .execution_options(populate_existing=True)
+            )
+            session = (await db.execute(session_stmt_fresh)).scalars().first()
+    elif not session:
         if application.job and application.job.active_blueprint_id:
-            from backend.app.services.interview.plan_materializer import materialize_blueprint_session_plan
+            from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
             new_sess = InterviewSession(
                 application_id=application_id,
                 job_id=application.job_id,
@@ -1393,9 +1551,19 @@ async def get_application_interview_session(
             )
             db.add(new_sess)
             await db.flush()
-            await materialize_blueprint_session_plan(new_sess, db)
+            await ensure_session_script_plan(db, new_sess)
             await db.commit()
-            session = new_sess
+            session_stmt_fresh = (
+                select(InterviewSession)
+                .where(InterviewSession.id == new_sess.id)
+                .options(
+                    selectinload(InterviewSession.questions),
+                    selectinload(InterviewSession.application),
+                    selectinload(InterviewSession.job),
+                )
+                .execution_options(populate_existing=True)
+            )
+            session = (await db.execute(session_stmt_fresh)).scalars().first()
         else:
             run_stmt = (
                 select(InterviewGenerationRun)
@@ -1455,6 +1623,31 @@ async def start_interview_session(
     session = (await db.execute(stmt)).scalars().first()
     if not session or not session.application or session.application.candidate_id != current_user.id:
         raise HTTPException(status_code=404, detail="Interview session not found")
+    if session.status in (SessionState.COMPLETED.value, SessionState.CANCELLED.value):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot start interview session with terminal status '{session.status}'",
+        )
+    is_blueprint_backed = bool(session.job and session.job.active_blueprint_id)
+    has_plan = bool(session.runtime_state and session.runtime_state.get("script_plan"))
+    has_questions = bool(session.questions)
+    if is_blueprint_backed and (not has_plan or not has_questions):
+        from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
+        await ensure_session_script_plan(db, session)
+        await db.flush()
+        # Refresh relationships after plan sync
+        session_stmt_refresh = (
+            select(InterviewSession)
+            .where(InterviewSession.id == session.id)
+            .options(
+                selectinload(InterviewSession.questions),
+                selectinload(InterviewSession.application),
+                selectinload(InterviewSession.job),
+            )
+            .execution_options(populate_existing=True)
+        )
+        session = (await db.execute(session_stmt_refresh)).scalars().first()
+
     try:
         if session.status == SessionState.SCHEDULED.value:
             session.status = transition_session(session.status, SessionState.PREFLIGHT)
@@ -1481,6 +1674,7 @@ async def start_interview_session(
             selectinload(InterviewSession.application),
             selectinload(InterviewSession.job),
         )
+        .execution_options(populate_existing=True)
     )
     response_session = (await db.execute(response_stmt)).scalars().first()
     return CandidateInterviewSessionResponse.model_validate(response_session).model_dump(mode="json")
@@ -2089,55 +2283,117 @@ async def get_interview_live_status(
 async def end_interview_session(
     session_id: str,
     background_tasks: BackgroundTasks,
-    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = (
         select(InterviewSession)
         .where(InterviewSession.id == session_id)
-        .options(selectinload(InterviewSession.application))
+        .options(
+            selectinload(InterviewSession.application),
+            selectinload(InterviewSession.job),
+        )
     )
     session = (await db.execute(stmt)).scalars().first()
     if not session:
         raise HTTPException(status_code=404, detail="Interview session not found")
 
-    session.status = "completed"
-    session.current_phase = "completed"
-    session.completed_at = datetime.utcnow()
+    is_candidate = (
+        session.application
+        and (
+            session.application.candidate_id == current_user.id
+            or (session.application.email and session.application.email.lower() == current_user.email.lower())
+        )
+    )
+    is_recruiter = (
+        session.job
+        and session.job.recruiter_id == current_user.id
+    )
+    is_admin = current_user.role == "admin"
 
-    if not session.is_practice:
-        if session.application:
-            session.application.status = "interview_completed"
-        if session.application_id:
-            await db.execute(
-                update(JobApplication)
-                .where(JobApplication.id == session.application_id)
-                .values(status="interview_completed")
-            )
+    if not (is_candidate or is_recruiter or is_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to end this interview session.",
+        )
+
+    from backend.app.services.interview_v2.router import ACTIVE_RUNNERS
 
     actor_email = current_user.email if current_user else "candidate"
-    await record_audit(
-        db,
-        current_user,
-        "interview.ended",
-        session_id=session.id,
-        application_id=session.application_id,
-        metadata={"ended_by": actor_email},
+    res = await finalize_interview_session(
+        session_id,
+        ended_by=actor_email,
+        current_user=current_user,
+        db=db,
+        background_tasks=background_tasks,
     )
-    await db.commit()
 
-    # Clean up runner in live_interview_manager
+    # Clean up runner in ACTIVE_RUNNERS (V2) and interview_manager (V1)
+    runner = ACTIVE_RUNNERS.pop(session_id, None)
+    if runner:
+        try:
+            await runner.stop()
+        except Exception as e:
+            logger.warning("Error stopping active V2 runner for %s: %s", session_id, e)
+
     await interview_manager.cleanup_session(session_id)
 
-    # Trigger post-interview Judge evaluation in background
-    if background_tasks is not None and not session.is_practice:
-        background_tasks.add_task(_run_evaluation_for_session, session.id)
+    return res
 
+
+@app.post("/api/interview-sessions/{session_id}/ws-ticket")
+async def create_interview_ws_ticket(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a short-lived signed WebSocket ticket bound to the session and user identity."""
+    stmt = (
+        select(InterviewSession)
+        .where(InterviewSession.id == session_id)
+        .options(
+            selectinload(InterviewSession.application),
+            selectinload(InterviewSession.job),
+        )
+    )
+    session = (await db.execute(stmt)).scalars().first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+
+    is_candidate = (
+        session.application
+        and (
+            session.application.candidate_id == current_user.id
+            or (session.application.email and session.application.email.lower() == current_user.email.lower())
+        )
+    )
+    is_recruiter = (
+        session.job
+        and session.job.recruiter_id == current_user.id
+    )
+    is_admin = current_user.role == "admin"
+
+    if not (is_candidate or is_recruiter or is_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this interview session.",
+        )
+
+    ticket = create_access_token(
+        {
+            "sub": current_user.id,
+            "email": current_user.email,
+            "role": current_user.role,
+            "session_id": session.id,
+            "type": "ws_ticket",
+            "jti": uuid.uuid4().hex,
+        },
+        expires_delta=timedelta(minutes=5),
+    )
     return {
-        "status": "completed",
+        "ticket": ticket,
         "session_id": session.id,
-        "application_id": session.application_id,
-        "message": "Interview session ended and marked as completed.",
+        "expires_in": 300,
     }
 
 
@@ -2147,17 +2403,18 @@ async def create_practice_interview(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a short 2-question practice interview on a generic role so candidates can warm up (Part G4)."""
-    # Find any active job or create a generic practice job
-    job_stmt = select(JobPosting).order_by(JobPosting.created_at.desc()).limit(1)
+    # Find dedicated practice job or create one
+    job_stmt = select(JobPosting).where(JobPosting.status == "practice").order_by(JobPosting.created_at.asc()).limit(1)
     job = (await db.execute(job_stmt)).scalars().first()
     if not job:
         job = JobPosting(
             job_title="Practice Software Engineer",
-            department="Engineering",
+            department="Practice",
             job_description="Practice interview environment for candidates.",
             seniority_level="Mid-Level (L4)",
             interview_duration_mins=5,
             status="practice",
+            recruiter_id=None,
         )
         db.add(job)
         await db.flush()
@@ -2180,6 +2437,9 @@ async def create_practice_interview(
         )
         db.add(practice_app)
         await db.flush()
+    elif practice_app.job_id != job.id:
+        practice_app.job_id = job.id
+        await db.flush()
 
     brief = (
         "=== CANDIDLY PRACTICE INTERVIEW BRIEF ===\n"
@@ -2188,27 +2448,16 @@ async def create_practice_interview(
         "1. Speak 1-2 short sentences maximum. Plain spoken English only.\n"
         "2. Ask at most ONE question per turn."
     )
-    session = InterviewSession(
-        application_id=practice_app.id,
-        job_id=job.id,
-        status="scheduled",
-        total_questions_planned=2,
-        duration_planned_mins=8,  # R3.5b: scripted flow (welcome + ready gate + intro) adds ~2min before answers; 5min aborted sessions mid-flow
-        gemini_model_used=os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite"),
-        system_prompt_snapshot=brief,
-        interviewer_brief=brief,
-        is_practice=True,
-    )
-    db.add(session)
-    await db.flush()
 
     practice_questions = [
-        # R3.5b: kinded questions so the practice warm-up runs the SAME scripted
+        # Kinded questions so the practice warm-up runs the SAME scripted
         # flow as real interviews — welcome ("Ready to begin?" gate) -> intro ->
-        # anchors -> candidate_qa -> closing. Admin kinds need no skill grouping.
+        # anchors -> candidate_qa -> closing.
         (
+            # Leave the spoken script to the conductor so the welcome includes
+            # the practice role title and the actual planned duration.
             "welcome", "",
-            "(Welcome agenda is spoken by the coordinator greeting.)", [],
+            "(Welcome agenda is spoken here)", [],
         ),
         (
             "intro_hook", "",
@@ -2234,6 +2483,20 @@ async def create_practice_interview(
             "Thanks so much for your time today. We'll be in touch shortly with next steps!", [],
         ),
     ]
+
+    session = InterviewSession(
+        application_id=practice_app.id,
+        job_id=job.id,
+        status="scheduled",
+        total_questions_planned=len(practice_questions),
+        duration_planned_mins=5,
+        gemini_model_used=os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite"),
+        system_prompt_snapshot=brief,
+        interviewer_brief=brief,
+        is_practice=True,
+    )
+    db.add(session)
+    await db.flush()
     for idx, (kind, sname, qtext, kps) in enumerate(practice_questions):
         db.add(
             InterviewQuestion(
@@ -2412,7 +2675,7 @@ async def list_candidate_applications(
             and app.job.active_blueprint_id
         ):
             try:
-                from backend.app.services.interview.plan_materializer import materialize_blueprint_session_plan
+                from backend.app.services.interview_v2.plan_writer import ensure_session_script_plan
 
                 session = InterviewSession(
                     application_id=app.id,
@@ -2423,7 +2686,7 @@ async def list_candidate_applications(
                 )
                 db.add(session)
                 await db.flush()
-                await materialize_blueprint_session_plan(session, db)
+                await ensure_session_script_plan(db, session)
                 await db.commit()
                 logger.info("Self-healed session plan inline for application %s (generation already succeeded)", app.id)
             except Exception:
@@ -2617,7 +2880,9 @@ async def apply_to_job(
     await _enrich_jobs_with_blueprint_status([job], db)
     if not getattr(job, "accepts_applications", False):
         detail = "This job is not accepting applications yet. Requires an approved, up-to-date interview blueprint."
-        if getattr(job, "blueprint_is_stale", False):
+        if getattr(job, "blueprint_has_errors", False):
+            detail = "This job is not accepting applications yet. The interview blueprint has unresolved validation errors and requires recruiter repair."
+        elif getattr(job, "blueprint_is_stale", False):
             detail = "This job is not accepting applications yet. The interview blueprint is stale and requires recruiter re-approval."
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
@@ -2770,8 +3035,11 @@ async def upload_application_resume(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(e)}")
 
-    # 5. Extract Structured Data
-    structured_data = parse_structured_resume_data(extracted_text)
+    # 5. Extract Structured Data — hybrid: deterministic regex base + LLM
+    # (Bedrock Nova-Pro primary, Gemini failover) for semantic fields. Contact
+    # info and experience-year math stay deterministic; any LLM failure falls
+    # back to the regex result so uploads are never blocked.
+    structured_data = await parse_resume_with_llm(extracted_text)
 
     # Auto-populate application coordinates if empty
     contact_info = structured_data.get("contact_info", {})

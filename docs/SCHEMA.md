@@ -31,6 +31,7 @@
 - [role_templates (`RoleTemplate`)](#role_templates)
 - [session_expectation_coverage (`SessionExpectationCoverage`)](#session_expectation_coverage)
 - [users (`User`)](#users)
+- [websocket_ticket_uses (`WebSocketTicketUse`)](#websocket_ticket_uses)
 
 ---
 
@@ -57,8 +58,8 @@ instance that has no instance attributes and cannot be given any.*
 **Indexes:**
 - `ix_audit_events_application_id` on (`application_id`)
 - `ix_audit_events_actor_id` on (`actor_id`)
-- `ix_audit_events_created_at` on (`created_at`)
 - `ix_audit_events_job_id` on (`job_id`)
+- `ix_audit_events_created_at` on (`created_at`)
 - `ix_audit_events_event_type` on (`event_type`)
 - `ix_audit_events_session_id` on (`session_id`)
 
@@ -207,7 +208,7 @@ instance that has no instance attributes and cannot be given any.*
 | `id` | `VARCHAR(36)` | NO | ✓ | `<lambda>()` | - | - |
 | `application_id` | `VARCHAR(36)` | NO |  | - | `job_applications.id` (ondelete: CASCADE) | Indexed, Unique |
 | `blueprint_id` | `VARCHAR(36)` | YES |  | - | `interview_blueprints.id` (ondelete: SET NULL) | - |
-| `status` | `VARCHAR(20)` | NO |  | `'completed'` | - | - |
+| `status` | `VARCHAR(20)` | NO |  | `completed` | - | - |
 | `input_hash` | `VARCHAR(64)` | YES |  | - | - | Indexed |
 | `intro_hook` | `TEXT` | NO |  | - | - | - |
 | `deep_dive_project` | `JSON` | YES |  | `dict()` | - | - |
@@ -303,7 +304,7 @@ instance that has no instance attributes and cannot be given any.*
 | Column | Type | Nullable | Primary Key | Default / Server Default | Foreign Key | Indexes / Notes |
 |---|---|---|---|---|---|---|
 | `id` | `VARCHAR(36)` | NO | ✓ | `<lambda>()` | - | - |
-| `session_id` | `VARCHAR(36)` | NO |  | - | `interview_sessions.id` (ondelete: CASCADE) | Indexed |
+| `session_id` | `VARCHAR(36)` | NO |  | - | `interview_sessions.id` (ondelete: CASCADE) | Indexed, Unique |
 | `application_id` | `VARCHAR(36)` | NO |  | - | `job_applications.id` (ondelete: CASCADE) | Indexed |
 | `job_id` | `VARCHAR(36)` | NO |  | - | `job_postings.id` (ondelete: CASCADE) | Indexed |
 | `status` | `VARCHAR(20)` | NO |  | `pending` | - | - |
@@ -325,8 +326,8 @@ instance that has no instance attributes and cannot be given any.*
 
 **Indexes:**
 - `ix_interview_evaluations_job_id` on (`job_id`)
-- `ix_interview_evaluations_session_id` on (`session_id`)
 - `ix_interview_evaluations_application_id` on (`application_id`)
+- `ix_interview_evaluations_session_id` (Unique) on (`session_id`)
 
 **Relationships:**
 - `session` -> `interview_sessions` (MANYTOONE)
@@ -354,8 +355,8 @@ instance that has no instance attributes and cannot be given any.*
 | `created_at` | `DATETIME` | YES |  | `utcnow()` | - | - |
 
 **Indexes:**
-- `ix_interview_feedback_session_id` on (`session_id`)
 - `ix_interview_feedback_application_id` on (`application_id`)
+- `ix_interview_feedback_session_id` on (`session_id`)
 
 **Relationships:**
 - `session` -> `interview_sessions` (MANYTOONE)
@@ -900,5 +901,28 @@ instance that has no instance attributes and cannot be given any.*
 - `posted_jobs` -> `job_postings` (ONETOMANY)
 - `applications` -> `candidate_applications` (ONETOMANY)
 - `job_applications` -> `job_applications` (ONETOMANY)
+
+---
+
+### <a id="websocket_ticket_uses"></a> `websocket_ticket_uses` (Model: `WebSocketTicketUse`)
+
+*Single-use consumption record for short-lived WebSocket tickets.
+
+The ticket id is a unique primary key, so concurrent replays race on a
+database constraint rather than on process-local memory. This makes replay
+protection effective across multiple server workers.*
+
+| Column | Type | Nullable | Primary Key | Default / Server Default | Foreign Key | Indexes / Notes |
+|---|---|---|---|---|---|---|
+| `ticket_id` | `VARCHAR(64)` | NO | ✓ | - | - | - |
+| `session_id` | `VARCHAR(128)` | NO |  | - | - | Indexed |
+| `user_id` | `VARCHAR(128)` | YES |  | - | - | Indexed |
+| `expires_at` | `DATETIME` | NO |  | - | - | Indexed |
+| `consumed_at` | `DATETIME` | NO |  | `utcnow()` | - | - |
+
+**Indexes:**
+- `ix_websocket_ticket_uses_expires_at` on (`expires_at`)
+- `ix_websocket_ticket_uses_user_id` on (`user_id`)
+- `ix_websocket_ticket_uses_session_id` on (`session_id`)
 
 ---

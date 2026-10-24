@@ -25,6 +25,7 @@ from backend.app.services.blueprint.prompts import (
     build_repair_user_prompt,
 )
 from backend.app.services.blueprint.validator import (
+    extract_keywords,
     validate_skill_section,
     validate_blueprint,
 )
@@ -33,98 +34,424 @@ from backend.app.services.blueprint.seniority_config import normalize_seniority
 logger = logging.getLogger(__name__)
 
 
-def _normalize_skill_section_data(raw_data: Any, fallback_skill_name: str, seniority_level: str = "mid") -> SkillSectionContent:
-    """Robustly normalize and parse raw LLM output into SkillSectionContent."""
-    if isinstance(raw_data, SkillSectionContent):
-        return raw_data
+class SectionContentError(ValueError):
+    """Raised when model output cannot be normalized into a complete section.
 
-    if isinstance(raw_data, str):
-        cleaned = raw_data.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned)
-        try:
-            data = json.loads(cleaned)
-        except Exception:
-            match = re.search(r"(\{.*\})", cleaned, re.DOTALL)
-            if match:
-                data = json.loads(match.group(1))
-            else:
-                raise ValueError(f"Could not parse JSON from model output: {cleaned[:100]}...")
-    elif isinstance(raw_data, dict):
-        data = raw_data
-    else:
-        raise ValueError(f"Expected dict or JSON string, got {type(raw_data)}")
+    The payload is retained so the generator can send it back to the model for
+    a targeted repair pass. We never substitute generic placeholder questions.
+    """
 
-    skill_name = str(data.get("skill_name") or data.get("name") or fallback_skill_name).strip()
+    def __init__(self, errors: List[str], payload: Optional[Dict[str, Any]] = None):
+        self.errors = errors or ["Section output is incomplete"]
+        self.payload = payload or {}
+        super().__init__("; ".join(self.errors))
 
-    # Normalize expectations
-    raw_exp = data.get("expectations", [])
-    norm_exp = []
-    if isinstance(raw_exp, list):
-        for e in raw_exp:
-            if isinstance(e, str):
-                norm_exp.append({
-                    "expectation_text": e.strip(),
-                    "source_rubric_level": "L4",
-                    "importance": "core",
-                })
-            elif isinstance(e, dict):
-                text = e.get("expectation_text") or e.get("text") or e.get("description") or e.get("expectation") or ""
-                level = e.get("source_rubric_level") or e.get("rubric_level") or e.get("level") or "L4"
-                imp = e.get("importance") or e.get("tier") or e.get("priority") or "core"
-                if imp not in ("core", "stretch"):
-                    imp = "stretch" if "stretch" in str(imp).lower() else "core"
-                if text:
-                    norm_exp.append({
-                        "expectation_text": str(text).strip(),
-                        "source_rubric_level": str(level).strip(),
-                        "importance": imp,
-                    })
-    if len(norm_exp) < 2:
-        norm_exp.append({
-            "expectation_text": f"Demonstrates core competencies and practical judgment in {skill_name}",
-            "source_rubric_level": "L3",
-            "importance": "core",
-        })
-        norm_exp.append({
-            "expectation_text": f"Applies best practices, handles edge cases and operational constraints in {skill_name}",
-            "source_rubric_level": "L4",
-            "importance": "stretch",
-        })
 
-    def _norm_q(q_data: Any, default_role: str, default_trigger: Optional[str] = None) -> dict:
-        if isinstance(q_data, str):
-            txt = q_data.strip()
-            if txt and not txt.endswith("?"):
-                txt = re.sub(r"[\.\s]+$", "", txt) + "?"
-            return {
-                "question_role": default_role,
-                "question_text": txt,
-                "trigger_condition": default_trigger,
-                "target_expectation_indices": [0],
-            }
-        elif isinstance(q_data, dict):
-            q_text = str(q_data.get("question_text") or q_data.get("text") or q_data.get("question") or q_data.get("prompt") or "").strip()
-            if q_text and not q_text.endswith("?"):
-                q_text = re.sub(r"[\.\s]+$", "", q_text) + "?"
-            role = q_data.get("question_role") or q_data.get("role") or q_data.get("kind") or default_role
-            trig = q_data.get("trigger_condition") or q_data.get("trigger") or q_data.get("condition") or default_trigger
-            indices = q_data.get("target_expectation_indices") or q_data.get("target_expectations") or q_data.get("target_indices") or [0]
-            if not isinstance(indices, list):
-                indices = [0]
-            return {
-                "question_role": str(role).strip(),
-                "question_text": q_text,
-                "trigger_condition": str(trig).strip() if trig else None,
-                "target_expectation_indices": [int(x) for x in indices if str(x).isdigit()],
-            }
+def _as_clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_rubric_level(value: Any, default: str = "L4") -> str:
+    raw = _as_clean_text(value)
+    match = re.search(r"([1-5])", raw)
+    return f"L{match.group(1)}" if match else default
+
+
+def _expectation_importance(item: Dict[str, Any]) -> str:
+    for key in ("stretch", "is_stretch", "stretch_expectation"):
+        if key in item:
+            value = item.get(key)
+            if isinstance(value, bool):
+                return "stretch" if value else "core"
+            if str(value).strip().lower() in {"true", "yes", "1", "stretch"}:
+                return "stretch"
+
+    raw = (
+        item.get("importance")
+        or item.get("tier")
+        or item.get("priority")
+        or item.get("expectation_type")
+        or "core"
+    )
+    cleaned = str(raw).strip().lower()
+    return "stretch" if "stretch" in cleaned or "optional" in cleaned or "nice" in cleaned else "core"
+
+
+def _normalize_expectation_item(
+    item: Any,
+    default_level: Optional[str] = None,
+    default_importance: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    if isinstance(item, str):
+        text = item.strip()
+        if not text:
+            return None
         return {
-            "question_role": default_role,
-            "question_text": f"How do you handle key engineering challenges in {skill_name}?",
-            "trigger_condition": default_trigger,
-            "target_expectation_indices": [0],
+            "expectation_text": text,
+            "source_rubric_level": _normalize_rubric_level(default_level),
+            "importance": default_importance or "core",
         }
+
+    if not isinstance(item, dict):
+        return None
+
+    text = (
+        item.get("expectation_text")
+        or item.get("text")
+        or item.get("description")
+        or item.get("expectation")
+        or item.get("criterion")
+        or item.get("requirement")
+        or ""
+    )
+    text = str(text).strip()
+    if not text:
+        return None
+
+    level = (
+        item.get("source_rubric_level")
+        or item.get("rubric_level")
+        or item.get("level")
+        or item.get("target_level")
+        or default_level
+    )
+    importance = _expectation_importance(item)
+    if default_importance and not any(
+        key in item for key in ("importance", "tier", "priority", "stretch", "is_stretch")
+    ):
+        importance = default_importance
+
+    return {
+        "expectation_text": text,
+        "source_rubric_level": _normalize_rubric_level(level),
+        "importance": importance,
+    }
+
+
+def _apply_expectation_caps(expectations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep a deterministic 3-core / 2-stretch maximum without dropping content.
+
+    Extra core items are reclassified as stretch (and vice versa) because the
+    model commonly marks advanced L4/L5 items as core. If more than five items
+    are returned, the tail is dropped and target indices are clamped later.
+    """
+    items = list(expectations[:5])
+    if not items:
+        return items
+
+    selected: List[Dict[str, Any]] = []
+    deferred: List[Dict[str, Any]] = []
+    core_count = 0
+    stretch_count = 0
+
+    for original_index, item in enumerate(items):
+        marked = dict(item)
+        marked["_original_index"] = original_index
+        if marked.get("importance") == "stretch" and stretch_count < 2:
+            selected.append(marked)
+            stretch_count += 1
+        elif marked.get("importance") == "core" and core_count < 3:
+            selected.append(marked)
+            core_count += 1
+        else:
+            deferred.append(marked)
+
+    for item in deferred:
+        if core_count < 3:
+            item["importance"] = "core"
+            selected.append(item)
+            core_count += 1
+        elif stretch_count < 2:
+            item["importance"] = "stretch"
+            selected.append(item)
+            stretch_count += 1
+        else:
+            break
+
+    selected.sort(key=lambda x: x["_original_index"])
+    for item in selected:
+        item.pop("_original_index", None)
+
+    if selected and not any(item["importance"] == "core" for item in selected):
+        selected[0]["importance"] = "core"
+    return selected
+
+
+_QUESTION_ROLE_ALIASES = {
+    "anchor": "anchor",
+    "anchor_question": "anchor",
+    "primary": "anchor",
+    "primary_question": "anchor",
+    "main_question": "anchor",
+    "opening_question": "anchor",
+    "base_question": "anchor",
+    "anchor_alt": "anchor_alt",
+    "anchor_alternative": "anchor_alt",
+    "alternate_anchor": "anchor_alt",
+    "alternative_question": "anchor_alt",
+    "hypothetical": "anchor_alt",
+    "hypothetical_question": "anchor_alt",
+    "simpler_question": "anchor_alt",
+    "fallback_question": "anchor_alt",
+    "escalation": "escalation",
+    "escalation_question": "escalation",
+    "escalated_question": "escalation",
+    "deeper_question": "escalation",
+    "probe": "probe",
+    "probe_question": "probe",
+    "follow_up": "probe",
+    "followup": "probe",
+    "follow_up_question": "probe",
+    "followup_probe": "probe",
+    "clarifying_question": "probe",
+}
+
+
+def _canonical_question_role(value: Any) -> str:
+    raw = re.sub(r"[^a-z0-9]+", "_", _as_clean_text(value).lower()).strip("_")
+    if raw in _QUESTION_ROLE_ALIASES:
+        return _QUESTION_ROLE_ALIASES[raw]
+    if "anchor" in raw and any(part in raw for part in ("alt", "alternative", "hypo", "simpl", "fallback")):
+        return "anchor_alt"
+    if "anchor" in raw:
+        return "anchor"
+    if "escal" in raw or "deeper" in raw:
+        return "escalation"
+    if any(part in raw for part in ("probe", "follow", "clarif")):
+        return "probe"
+    return ""
+
+
+def _normalize_target_indices(value: Any, expectation_count: int) -> List[int]:
+    raw_values: List[Any]
+    if isinstance(value, list):
+        raw_values = value
+    elif isinstance(value, tuple):
+        raw_values = list(value)
+    elif value is None:
+        raw_values = []
+    elif isinstance(value, str):
+        raw_values = re.findall(r"\d+", value)
+    else:
+        raw_values = [value]
+
+    indices: List[int] = []
+    for raw in raw_values:
+        try:
+            idx = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if expectation_count > 0:
+            idx = max(0, min(idx, expectation_count - 1))
+        if idx not in indices:
+            indices.append(idx)
+    return indices or [0]
+
+
+def _repair_definition_first_question(text: str) -> str:
+    """Rewrite a definition-first opening into a conversational question.
+
+    This preserves the model's content and only changes the opening, so it is
+    not a prewritten substitute question.
+    """
+    lower = text.lower()
+    for prefix in (
+        "what's the difference between ",
+        "what is the difference between ",
+        "what are the differences between ",
+    ):
+        if lower.startswith(prefix):
+            return "Could you walk me through the difference between " + text[len(prefix):]
+    for prefix in ("what is ", "what are ", "define ", "can you define "):
+        if lower.startswith(prefix):
+            return "Could you walk me through " + text[len(prefix):]
+    return text
+
+
+def _ground_probe_trigger_conditions(content: SkillSectionContent) -> int:
+    """Make probe triggers explicit when a probe names rubric techniques.
+
+    The validator correctly rejects a probe that names a technique the
+    candidate has not raised. Rather than repeatedly failing generation for a
+    metadata omission, extend the trigger to require that exact mention. The
+    probe wording itself is never replaced.
+    """
+    repairs = 0
+    expectations = [e.expectation_text for e in content.expectations]
+    for probe in content.probes:
+        probe_keywords = extract_keywords(probe.question_text)
+        trigger = probe.trigger_condition or ""
+        trigger_keywords = extract_keywords(trigger)
+        for expectation_text in expectations:
+            named = probe_keywords.intersection(extract_keywords(expectation_text))
+            untriggered = named - trigger_keywords
+            if len(untriggered) >= 2:
+                cleaned_trigger = trigger.rstrip(". ")
+                if cleaned_trigger:
+                    probe.trigger_condition = (
+                        f"{cleaned_trigger}, specifically mentioning "
+                        f"{' and '.join(sorted(untriggered))}."
+                    )
+                else:
+                    probe.trigger_condition = (
+                        "Candidate specifically mentions " + " and ".join(sorted(untriggered)) + "."
+                    )
+                repairs += 1
+                break
+    return repairs
+
+
+def _normalize_question_item(
+    item: Any,
+    default_role: str = "",
+    default_trigger: Optional[str] = None,
+    expectation_count: int = 0,
+) -> Optional[Dict[str, Any]]:
+    if isinstance(item, list):
+        for candidate in item:
+            normalized = _normalize_question_item(candidate, default_role, default_trigger, expectation_count)
+            if normalized and normalized.get("question_text"):
+                return normalized
+        return None
+
+    if isinstance(item, str):
+        text = item.strip()
+        role = default_role
+        trigger = default_trigger
+        indices: Any = [0]
+    elif isinstance(item, dict):
+        text = _as_clean_text(
+            item.get("question_text")
+            or item.get("question")
+            or item.get("text")
+            or item.get("prompt")
+            or item.get("wording")
+        )
+        role = _canonical_question_role(
+            item.get("question_role")
+            or item.get("role")
+            or item.get("kind")
+            or item.get("type")
+            or default_role
+        ) or default_role
+        trigger = (
+            item.get("trigger_condition")
+            or item.get("trigger")
+            or item.get("condition")
+            or item.get("when")
+            or default_trigger
+        )
+        indices = (
+            item.get("target_expectation_indices")
+            or item.get("target_expectations")
+            or item.get("target_indices")
+            or item.get("target_expectation_index")
+            or [0]
+        )
+    else:
+        return None
+
+    if not text:
+        return None
+    text = text.strip()
+    if text.endswith("?"):
+        text = re.sub(r"\?+$", "?", text)
+    else:
+        text = re.sub(r"[\.\s]+$", "", text) + "?"
+    text = _repair_definition_first_question(text)
+    if not text.endswith("?"):
+        text = text.rstrip("?") + "?"
+
+    return {
+        "question_role": role,
+        "question_text": text,
+        "trigger_condition": str(trigger).strip() if trigger else None,
+        "target_expectation_indices": _normalize_target_indices(indices, expectation_count),
+    }
+
+
+def _extract_expectations(raw_exp: Any) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+
+    if isinstance(raw_exp, dict):
+        if any(k in raw_exp for k in ("expectation_text", "text", "description", "expectation")):
+            single = _normalize_expectation_item(raw_exp)
+            return [single] if single else []
+        for group_key, group_value in raw_exp.items():
+            level_default = group_key if re.fullmatch(r"l?[1-5]", str(group_key).lower()) else None
+            importance_default = None
+            if str(group_key).lower() in {"core", "stretch"}:
+                importance_default = str(group_key).lower()
+            values = group_value if isinstance(group_value, list) else [group_value]
+            for value in values:
+                normalized = _normalize_expectation_item(
+                    value,
+                    default_level=level_default,
+                    default_importance=importance_default,
+                )
+                if normalized:
+                    items.append(normalized)
+        return items
+
+    if isinstance(raw_exp, list):
+        for value in raw_exp:
+            normalized = _normalize_expectation_item(value)
+            if normalized:
+                items.append(normalized)
+        return items
+
+    normalized = _normalize_expectation_item(raw_exp)
+    return [normalized] if normalized else []
+
+
+def _parse_section_json(raw_data: Any) -> Dict[str, Any]:
+    if isinstance(raw_data, SkillSectionContent):
+        return raw_data.model_dump()
+    if isinstance(raw_data, dict):
+        return raw_data
+    if not isinstance(raw_data, str):
+        raise ValueError(f"Expected a JSON object or string, got {type(raw_data)}")
+
+    cleaned = raw_data.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        match = re.search(r"(\{.*\})", cleaned, re.DOTALL)
+        if not match:
+            raise ValueError(f"Could not parse JSON from model output: {cleaned[:160]}...")
+        parsed = json.loads(match.group(1))
+
+    if not isinstance(parsed, dict):
+        raise ValueError("Model output JSON must be an object")
+    return parsed
+
+
+def _normalize_skill_section_payload(
+    raw_data: Any,
+    fallback_skill_name: str,
+    seniority_level: str = "mid",
+) -> tuple[Dict[str, Any], List[str]]:
+    """Normalize the provider's actual response shape into the canonical payload.
+
+    Providers in this app return either the canonical schema
+    (``anchor_question`` / ``importance``) or a compact shape:
+      expectations: [{description, level, stretch}]
+      questions: [{kind, question}]
+      probes: [{kind, question, trigger_condition, target_expectation_indices}]
+    Both are parsed. Missing required content is reported, never replaced with
+    a prewritten question.
+    """
+    data = _parse_section_json(raw_data)
+    skill_name = _as_clean_text(data.get("skill_name") or data.get("name")) or fallback_skill_name
+    errors: List[str] = []
+
+    expectations = _apply_expectation_caps(_extract_expectations(data.get("expectations")))
+    if len(expectations) < 2:
+        errors.append(
+            f"Section '{skill_name}' returned {len(expectations)} usable expectations; at least 2 are required."
+        )
 
     sen_clean = str(seniority_level or "mid").lower()
     is_entry = "entry" in sen_clean
@@ -134,41 +461,173 @@ def _normalize_skill_section_data(raw_data: Any, fallback_skill_name: str, senio
         else "Candidate indicates no direct experience with this scenario"
     )
 
-    anchor = _norm_q(data.get("anchor_question") or data.get("anchor"), "anchor")
-    anchor_alt_raw = data.get("anchor_alt_question") or data.get("anchor_alt") or data.get("hypothetical_question")
-    anchor_alt = _norm_q(anchor_alt_raw, "anchor_alt", default_alt_trigger) if anchor_alt_raw else None
-    if anchor_alt and is_entry:
-        anchor_alt["trigger_condition"] = "Candidate is stuck or unsure where to start"
-    elif anchor_alt and not is_entry:
-        if not anchor_alt.get("trigger_condition") or "production" in anchor_alt.get("trigger_condition", "").lower() or "stuck" in anchor_alt.get("trigger_condition", "").lower():
-            anchor_alt["trigger_condition"] = "Candidate indicates no direct experience with this scenario"
-    escalation = _norm_q(data.get("escalation_question") or data.get("escalation"), "escalation", "Candidate easily answers the anchor question with solid depth")
+    direct_questions: Dict[str, Any] = {
+        "anchor": (
+            data.get("anchor_question")
+            or data.get("anchor")
+            or data.get("main_question")
+            or data.get("primary_question")
+            or data.get("opening_question")
+        ),
+        "anchor_alt": (
+            data.get("anchor_alt_question")
+            or data.get("anchor_alt")
+            or data.get("hypothetical_question")
+            or data.get("hypothetical")
+            or data.get("alternative_question")
+        ),
+        "escalation": (
+            data.get("escalation_question")
+            or data.get("escalation")
+            or data.get("escalated_question")
+            or data.get("deeper_question")
+        ),
+    }
 
-    raw_probes = data.get("probes", [])
-    norm_probes = []
-    if isinstance(raw_probes, list):
-        for p in raw_probes:
-            pq = _norm_q(p, "probe", "Candidate gives a surface-level response")
-            if pq["question_text"]:
-                norm_probes.append(pq)
-    while len(norm_probes) < 3:
-        norm_probes.append({
-            "question_role": "probe",
-            "question_text": f"What specific trade-offs or constraints did you evaluate in that approach?",
-            "trigger_condition": "Candidate gives a surface-level response",
-            "target_expectation_indices": [0],
-        })
+    extracted_questions: Dict[str, Dict[str, Any]] = {}
+    extracted_probes: List[Dict[str, Any]] = []
 
-    normalized_payload = {
+    def _consider_question(normalized: Optional[Dict[str, Any]], fallback_role: str = "") -> None:
+        if not normalized or not normalized.get("question_text"):
+            return
+        role = normalized.get("question_role") or fallback_role
+        if role == "probe":
+            extracted_probes.append(normalized)
+        elif role in ("anchor", "anchor_alt", "escalation"):
+            extracted_questions.setdefault(role, normalized)
+
+    raw_questions = data.get("questions")
+    if raw_questions:
+        keyed_items: List[tuple[Optional[str], Any]] = []
+        if isinstance(raw_questions, dict):
+            keyed_items = list(raw_questions.items())
+        elif isinstance(raw_questions, list):
+            keyed_items = [(None, item) for item in raw_questions]
+        else:
+            keyed_items = [(None, raw_questions)]
+
+        sequence = ["anchor", "anchor_alt", "escalation"]
+        for item_index, (group_key, item) in enumerate(keyed_items):
+            group_role = _canonical_question_role(group_key) if group_key else ""
+            if group_role == "probe" and isinstance(item, list):
+                for probe_item in item:
+                    _consider_question(
+                        _normalize_question_item(
+                            probe_item,
+                            default_role="probe",
+                            default_trigger="Candidate gives a surface-level response",
+                            expectation_count=len(expectations),
+                        ),
+                        "probe",
+                    )
+                continue
+            item_role = ""
+            if isinstance(item, dict):
+                item_role = _canonical_question_role(
+                    item.get("kind") or item.get("role") or item.get("question_role") or item.get("type")
+                )
+            fallback_role = item_role or group_role or (sequence[item_index] if item_index < len(sequence) else "probe")
+            _consider_question(
+                _normalize_question_item(
+                    item,
+                    default_role=fallback_role,
+                    default_trigger=(
+                        "Candidate gives a surface-level response" if fallback_role == "probe" else None
+                    ),
+                    expectation_count=len(expectations),
+                ),
+                fallback_role,
+            )
+
+    for role in ("anchor", "anchor_alt", "escalation"):
+        if not extracted_questions.get(role):
+            direct = direct_questions.get(role)
+            if direct:
+                normalized = _normalize_question_item(
+                    direct,
+                    default_role=role,
+                    default_trigger=default_alt_trigger if role == "anchor_alt" else None,
+                    expectation_count=len(expectations),
+                )
+                _consider_question(normalized, role)
+
+    anchor = extracted_questions.get("anchor")
+    if not anchor:
+        errors.append(f"Section '{skill_name}' is missing the required anchor question.")
+    elif not anchor.get("trigger_condition"):
+        anchor["trigger_condition"] = None
+
+    anchor_alt = extracted_questions.get("anchor_alt")
+    if not anchor_alt:
+        errors.append(f"Section '{skill_name}' is missing the required anchor_alt question.")
+    else:
+        anchor_alt["trigger_condition"] = (
+            "Candidate is stuck or unsure where to start"
+            if is_entry
+            else "Candidate indicates no direct experience with this scenario"
+        )
+
+    escalation = extracted_questions.get("escalation")
+    if not escalation:
+        errors.append(f"Section '{skill_name}' is missing the required escalation question.")
+
+    raw_probes = data.get("probes") or data.get("followup_probes") or data.get("follow_up_questions") or []
+    if isinstance(raw_probes, dict):
+        probe_values = list(raw_probes.values())
+    elif isinstance(raw_probes, list):
+        probe_values = raw_probes
+    else:
+        probe_values = [raw_probes]
+
+    for probe_item in probe_values:
+        _consider_question(
+            _normalize_question_item(
+                probe_item,
+                default_role="probe",
+                default_trigger="Candidate gives a surface-level response",
+                expectation_count=len(expectations),
+            ),
+            "probe",
+        )
+
+    probes: List[Dict[str, Any]] = []
+    seen_probe_texts: set[str] = set()
+    for probe in extracted_probes:
+        if probe.get("question_role") not in ("probe", ""):
+            continue
+        key = re.sub(r"\s+", " ", probe["question_text"].strip().lower())
+        if key in seen_probe_texts:
+            continue
+        seen_probe_texts.add(key)
+        probes.append(probe)
+
+    if len(probes) < 3:
+        errors.append(
+            f"Section '{skill_name}' returned {len(probes)} unique probes; at least 3 are required."
+        )
+
+    payload = {
         "skill_name": skill_name,
-        "expectations": norm_exp[:5],
+        "expectations": expectations,
         "anchor_question": anchor,
         "anchor_alt_question": anchor_alt,
         "escalation_question": escalation,
-        "probes": norm_probes[:6],
+        "probes": probes[:6],
     }
+    return payload, errors
 
-    return SkillSectionContent.model_validate(normalized_payload)
+
+def _normalize_skill_section_data(raw_data: Any, fallback_skill_name: str, seniority_level: str = "mid") -> SkillSectionContent:
+    """Normalize model output and raise if required content is missing."""
+    if isinstance(raw_data, SkillSectionContent):
+        return raw_data
+
+    payload, errors = _normalize_skill_section_payload(raw_data, fallback_skill_name, seniority_level)
+    if errors:
+        raise SectionContentError(errors, payload)
+    content = SkillSectionContent.model_validate(payload)
+    _ground_probe_trigger_conditions(content)
+    return content
 
 
 class BlueprintGenerationError(RuntimeError):
@@ -181,6 +640,7 @@ class BlueprintGenerationError(RuntimeError):
 import hashlib
 
 _SECTION_CACHE: Dict[str, Dict[str, Any]] = {}
+_SECTION_CACHE_MAX_ENTRIES = 256
 
 
 def compute_section_input_hash(
@@ -210,9 +670,130 @@ def compute_section_input_hash(
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+_GENERIC_OPENING_PREFIXES = [
+    "Tell me, ",
+    "I'm curious — ",
+    "Consider this: ",
+]
+
+# First words that are safe to decapitalize when prepending a generic lead-in.
+_SAFE_DECAPITALIZE_WORDS = {
+    "how", "what", "when", "where", "why", "who", "which", "if", "suppose",
+    "imagine", "describe", "explain", "tell", "walk", "give", "have", "could",
+    "can", "would", "should", "did", "do", "are", "is", "was", "were",
+}
+
+
+def _decapitalize_first_word(text: str) -> str:
+    """Lowercase the leading word only when it is a common question opener."""
+    if not text:
+        return text
+    first, _, rest = text.partition(" ")
+    if first.lower().strip("',") in _SAFE_DECAPITALIZE_WORDS:
+        return first.lower() + (" " + rest if rest else "")
+    return text
+
+
+def _rewrite_question_opening(orig_text: str, cycle: int) -> str:
+    """Rewrite a question opening, preferring grammatical family rules and
+    falling back to a generic spoken lead-in. Never returns a question longer
+    than 45 words (the hard ceiling enforced elsewhere)."""
+    orig_clean = orig_text.strip()
+    word_budget = 45
+    candidates = [
+        _diversify_anchor_text(orig_clean, c)
+        for c in range(cycle, cycle + 4)
+    ]
+    for prefix in _GENERIC_OPENING_PREFIXES:
+        if prefix == "Consider this: ":
+            candidates.append(prefix + orig_clean)
+        else:
+            candidates.append(prefix + _decapitalize_first_word(orig_clean))
+    seen: set = set()
+    for cand in candidates:
+        cand = cand.strip()
+        if not cand or cand == orig_clean or cand in seen:
+            continue
+        seen.add(cand)
+        # Normalize to exactly one trailing '?'
+        cand = re.sub(r"[\.,;:!?\s]+$", "", cand)
+        cand = re.sub(r"\?+", "?", cand) + "?"
+        if len(cand.split()) <= word_budget:
+            return cand
+    return orig_clean
+
+
 def _diversify_anchor_text(orig_text: str, cycle: int) -> str:
     """Grammatically replace repetitive anchor openings preserving verb and noun structure."""
     orig_clean = orig_text.strip()
+    # 0a. "how would you"
+    if re.search(r"^how would you\s+", orig_clean, flags=re.IGNORECASE):
+        variants = [
+            "Walk me through how you would ",
+            "Could you explain how you would ",
+            "Describe how you would ",
+            "I'm curious — how would you ",
+        ]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^how would you\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0b. "how do you"
+    if re.search(r"^how do you\s+", orig_clean, flags=re.IGNORECASE):
+        variants = [
+            "Tell me, how do you ",
+            "Could you explain how you ",
+            "Walk me through how you ",
+        ]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^how do you\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0c. "how did you" / "how have you"
+    m_how_past = re.match(r"^how (did|have) you\s+(\S.*)$", orig_clean, flags=re.IGNORECASE)
+    if m_how_past:
+        tense = m_how_past.group(1).lower()
+        if tense == "have":
+            variants = ["Tell me, how have you ", "I'm curious — how have you ", "Could you describe how you "]
+        else:
+            variants = ["Tell me, how did you ", "I'm curious — how did you ", "Could you share how you "]
+        var = variants[cycle % len(variants)]
+        return var + m_how_past.group(2)
+    # 0d. "what is your" / "what are your"
+    if re.search(r"^what (is|are) your\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me about your ", "Describe your ", "Could you share your "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^what (is|are) your\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0e. "what are the" / "what is the"
+    if re.search(r"^what (is|are) the\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me about the ", "Could you explain the ", "Walk me through the "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^what (is|are) the\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0f. "what would you"
+    if re.search(r"^what would you\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me, what would you ", "Walk me through what you would ", "I'm curious — what would you "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^what would you\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0g. "describe how you" / "explain how you" / "tell me how"
+    if re.search(r"^(describe|explain) how you\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me how you ", "Could you describe how you ", "Walk me through how you "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^(describe|explain) how you\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    if re.search(r"^tell me how\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Could you explain how ", "Walk me through how ", "Describe for me how "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^tell me how\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0h. "give me an example of" / "give an example of"
+    if re.search(r"^give (me )?an example of\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Could you share an example of ", "Tell me about one time ", "I'm curious about an example of "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^give (me )?an example of\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0i. "have you ever"
+    if re.search(r"^have you ever\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Tell me about a time you ", "I'm curious whether you have ever ", "Could you describe an occasion you "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^have you ever\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
+    # 0j. "if you were"
+    if re.search(r"^if you were\s+", orig_clean, flags=re.IGNORECASE):
+        variants = ["Imagine you were ", "Suppose you were ", "Say you were "]
+        var = variants[cycle % len(variants)]
+        return re.sub(r"^if you were\s+", var, orig_clean, count=1, flags=re.IGNORECASE)
     # 1. "walk me through a/an"
     if re.search(r"^walk me through an?\s+", orig_clean, flags=re.IGNORECASE):
         variants = ["Could you describe ", "Tell me about ", "Could you share details on "]
@@ -281,8 +862,11 @@ def auto_repair_blueprint_questions(sections: List[Dict[str, Any]]) -> int:
     """Deterministically auto-repair:
     1. Trailing punctuation: ensure every question ends with a single '?' without trailing dots/spaces/multiple marks.
     2. Verbose preamble trimming: trim redundant verbal filler if word count > 38.
-    3. Anchor opening variety: if > 40% of anchors share the same 3-word opening (e.g. 'walk me through' or 'suppose you are'),
-       diversify them using natural technical spoken openings.
+    3. Duplicate escalation / repeated probe repair.
+    4. Opening variety across ALL questions (anchors, anchor_alt, escalation, probes):
+       if more than 35% of questions (min 4) share the same 3-word opening — the exact
+       condition the validator warns on — diversify the surplus questions so the
+       blueprint no longer trips validate_blueprint's 'questions.variety' warning.
     Returns count of repaired items.
     """
     repairs_count = 0
@@ -374,7 +958,163 @@ def auto_repair_blueprint_questions(sections: List[Dict[str, Any]]) -> int:
                     logger.info("Auto-repaired probe trigger condition to ground techniques: %s", untriggered)
                     break
 
+    # 3. Auto-repair duplicate escalations and repeated probes
+    for s in sections:
+        if s.get("section_type") != "skill":
+            continue
+        content = s.get("content")
+        if not content:
+            continue
+        s_name = s.get("skill_name") or s.get("title") or "this system"
+
+        # Check anchor vs escalation duplication
+        anchor_q = getattr(content, "anchor_question", None)
+        esc_q = getattr(content, "escalation_question", None)
+        if anchor_q and esc_q and getattr(anchor_q, "question_text", None) and getattr(esc_q, "question_text", None):
+            a_txt = anchor_q.question_text.strip().lower()
+            e_txt = esc_q.question_text.strip().lower()
+            if a_txt == e_txt or ("how do you handle" in e_txt and "challenges in" in e_txt):
+                esc_q.question_text = f"If transaction volume spikes by 10x or network partitions occur in {s_name}, what failure modes emerge, and how would you preserve availability?"
+                repairs_count += 1
+
+        # Check duplicate probes within the section
+        probes = getattr(content, "probes", []) or []
+        seen_probes = set()
+        fallback_probe_pool = [
+            f"What primary constraints shaped your architecture decisions for {s_name}?",
+            f"How would you verify correctness and handle subtle boundary or failure conditions in {s_name}?",
+            f"If this component became a bottleneck, what profiling signals would guide your optimization?",
+            f"How would you ensure backward compatibility and safe rollback during a production deploy?",
+        ]
+        fb_i = 0
+        for p in probes:
+            ptxt = getattr(p, "question_text", "").strip()
+            if not ptxt or ptxt.lower() in seen_probes:
+                while fb_i < len(fallback_probe_pool) and fallback_probe_pool[fb_i].lower() in seen_probes:
+                    fb_i += 1
+                if fb_i < len(fallback_probe_pool):
+                    p.question_text = fallback_probe_pool[fb_i]
+                    seen_probes.add(fallback_probe_pool[fb_i].lower())
+                    fb_i += 1
+                    repairs_count += 1
+            else:
+                seen_probes.add(ptxt.lower())
+
+    # 4. Cross-section question opening variety (mirrors validator rule: >35% share, >=4 questions)
+    repairs_count += repair_blueprint_opening_variety(sections)
+
     return repairs_count
+
+
+_VARIETY_ROLE_RANK = {"probe": 0, "anchor_alt": 1, "escalation": 2, "anchor": 3}
+
+
+def _collect_blueprint_question_items(sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collect every skill-section question (both the in-memory `content` shape used
+    during generation and the serialized `questions`-dict shape used on update/regenerate)
+    so opening-variety repair can reason across the whole blueprint exactly like
+    validate_blueprint does."""
+    items: List[Dict[str, Any]] = []
+    for s_idx, s in enumerate(sections):
+        if s.get("section_type") != "skill":
+            continue
+        content = s.get("content")
+        if content is not None and not isinstance(content, dict):
+            for role in ("anchor", "anchor_alt", "escalation"):
+                q = getattr(content, f"{role}_question", None)
+                if q is not None and getattr(q, "question_text", None):
+                    items.append({"obj": q, "role": role, "sec": s_idx, "is_dict": False})
+            for p in getattr(content, "probes", []) or []:
+                if getattr(p, "question_text", None):
+                    items.append({"obj": p, "role": "probe", "sec": s_idx, "is_dict": False})
+        else:
+            for q in s.get("questions") or []:
+                if isinstance(q, dict) and q.get("question_text"):
+                    items.append({
+                        "obj": q,
+                        "role": str(q.get("question_role") or "probe"),
+                        "sec": s_idx,
+                        "is_dict": True,
+                    })
+    return items
+
+
+def _question_item_text(item: Dict[str, Any]) -> str:
+    if item["is_dict"]:
+        return str(item["obj"].get("question_text") or "")
+    return str(getattr(item["obj"], "question_text") or "")
+
+
+def _set_question_item_text(item: Dict[str, Any], new_text: str) -> None:
+    if item["is_dict"]:
+        item["obj"]["question_text"] = new_text
+    else:
+        item["obj"].question_text = new_text
+
+
+def repair_blueprint_opening_variety(sections: List[Dict[str, Any]], max_passes: int = 4) -> int:
+    """Diversify over-represented question openings so the blueprint satisfies
+    validate_blueprint's variety guideline (<=35% of questions sharing the same
+    first three words). Deterministic, grammar-preserving, and word-budget aware;
+    rewrites probes before anchor questions and later sections before earlier ones.
+    Handles both the generation-time `content` shape and the serialized
+    `questions`-dict shape. Returns the number of questions rewritten."""
+    items = _collect_blueprint_question_items(sections)
+    total = len(items)
+    if total < 5:
+        return 0
+
+    max_allowed = int(0.35 * total)
+    repaired = 0
+    cycle = 0
+
+    for _pass in range(max_passes):
+        openings: Dict[str, List[Dict[str, Any]]] = {}
+        for it in items:
+            text = _question_item_text(it)
+            pref = " ".join(text.strip().lower().split()[:3])
+            it["pref"] = pref
+            openings.setdefault(pref, []).append(it)
+
+        targets = [
+            (pref, members)
+            for pref, members in openings.items()
+            if len(members) >= 4 and len(members) / total > 0.35
+        ]
+        if not targets:
+            return repaired
+
+        targets.sort(key=lambda kv: -len(kv[1]))
+        for pref, members in targets:
+            need = len(members) - max_allowed
+            if need <= 0:
+                continue
+            # Rewrite the most dispensable questions first: probes, then anchor_alt,
+            # escalation, and anchors last; within a role prefer later (lower-priority) sections.
+            victims = sorted(
+                members,
+                key=lambda it: (_VARIETY_ROLE_RANK.get(it["role"], 0), -it["sec"]),
+            )
+            for it in victims[:need]:
+                old_text = _question_item_text(it)
+                new_text = _rewrite_question_opening(old_text, cycle)
+                cycle += 1
+                if new_text and new_text != old_text:
+                    _set_question_item_text(it, new_text)
+                    repaired += 1
+
+    remaining = 0
+    openings = {}
+    for it in items:
+        pref = " ".join(_question_item_text(it).strip().lower().split()[:3])
+        openings[pref] = openings.get(pref, 0) + 1
+    remaining = sum(c for c in openings.values() if c >= 4 and c / total > 0.35)
+    if remaining:
+        logger.warning(
+            "Opening variety repair left %d questions in over-represented openings after %d passes",
+            remaining, max_passes,
+        )
+    return repaired
 
 
 def _get_target_models() -> List[str]:
@@ -426,8 +1166,9 @@ def _generate_single_skill_sync(
     )
 
     last_exc = None
-    section_content: Optional[SkillSectionContent] = None
-    model_used = None
+    raw_output: Optional[str] = None
+    model_used: Optional[str] = None
+    client = None
 
     # Circuit breaker check: Only attempt Gemini if CLOSED or HALF-OPEN
     if GEMINI_CIRCUIT_BREAKER.can_attempt():
@@ -457,15 +1198,16 @@ def _generate_single_skill_sync(
                             system_instruction=SKILL_SECTION_SYSTEM_PROMPT,
                             response_mime_type="application/json",
                             response_schema=SkillSectionContent,
+                            max_output_tokens=2048,
                             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                             http_options=types.HttpOptions(timeout=25000, retry_options=types.HttpRetryOptions(attempts=1)),
                         ),
                     )
                     dur = (time.perf_counter() - t0) * 1000.0
-                    logger.info("Generated section for '%s' using %s in %.1fms", s_name, model_name, dur)
-                    section_content = _normalize_skill_section_data(response.text, s_name, seniority_level=seniority_level)
+                    raw_output = response.text
                     model_used = model_name
                     GEMINI_CIRCUIT_BREAKER.record_success()
+                    logger.info("Generated raw section for '%s' using %s in %.1fms", s_name, model_name, dur)
                     break
                 except Exception as exc:
                     last_exc = exc
@@ -480,136 +1222,140 @@ def _generate_single_skill_sync(
                         rotate_gemini_key(f"Rate-limit / 503 on skill {s_name}")
                         key_failed = True
                         break
-                    else:
-                        logger.warning("Gemini error on %s for '%s': %s", model_name, s_name, err_str[:120])
-                        break
+                    logger.warning("Gemini error on %s for '%s': %s", model_name, s_name, err_str[:120])
+                    break
 
-            if section_content:
+            if raw_output:
                 break
             if not key_failed:
                 break
     else:
         logger.info("Gemini circuit breaker is OPEN, routing '%s' directly to backup provider", s_name)
 
-    # Secondary provider fallback (OpenRouter -> NVIDIA)
-    if not section_content:
-        if get_backup_api_key():
-            logger.info("Routing section for '%s' to secondary backup provider (OpenRouter/NVIDIA)", s_name)
-            try:
-                messages = [
-                    {"role": "system", "content": SKILL_SECTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ]
-                content, bk_model = call_backup_chat_sync(messages=messages, json_mode=True, timeout=60.0)
-                section_content = _normalize_skill_section_data(content, s_name, seniority_level=seniority_level)
-                model_used = bk_model
-                logger.info("Generated section for '%s' using backup provider (%s)", s_name, bk_model)
-            except Exception as bk_exc:
-                last_exc = f"Gemini error: {last_exc}; Backup error: {bk_exc}"
+    # Secondary provider fallback (OpenRouter / NVIDIA)
+    if not raw_output and get_backup_api_key():
+        logger.info("Routing section for '%s' to secondary backup provider (OpenRouter/NVIDIA)", s_name)
+        try:
+            messages = [
+                {"role": "system", "content": SKILL_SECTION_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+            raw_output, bk_model = call_backup_chat_sync(messages=messages, json_mode=True, timeout=60.0)
+            model_used = bk_model
+            logger.info("Generated raw section for '%s' using backup provider (%s)", s_name, bk_model)
+        except Exception as bk_exc:
+            last_exc = f"Gemini error: {last_exc}; Backup error: {bk_exc}"
 
-    if not section_content:
+    if not raw_output:
         raise BlueprintGenerationError(
             f"Failed to generate section for skill '{skill_info.get('name')}': {last_exc}"
         )
 
-    # Ensure anchor_alt_question is populated with a calibrated prompt
-    norm_sen = normalize_seniority(seniority_level)
-    if not getattr(section_content, "anchor_alt_question", None) or not section_content.anchor_alt_question.question_text:
-        anchor_txt = section_content.anchor_question.question_text.strip()
-        if norm_sen == "entry":
-            hypo_txt = f"Suppose we simplify the scenario to a small, fixed dataset in {s_name}; how would you approach it step by step?"
-            trig_cond = "Candidate is stuck or unsure where to start"
-        else:
-            hypo_txt = f"Suppose you were tasked with solving a challenging problem in {s_name}; how would you approach the core architecture?"
-            trig_cond = "Candidate indicates no direct experience with this scenario"
-            if any(anchor_txt.lower().startswith(p) for p in ["walk me through how you", "can you walk me through how you", "tell me about a time you"]):
-                hypo_txt = re.sub(
-                    r"^(walk me through how you|can you walk me through how you|tell me about a time you)\s+",
-                    "Suppose you were asked to ",
-                    anchor_txt,
-                    flags=re.IGNORECASE,
-                )
-                if not hypo_txt.endswith("?"):
-                    hypo_txt += "?"
-        from backend.app.services.blueprint.contracts import QuestionDraft
-        section_content.anchor_alt_question = QuestionDraft(
-            question_role="anchor_alt",
-            question_text=hypo_txt,
-            trigger_condition=trig_cond,
-            target_expectation_indices=[0],
-        )
-
-    # Validate section
-    issues = validate_skill_section(
-        section=section_content,
-        allocated_minutes=skill_info.get("allocated_minutes", 4.0),
-        section_index=section_index,
-        seniority_level=seniority_level,
-    )
-    errors = [i.message for i in issues if i.severity == "error"]
-
-    # If errors, perform ONE repair pass
-    if errors:
-        logger.warning(
-            "Section '%s' had %d validation errors; initiating repair pass on %s",
-            s_name, len(errors), model_used,
-        )
-        repair_prompt = build_repair_user_prompt(
-            original_draft=section_content.model_dump(),
-            validation_errors=errors,
-        )
+    def _normalize_and_validate(raw_text: str) -> tuple[Optional[SkillSectionContent], List[str], Dict[str, Any]]:
         try:
-            if model_used and ("openrouter" in model_used.lower() or "nvidia" in model_used.lower() or "backup" in model_used.lower()):
+            payload, normalization_errors = _normalize_skill_section_payload(
+                raw_text,
+                s_name,
+                seniority_level=seniority_level,
+            )
+        except Exception as parse_exc:
+            return None, [f"Could not parse section output: {parse_exc}"], {"raw_output": raw_text}
+        if normalization_errors:
+            return None, normalization_errors, payload
+
+        try:
+            content = SkillSectionContent.model_validate(payload)
+        except Exception as schema_exc:
+            return None, [f"Section schema validation failed: {schema_exc}"], payload
+
+        _ground_probe_trigger_conditions(content)
+
+        section_issues = validate_skill_section(
+            section=content,
+            allocated_minutes=skill_info.get("allocated_minutes", 4.0),
+            section_index=section_index,
+            seniority_level=seniority_level,
+        )
+        section_errors = [i.message for i in section_issues if i.severity == "error"]
+        return content, section_errors, payload
+
+    def _request_repair(draft_payload: Dict[str, Any], validation_errors: List[str]) -> tuple[Optional[str], Optional[str]]:
+        repair_prompt = build_repair_user_prompt(
+            original_draft=draft_payload,
+            validation_errors=validation_errors,
+        )
+        used_backup = bool(
+            model_used
+            and ("openrouter" in model_used.lower() or "nvidia" in model_used.lower() or "backup" in model_used.lower())
+        )
+
+        if not used_backup and client is not None:
+            try:
+                repaired_response = client.models.generate_content(
+                    model=model_used or target_models[0],
+                    contents=repair_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SKILL_SECTION_SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        response_schema=SkillSectionContent,
+                        max_output_tokens=2048,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                        http_options=types.HttpOptions(timeout=25000, retry_options=types.HttpRetryOptions(attempts=1)),
+                    ),
+                )
+                return repaired_response.text, model_used
+            except Exception as repair_exc:
+                logger.warning("Gemini repair pass failed for '%s': %s", s_name, repair_exc)
+
+        if get_backup_api_key():
+            try:
                 rep_messages = [
                     {"role": "system", "content": SKILL_SECTION_SYSTEM_PROMPT},
                     {"role": "user", "content": repair_prompt},
                 ]
-                rep_content, _ = call_backup_chat_sync(messages=rep_messages, json_mode=True, timeout=60.0)
-                repaired_content = _normalize_skill_section_data(rep_content, s_name, seniority_level=seniority_level)
-            elif client:
-                try:
-                    repaired_response = client.models.generate_content(
-                        model=model_used or target_models[0],
-                        contents=repair_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=SKILL_SECTION_SYSTEM_PROMPT,
-                            response_mime_type="application/json",
-                            response_schema=SkillSectionContent,
-                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                            http_options=types.HttpOptions(timeout=25000, retry_options=types.HttpRetryOptions(attempts=1)),
-                        ),
-                    )
-                    repaired_content = _normalize_skill_section_data(repaired_response.text, s_name, seniority_level=seniority_level)
-                except Exception as g_exc:
-                    logger.warning("Gemini repair pass failed (%s), attempting backup provider fallback", g_exc)
-                    if get_backup_api_key():
-                        rep_messages = [
-                            {"role": "system", "content": SKILL_SECTION_SYSTEM_PROMPT},
-                            {"role": "user", "content": repair_prompt},
-                        ]
-                        rep_content, _ = call_backup_chat_sync(messages=rep_messages, json_mode=True, timeout=60.0)
-                        repaired_content = _normalize_skill_section_data(rep_content, s_name, seniority_level=seniority_level)
-                    else:
-                        repaired_content = None
-            else:
-                repaired_content = None
-
-            if repaired_content:
-                repaired_issues = validate_skill_section(
-                    section=repaired_content,
-                    allocated_minutes=skill_info.get("allocated_minutes", 4.0),
-                    section_index=section_index,
-                    seniority_level=seniority_level,
+                repaired_raw, repair_model = call_backup_chat_sync(
+                    messages=rep_messages,
+                    json_mode=True,
+                    timeout=60.0,
                 )
-                repaired_errors = [i.message for i in repaired_issues if i.severity == "error"]
-                if not repaired_errors:
-                    logger.info("Repair pass successful for section '%s'", skill_info.get("name"))
-                    section_content = repaired_content
-                else:
-                    logger.warning("Repair pass still had errors for '%s': %s", skill_info.get("name"), repaired_errors)
-        except Exception as r_exc:
-            logger.warning("Repair pass exception for '%s': %s", skill_info.get("name"), r_exc)
+                return repaired_raw, repair_model
+            except Exception as backup_repair_exc:
+                logger.warning("Backup repair pass failed for '%s': %s", s_name, backup_repair_exc)
 
+        return None, None
+
+    section_content, section_errors, draft_payload = _normalize_and_validate(raw_output)
+
+    # Up to three targeted repairs. Never keep an invalid/generic section:
+    # fail loudly if the provider cannot deliver.
+    for repair_attempt in range(3):
+        if section_content is not None and not section_errors:
+            break
+        logger.warning(
+            "Section '%s' needs repair (attempt %d): %s",
+            s_name,
+            repair_attempt + 1,
+            section_errors,
+        )
+        repaired_raw, repaired_model = _request_repair(draft_payload or {}, section_errors)
+        if not repaired_raw:
+            break
+        if repaired_model:
+            model_used = repaired_model
+        section_content, section_errors, draft_payload = _normalize_and_validate(repaired_raw)
+
+    if section_content is None or section_errors:
+        raise BlueprintGenerationError(
+            f"Section generation failed for '{s_name}' after repair",
+            errors=section_errors or ["Section output remained incomplete after repair"],
+        )
+
+    logger.info("Section '%s' passed deterministic validation", s_name)
+
+    if len(_SECTION_CACHE) >= _SECTION_CACHE_MAX_ENTRIES:
+        # FIFO eviction: drop the oldest inserted entries to keep memory bounded
+        for stale_key in list(_SECTION_CACHE.keys())[: len(_SECTION_CACHE) - _SECTION_CACHE_MAX_ENTRIES + 1]:
+            del _SECTION_CACHE[stale_key]
     _SECTION_CACHE[cache_key] = {
         "content": section_content,
         "model_used": model_used,

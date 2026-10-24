@@ -529,7 +529,7 @@ class InterviewEvaluation(Base):
     __tablename__ = "interview_evaluations"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    session_id = Column(String(36), ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(String(36), ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False, index=True, unique=True)
     application_id = Column(String(36), ForeignKey("job_applications.id", ondelete="CASCADE"), nullable=False, index=True)
     job_id = Column(String(36), ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False, index=True)
     status = Column(String(20), nullable=False, default="pending")
@@ -606,6 +606,23 @@ class InterviewFeedback(Base):
 
     session = relationship("InterviewSession", back_populates="feedback_entries")
     application = relationship("JobApplication")
+
+
+class WebSocketTicketUse(Base):
+    """Single-use consumption record for short-lived WebSocket tickets.
+
+    The ticket id is a unique primary key, so concurrent replays race on a
+    database constraint rather than on process-local memory. This makes replay
+    protection effective across multiple server workers.
+    """
+
+    __tablename__ = "websocket_ticket_uses"
+
+    ticket_id = Column(String(64), primary_key=True)
+    session_id = Column(String(128), nullable=False, index=True)
+    user_id = Column(String(128), nullable=True, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    consumed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class AuditEvent(Base):

@@ -88,6 +88,11 @@ async def get_current_user(
         )
 
     payload = decode_access_token(extracted_token)
+    if payload.get("type") == "ws_ticket":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="WebSocket tickets cannot be used as REST bearer tokens."
+        )
     user_id: Optional[str] = payload.get("sub")
     if not user_id:
         raise HTTPException(

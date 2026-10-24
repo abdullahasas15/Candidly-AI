@@ -129,8 +129,10 @@ async def save_job_blueprint(
     res = await db.execute(ver_stmt)
     next_ver = res.scalar_one() + 1
 
-    status_val = "approved" if auto_approve else "draft"
-    approved_at_val = datetime.utcnow() if auto_approve else None
+    val_rep = blueprint_data.get("validation_report")
+    has_errors = bool(val_rep and val_rep.get("errors"))
+    status_val = "approved" if (auto_approve and not has_errors) else "draft"
+    approved_at_val = datetime.utcnow() if (auto_approve and not has_errors) else None
 
     blueprint = InterviewBlueprint(
         job_id=job_id,
@@ -139,7 +141,7 @@ async def save_job_blueprint(
         total_duration_mins=blueprint_data["total_duration_mins"],
         active_skill_mins=blueprint_data["active_skill_mins"],
         fixed_overhead_mins=blueprint_data["fixed_overhead_mins"],
-        approved_by=approved_by_id,
+        approved_by=approved_by_id if (auto_approve and not has_errors) else None,
         approved_at=approved_at_val,
         validation_report=blueprint_data.get("validation_report"),
         input_hash=inp_hash,
@@ -281,7 +283,7 @@ async def save_job_blueprint(
                 db.add(q)
                 await db.flush()
 
-    if auto_approve:
+    if auto_approve and not has_errors:
         await db.execute(
             update(JobPosting)
             .where(JobPosting.id == job_id)
@@ -334,12 +336,19 @@ async def update_or_fork_job_blueprint(
         for s in (job.skills or [])
     ]
 
+    # Apply expectation caps to updated sections
+    from backend.app.services.blueprint.generator import _apply_expectation_caps
+    for s in updated_sections:
+        if s.get("expectations"):
+            s["expectations"] = _apply_expectation_caps(s["expectations"])
+
     # Validate updated sections
     report = validate_blueprint(
         sections=updated_sections,
         job_skills=job_skills_data,
         active_skill_time=orig_bp.active_skill_mins,
         total_duration_mins=orig_bp.total_duration_mins,
+        seniority_level=job.seniority_level or "mid",
     )
 
     inp_hash = compute_job_input_hash(job)
@@ -472,9 +481,21 @@ async def regenerate_blueprint_section(
     skill_dict = {
         "id": skill_info.id if skill_info else None,
         "name": target_sec.skill_name,
-        "priority_tier": target_sec.priority_tier or "P1",
+        "skill_name": target_sec.skill_name,
+        "category": getattr(skill_info, "category", None) or "Core Technical",
+        "priority_tier": target_sec.priority_tier or getattr(skill_info, "priority_tier", None) or "P1",
+        "weight_percentage": getattr(skill_info, "weight_percentage", None) or 0,
         "allocated_minutes": target_sec.allocated_minutes,
         "recommended_expectations": 4,
+        "rubric_l1": getattr(skill_info, "rubric_l1", None) or "",
+        "rubric_l2": getattr(skill_info, "rubric_l2", None) or "",
+        "rubric_l3": getattr(skill_info, "rubric_l3", None) or "",
+        "rubric_l4": getattr(skill_info, "rubric_l4", None) or "",
+        "rubric_l5": getattr(skill_info, "rubric_l5", None) or "",
+        "rubrics": {
+            f"l{level}": getattr(skill_info, f"rubric_l{level}", None) or ""
+            for level in range(1, 6)
+        },
     }
 
     # Generate fresh section content
@@ -483,6 +504,7 @@ async def regenerate_blueprint_section(
         seniority_level=job.seniority_level or "Mid-Level (L4)",
         skill_info=skill_dict,
         section_index=target_sec.order_index,
+        job_description=job.job_description or "",
     )
     new_content: SkillSectionContent = gen_result["content"]
 
@@ -505,13 +527,22 @@ async def regenerate_blueprint_section(
                     "target_expectation_ids": [],
                     "source": "llm",
                 },
-                {
-                    "question_role": "escalation",
-                    "question_text": new_content.escalation_question.question_text,
+            ]
+            if getattr(new_content, "anchor_alt_question", None) and new_content.anchor_alt_question.question_text:
+                q_list.append({
+                    "question_role": "anchor_alt",
+                    "question_text": new_content.anchor_alt_question.question_text,
+                    "trigger_condition": new_content.anchor_alt_question.trigger_condition,
                     "target_expectation_ids": [],
                     "source": "llm",
-                },
-            ]
+                })
+            q_list.append({
+                "question_role": "escalation",
+                "question_text": new_content.escalation_question.question_text,
+                "trigger_condition": new_content.escalation_question.trigger_condition,
+                "target_expectation_ids": [],
+                "source": "llm",
+            })
             for p in new_content.probes:
                 q_list.append({
                     "question_role": "probe",
@@ -522,6 +553,14 @@ async def regenerate_blueprint_section(
                 })
             s["questions"] = q_list
             break
+
+    # A freshly regenerated section can reintroduce an over-represented opening
+    # across the blueprint; re-run the deterministic variety repair (LLM output
+    # only — recruiter-authored manual edits are never silently reworded).
+    from backend.app.services.blueprint.generator import repair_blueprint_opening_variety
+    variety_repairs = repair_blueprint_opening_variety(serialized["sections"])
+    if variety_repairs:
+        logger.info("Opening-variety repair rewrote %d questions after section regeneration", variety_repairs)
 
     # Update or fork
     return await update_or_fork_job_blueprint(
@@ -574,13 +613,18 @@ async def approve_job_blueprint(
         job_skills=job_skills_data,
         active_skill_time=bp.active_skill_mins,
         total_duration_mins=bp.total_duration_mins,
+        seniority_level=job.seniority_level or "mid",
     )
 
-    if bp.is_generated_with_backup and report.errors:
+    # Check newly computed errors as well as any existing stored validation errors
+    existing_errors = list((bp.validation_report or {}).get("errors") or [])
+    all_errors = list(dict.fromkeys(report.errors + existing_errors))
+
+    if bp.is_generated_with_backup and all_errors:
         raise ValueError("Blueprint generated with backup provider has unresolved errors ('generated with backup; regenerate on primary') and cannot be approved.")
 
-    if report.errors:
-        raise ValueError(f"Approval blocked due to validation errors: {'; '.join(report.errors)}")
+    if all_errors:
+        raise ValueError(f"Approval blocked due to validation errors: {'; '.join(all_errors)}")
 
     if report.warnings and not confirmed_warnings:
         raise ValueError(f"Blueprint has validation warnings that must be confirmed: {'; '.join(report.warnings)}")

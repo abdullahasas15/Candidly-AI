@@ -5,9 +5,10 @@ import {
   RefreshCw, Check, Sparkles, Filter, Calendar
 } from 'lucide-react';
 import ApplicantDetailModal from './ApplicantDetailModal';
-import BlueprintReviewEditor from './BlueprintReviewEditor';
 import { Badge, Card } from '../ui';
 import { formatMoney } from '../../utils/currency';
+
+const BlueprintReviewEditor = React.lazy(() => import('./BlueprintReviewEditor'));
 
 export default function JobDetailModal({ job, isOpen, onClose, onJobUpdated }) {
   if (!isOpen || !job) return null;
@@ -288,12 +289,25 @@ export default function JobDetailModal({ job, isOpen, onClose, onJobUpdated }) {
           {/* TAB 2: BLUEPRINT */}
           {activeTab === 'blueprint' && (
             <div className="space-y-4">
-              <BlueprintReviewEditor
-                jobId={job.id}
-                onBlueprintApproved={() => {
-                  if (onJobUpdated) onJobUpdated({ ...job, blueprint_status: 'approved' });
-                }}
-              />
+              <React.Suspense
+                fallback={
+                  <div className="p-12 text-center text-teal-400 font-semibold space-y-2">
+                    <RefreshCw className="w-6 h-6 animate-spin mx-auto text-teal-400" />
+                    <p className="text-xs text-zinc-400">Loading Blueprint Editor...</p>
+                  </div>
+                }
+              >
+                <BlueprintReviewEditor
+                  job={job}
+                  jobId={job.id}
+                  onApproved={(approvedBp) => {
+                    if (onJobUpdated) onJobUpdated({ ...job, blueprint_status: 'approved', active_blueprint_id: approvedBp?.id });
+                  }}
+                  onBlueprintApproved={(approvedBp) => {
+                    if (onJobUpdated) onJobUpdated({ ...job, blueprint_status: 'approved', active_blueprint_id: approvedBp?.id });
+                  }}
+                />
+              </React.Suspense>
             </div>
           )}
 

@@ -18,15 +18,20 @@ import Logo from './Logo';
 
 export default function Header({
   onRequestDemo,
-  authUser,
+  authUser: propAuthUser,
+  user: propUser,
   onOpenAuth,
   onOpenDashboard,
   onSignOut,
   onBackToLanding,
-  currentView = 'landing', // 'landing' | 'recruiter' | 'candidate'
-  activeNav = 'jobs',
+  currentView: propCurrentView,
+  roleNav: propRoleNav,
+  activeNav: propActiveNav,
+  activeRoleNav: propActiveRoleNav,
   onNavChange,
-  primaryAction,
+  primaryAction: propPrimaryAction,
+  onAction,
+  actionLabel,
 }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
@@ -42,6 +47,26 @@ export default function Header({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Safe resolver for authUser: propAuthUser -> propUser -> localStorage
+  const authUser = propAuthUser || propUser || (typeof window !== 'undefined' ? (() => {
+    try {
+      const saved = localStorage.getItem('candidly-auth-user') || localStorage.getItem('candidly_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  })() : null);
+
+  // Safe resolver for currentView: propCurrentView -> propRoleNav -> fallback to user role if in dashboard
+  const currentView = propCurrentView || propRoleNav || (authUser?.role ? authUser.role : 'landing');
+  const activeNav = propActiveNav || propActiveRoleNav || 'jobs';
+
+  const primaryAction = propPrimaryAction || (actionLabel ? {
+    label: actionLabel,
+    icon: (actionLabel.toLowerCase().includes('job') ? Sparkles : Layers),
+    onClick: onAction,
+  } : null);
 
   // Landing page section links
   const landingNavLinks = [
@@ -66,8 +91,8 @@ export default function Header({
     { id: 'profile', name: 'Profile', icon: User },
   ];
 
-  const isRecruiter = currentView === 'recruiter' || authUser?.role === 'recruiter';
-  const isCandidate = currentView === 'candidate' || authUser?.role === 'candidate';
+  const isRecruiter = currentView === 'recruiter';
+  const isCandidate = currentView === 'candidate';
   const isDashboard = currentView === 'recruiter' || currentView === 'candidate';
 
   const roleNavLinks = isRecruiter
@@ -194,25 +219,32 @@ export default function Header({
                     </span>
                   </div>
 
-                  {onOpenDashboard && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAvatarMenuOpen(false);
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAvatarMenuOpen(false);
+                      if (onOpenDashboard) {
                         onOpenDashboard();
-                      }}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold text-zinc-300 hover:text-white hover:bg-white/[0.04] transition-colors"
-                    >
-                      <Briefcase className="w-3.5 h-3.5 text-teal-400" />
-                      <span>Workspace Console</span>
-                    </button>
-                  )}
+                      } else if (typeof window !== 'undefined') {
+                        window.location.href = `/?view=${authUser.role || 'candidate'}`;
+                      }
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold text-zinc-300 hover:text-white hover:bg-white/[0.04] transition-colors"
+                  >
+                    <Briefcase className="w-3.5 h-3.5 text-teal-400" />
+                    <span>Workspace Console</span>
+                  </button>
 
                   <button
                     type="button"
                     onClick={() => {
                       setAvatarMenuOpen(false);
-                      if (onNavChange) onNavChange('settings');
+                      if (onNavChange) {
+                        onNavChange('settings');
+                      } else if (typeof window !== 'undefined') {
+                        const el = document.getElementById('profile-readiness-card');
+                        if (el) el.scrollIntoView({ behavior: 'smooth' });
+                      }
                     }}
                     className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold text-zinc-300 hover:text-white hover:bg-white/[0.04] transition-colors"
                   >
@@ -226,7 +258,17 @@ export default function Header({
                     type="button"
                     onClick={() => {
                       setAvatarMenuOpen(false);
-                      if (onSignOut) onSignOut();
+                      if (onSignOut) {
+                        onSignOut();
+                      } else if (typeof window !== 'undefined') {
+                        localStorage.removeItem('candidly-auth-user');
+                        localStorage.removeItem('candidly-auth-token');
+                        localStorage.removeItem('candidly-auth-token-candidate');
+                        localStorage.removeItem('candidly-auth-token-recruiter');
+                        localStorage.removeItem('candidly_user');
+                        localStorage.removeItem('candidly_token');
+                        window.location.href = '/';
+                      }
                     }}
                     className="w-full flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-400 hover:bg-rose-950/30 transition-colors"
                   >

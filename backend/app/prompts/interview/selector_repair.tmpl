@@ -1,0 +1,16 @@
+The previous selection output failed validation:
+Error: $validation_error
+
+=== PREVIOUS ATTEMPT ===
+$malformed_output
+
+=== ELIGIBLE NEXT PLANNED ID ===
+$next_planned_id
+
+=== ALLOWED ACTIONS ===
+$allowed_actions_json
+
+Repair the selection JSON immediately.
+If choosing ADVANCE, planned_question_id MUST be "$next_planned_id".
+If choosing FOLLOW_UP, follow_up_question MUST be <= 28 words, natural, and end with "?".
+Output pure valid JSON matching the schema.

@@ -236,8 +236,13 @@ class OutboundSpeechLedger:
 
 class ConductorPhase(str, Enum):
     INIT = "init"
-    WELCOME = "welcome"
-    READY_GATE = "ready_gate"
+    # Opening conversation flow
+    GREETING = "greeting"
+    GREETING_RESPONSE = "greeting_response"
+    AGENDA = "agenda"
+    AGENDA_RESPONSE = "agenda_response"
+    WELCOME = "welcome"       # Legacy alias
+    READY_GATE = "ready_gate" # Legacy alias
     INTRO = "intro"
     SKILL_ANCHOR = "skill_anchor"
     SKILL_FOLLOWUP = "skill_followup"
@@ -293,7 +298,7 @@ STOPWORDS: Set[str] = {
 
 # Praise and evaluating words regex for decision validation
 PRAISE_REGEX = re.compile(r"\b(great|awesome|fantastic|excellent|good|perfect|wonderful|nice|brilliant|impressive|well done)\b", re.IGNORECASE)
-EVAL_REGEX = re.compile(r"\b(correct|right|wrong|incorrect|accurate|inaccurate|true|false)\b", re.IGNORECASE)
+EVAL_REGEX = re.compile(r"\b(correct|wrong|incorrect|accurate|inaccurate|true|false)\b", re.IGNORECASE)
 
 # Single-word affirmatives and ready indicators
 READY_SINGLE_WORDS: Set[str] = {
@@ -512,6 +517,7 @@ class RepeatRequest:
 @dataclass(frozen=True)
 class EndButton:
     now_ms: int = 0
+    request_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -578,7 +584,7 @@ class SpeakAck:
 
 @dataclass(frozen=True)
 class CancelSpeech:
-    pass
+    speech_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -596,6 +602,9 @@ class RequestDecision:
     time_left_ms: int = 0
     last_ack_opener: Optional[str] = None
     snapshot: Optional[DecisionContextSnapshot] = None
+    slot_id: Optional[str] = None
+    planned_question_id: Optional[str] = None
+    parent_slot_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -673,6 +682,18 @@ class PlanQuestion:
     stretch_key_points: List[str] = field(default_factory=list)
     trigger_condition: Optional[str] = None
     probe_id: Optional[str] = None
+    id: Optional[str] = None
+    stage: Optional[str] = None
+    is_required: bool = True
+    variant_group: Optional[str] = None
+    parent_question_id: Optional[str] = None
+    followup_probes: List[str] = field(default_factory=list)
+    # Competency-driven enrichment (defaults keep legacy plans working)
+    follow_up_depth_allowed: int = 2
+    escalation_question: Optional[str] = None
+    anchor_alt_question: Optional[str] = None
+    rubric_levels: Dict[str, str] = field(default_factory=dict)
+    candidate_hooks: List[str] = field(default_factory=list)
 
     @classmethod
     def from_raw(cls, q: Any) -> "PlanQuestion":
@@ -688,6 +709,17 @@ class PlanQuestion:
                 stretch_key_points=list(q.get("stretch_key_points", [])),
                 trigger_condition=q.get("trigger_condition"),
                 probe_id=q.get("probe_id"),
+                id=str(q.get("id") or q.get("probe_id") or "") or None,
+                stage=q.get("stage"),
+                is_required=bool(q.get("is_required", True)),
+                variant_group=q.get("variant_group"),
+                parent_question_id=q.get("parent_question_id"),
+                followup_probes=list(q.get("followup_probes", []) or []),
+                follow_up_depth_allowed=int(q.get("follow_up_depth_allowed", 2) or 2),
+                escalation_question=q.get("escalation_question"),
+                anchor_alt_question=q.get("anchor_alt_question"),
+                rubric_levels=dict(q.get("rubric_levels", {}) or {}),
+                candidate_hooks=list(q.get("candidate_hooks", []) or []),
             )
         return cls(
             question_index=getattr(q, "question_index", 0),
@@ -700,6 +732,17 @@ class PlanQuestion:
             stretch_key_points=list(getattr(q, "stretch_key_points", [])),
             trigger_condition=getattr(q, "trigger_condition", None),
             probe_id=getattr(q, "probe_id", None),
+            id=str(getattr(q, "id", None) or getattr(q, "probe_id", None) or "") or None,
+            stage=getattr(q, "stage", None),
+            is_required=bool(getattr(q, "is_required", True)),
+            variant_group=getattr(q, "variant_group", None),
+            parent_question_id=getattr(q, "parent_question_id", None),
+            followup_probes=list(getattr(q, "followup_probes", []) or []),
+            follow_up_depth_allowed=int(getattr(q, "follow_up_depth_allowed", 2) or 2),
+            escalation_question=getattr(q, "escalation_question", None),
+            anchor_alt_question=getattr(q, "anchor_alt_question", None),
+            rubric_levels=dict(getattr(q, "rubric_levels", {}) or {}),
+            candidate_hooks=list(getattr(q, "candidate_hooks", []) or []),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -720,6 +763,9 @@ class ConductorState:
     current_question_index: int = -1
     current_skill_index: int = -1
     skill_names: List[str] = field(default_factory=list)
+    current_slot_id: Optional[str] = None
+    parent_slot_id: Optional[str] = None
+    script_plan: Optional[Dict[str, Any]] = None
 
     # Question tracking by skill
     # skill_name -> {"anchor": PlanQuestion, "anchor_alt": PlanQuestion, "escalation": PlanQuestion, "probes": [...]}
@@ -733,6 +779,12 @@ class ConductorState:
     off_topic_retries_per_question: Dict[int, int] = field(default_factory=dict)
     hypothetical_used_per_skill: Dict[str, bool] = field(default_factory=dict)
     insufficient_evidence_per_skill: Dict[str, bool] = field(default_factory=dict)
+    # Weight-proportional follow-up caps per skill (from each anchor's
+    # follow_up_depth_allowed); replaces the old hardcoded cap of 2.
+    max_followups_per_skill: Dict[str, int] = field(default_factory=dict)
+    # Last L1-L5 level the selector estimated per skill — lets the escalation
+    # ladder CONTINUE across turns instead of re-estimating blind.
+    estimated_level_per_skill: Dict[str, str] = field(default_factory=dict)
 
     # Ack-First streaming tracking
     spoken_ack_token: Optional[str] = None
@@ -812,6 +864,14 @@ class ConductorState:
     bridge_delay_ms: int = 700
     silence_delay_ms: int = 25000
 
+    # Agentic Director Memory & Brief
+    director_memory: Dict[str, Any] = field(default_factory=dict)
+    interviewer_brief: str = ""
+    topic_index: int = 0
+    topic_count: int = 0
+    agenda_adjustments: int = 0
+    agenda_clarifications: int = 0
+
     def copy(self) -> "ConductorState":
         return copy.deepcopy(self)
 
@@ -821,12 +881,16 @@ class ConductorState:
         d["phase_before_commit"] = self.phase_before_commit.value if self.phase_before_commit else None
         d["questions"] = [q.to_dict() for q in self.questions]
         d["pending_question_effects"] = []
+        d["director_memory"] = copy.deepcopy(self.director_memory)
         return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ConductorState":
         data = copy.deepcopy(data)
-        data["phase"] = ConductorPhase(data.get("phase", ConductorPhase.INIT.value))
+        raw_phase = data.get("phase", ConductorPhase.INIT.value)
+        if raw_phase in (ConductorPhase.WELCOME.value, ConductorPhase.READY_GATE.value, "welcome", "ready_gate"):
+            raw_phase = ConductorPhase.GREETING.value
+        data["phase"] = ConductorPhase(raw_phase)
         pbc = data.get("phase_before_commit")
         data["phase_before_commit"] = ConductorPhase(pbc) if pbc else None
         data.setdefault("question_index_before_commit", -1)
@@ -850,6 +914,8 @@ class ConductorState:
         data.setdefault("followups_used_per_skill", {})
         data.setdefault("clarify_used_per_skill", {})
         data.setdefault("covered_expectations_per_skill", {})
+        data.setdefault("max_followups_per_skill", {})
+        data.setdefault("estimated_level_per_skill", {})
         data.setdefault("asked_questions_history", [])
         data.setdefault("job_record", {})
         data.setdefault("qa_rounds_used", 0)
@@ -873,6 +939,10 @@ class ConductorState:
         data.setdefault("pending_question_effects", [])
         data.setdefault("off_topic_count_per_skill", {})
         data.setdefault("commit_at_ms", 0)
+        data.setdefault("director_memory", {})
+        data.setdefault("interviewer_brief", "")
+        data.setdefault("topic_index", 0)
+        data.setdefault("topic_count", 0)
         return cls(**data)
 
 
@@ -944,6 +1014,143 @@ def count_words(text: str) -> int:
     return len(re.findall(r"\b[\w'-]+\b", text))
 
 
+def _format_topic_list_for_speech(skill_names: List[str]) -> str:
+    """Format list of skills into natural spoken English, e.g. 'Python, Distributed Systems, and Database Architecture'."""
+    if not skill_names:
+        return "your technical background and core engineering topics"
+    if len(skill_names) == 1:
+        return skill_names[0]
+    if len(skill_names) == 2:
+        return f"{skill_names[0]} and {skill_names[1]}"
+    return f"{', '.join(skill_names[:-1])}, and {skill_names[-1]}"
+
+
+def classify_agenda_intent(text: str) -> str:
+    """Classify candidate intent in AGENDA_RESPONSE: affirmative, negative, or ambiguous."""
+    if not text:
+        return "ambiguous"
+    cleaned = text.strip().lower()
+    words = re.findall(r"\b[\w'-]+\b", cleaned)
+    if not words:
+        return "ambiguous"
+
+    # 1. Explicit adjustment / topic change requests (always negative / adjust)
+    adjustment_indicators = [
+        "can we adjust", "can we change", "can we skip", "could we adjust", "could we change",
+        "don't want", "dont want", "do not want", "prefer", "rather than", "instead of",
+        "different topic", "change the agenda", "change agenda", "not ready", "not yet",
+        "hold on", "wait a second", "wait a minute", "rather not",
+    ]
+    if any(p in cleaned for p in adjustment_indicators):
+        return "negative"
+
+    # 2. Check common polite affirmatives containing "no/not" before generic negation checks
+    common_affirmatives = [
+        "no problem", "no worries", "no concerns", "no objections", "no changes", "no change",
+        "not a problem", "not sure, but yes", "not sure but yes", "not sure, yes", "no issues",
+        "sounds good", "sounds great", "let's start", "lets start", "let's go", "lets go",
+        "let's do it", "all set", "good to go", "we can start", "ready to go", "ready to start",
+        "i'm ready", "im ready", "i am ready",
+    ]
+    if any(p in cleaned for p in common_affirmatives):
+        return "affirmative"
+
+    # 3. Standalone or generic negative words
+    negative_words = {
+        "no", "not", "nope", "nah", "wait", "hold", "stop", "pause", "change",
+        "adjust", "skip", "different", "cannot", "cant", "dont", "rather", "prefer"
+    }
+    if any(w in negative_words for w in words):
+        return "negative"
+
+    # 4. Affirmative words
+    affirmative_words = {
+        "yes", "yeah", "yep", "yup", "sure", "ready", "ok", "okay",
+        "fine", "absolutely", "definitely", "perfect", "good", "great"
+    }
+    if any(w in affirmative_words for w in words):
+        return "affirmative"
+
+    # 5. Short or partial utterance fallback
+    if len(words) <= 3:
+        return "affirmative"
+
+    return "ambiguous"
+
+
+def extract_prioritized_skill(text: str, skill_names: List[str]) -> Optional[str]:
+    """Parse candidate requested topic from text, correctly handling negation and preferences."""
+    if not text or not skill_names:
+        return None
+    text_lower = text.lower()
+
+    # 1. Check pair-wise preference patterns between skills
+    for s1 in skill_names:
+        for s2 in skill_names:
+            if s1 == s2:
+                continue
+            s1_low, s2_low = s1.lower(), s2.lower()
+            if s1_low in text_lower and s2_low in text_lower:
+                # "prefer X over Y", "rather X than Y"
+                p1 = rf"\b(prefer|rather|choose|take)\b[^,.;!?]*\b{re.escape(s1_low)}\b[^,.;!?]*\b(over|than|to|instead of)\b[^,.;!?]*\b{re.escape(s2_low)}\b"
+                if re.search(p1, text_lower):
+                    return s1
+                # "X instead of Y", "X rather than Y", "X is better than Y", "X would be better than Y"
+                p2 = rf"\b{re.escape(s1_low)}\b[^,.;!?]*\b(instead of|rather than|is better than|would be better than|over)\b[^,.;!?]*\b{re.escape(s2_low)}\b"
+                if re.search(p2, text_lower):
+                    return s1
+
+    # 2. Check focus / start with patterns
+    for s in skill_names:
+        s_low = s.lower()
+        if s_low in text_lower:
+            p_focus = rf"\b(focus on|start with|dive into|lead with|begin with|prioritize)\b[^,.;!?]*\b{re.escape(s_low)}\b"
+            if re.search(p_focus, text_lower):
+                return s
+
+    # 3. Check negation vs positive mentions
+    negated_skills = set()
+    positive_skills = []
+    negation_prefix = r"\b(don't want|dont want|do not want|not|no|skip|avoid|without|instead of|rather than|over)\b[^,.;!?]*\b"
+
+    for s in skill_names:
+        s_lower = s.lower()
+        if s_lower in text_lower:
+            pattern = negation_prefix + re.escape(s_lower)
+            if re.search(pattern, text_lower):
+                negated_skills.add(s)
+            else:
+                positive_skills.append(s)
+
+    if positive_skills:
+        return positive_skills[0]
+    if negated_skills:
+        for s in skill_names:
+            if s not in negated_skills:
+                return s
+    return None
+
+
+def classify_greeting_reply(text: str) -> str:
+    """Classify candidate's greeting reply into an empathetic acknowledgment."""
+    if not text:
+        return ""
+    t = text.lower().strip()
+    # Check for nervous / anxious / stressed
+    if re.search(r"\b(nervous|anxious|stressed|tense|apprehensive|scared|worried|intimidated)\b", t):
+        return "Totally normal to feel a bit nervous. We'll take it one step at a time."
+    # Check for negative / sick / tired / unwell
+    if re.search(r"\b(not (great|good|well)|bad|terrible|awful|horrible|tired|exhausted|sick|headache|rough|unwell)\b", t):
+        return "Sorry to hear that, but thanks for making the time. We'll keep things straightforward."
+    # Check for positive
+    if re.search(r"\b(good|great|well|fine|doing well|doing good|awesome|fantastic|wonderful|excited)\b", t):
+        return "Glad to hear that."
+    # Generic / neutral greeting (e.g. "hi", "hello", "ready", "thanks", "i am okay")
+    if re.search(r"\b(okay|ok|alright|all right)\b", t):
+        return "Sounds good."
+    return "Thanks for joining."
+
+
 def matches_ready_intent(text: str) -> bool:
     """True if text indicates candidate readiness to begin the interview."""
     if not text:
@@ -951,6 +1158,13 @@ def matches_ready_intent(text: str) -> bool:
     cleaned = text.strip().lower()
     words = re.findall(r"\b[\w']+\b", cleaned)
     if not words:
+        return False
+
+    # Negative words check first: NEVER match readiness on negative intent
+    negative_words = {"not", "no", "never", "don't", "dont", "cannot", "cant", "wait", "stop", "hold"}
+    if any(w in negative_words for w in words):
+        return False
+    if any(p in cleaned for p in ("not ready", "not yet", "don't want", "dont want", "wait a second", "hold on")):
         return False
 
     # 1. Single-word affirmative or short affirmative (<= 4 words) containing a ready keyword
@@ -1008,6 +1222,93 @@ INTRO_FILTER_WORDS: Set[str] = {
 }
 
 
+# Short-answer phrases that signal the candidate does not know the topic.
+# Strong phrases trigger at up to ~25 words; weaker hedges only when the whole
+# answer is very short (so "not sure, but I used Kafka with..." still counts as
+# partial knowledge worth probing).
+NO_KNOWLEDGE_STRONG_PHRASES: List[str] = [
+    "i don't know", "i dont know", "i do not know", "no idea",
+    "i have no idea", "no clue", "never heard of it", "never heard of that",
+    "don't know about that", "dont know about that",
+    "no experience", "never used", "never worked", "not familiar",
+    "haven't used", "have not used", "not aware", "no exposure",
+]
+NO_KNOWLEDGE_WEAK_PHRASES: List[str] = [
+    "not sure", "don't remember", "dont remember", "can't recall",
+    "cant recall", "not my area", "not my expertise", "skip",
+]
+
+
+def looks_like_no_knowledge_answer(text: str) -> bool:
+    """True when a short committed answer signals the candidate does not know
+    the current topic. Used to guarantee the interviewer swaps the question or
+    moves on instead of probing or clarifying an admission of no knowledge."""
+    if not text:
+        return False
+    cleaned = unicodedata.normalize("NFKC", text).strip().lower()
+    cleaned = cleaned.replace("’", "'").replace("‘", "'")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    words = cleaned.split()
+    if not words or len(words) > 25:
+        return False
+    if any(p in cleaned for p in NO_KNOWLEDGE_STRONG_PHRASES):
+        return True
+    if len(words) <= 8 and any(p in cleaned for p in NO_KNOWLEDGE_WEAK_PHRASES):
+        return True
+    return False
+
+
+# Short utterances where the "answer" is really a repeat request or a
+# connectivity complaint (the candidate never saw/heard the question — e.g.
+# stuck on "Connecting..." while the interview kept running). The interviewer
+# must re-ask the current question, never advance past it.
+REPEAT_REQUEST_PHRASES: List[str] = [
+    "repeat the question", "repeat that", "repeat the same", "can you repeat",
+    "could you repeat", "please repeat", "say that again", "say it again",
+    "come again", "pardon",
+    "didn't see the question", "did not see the question",
+    "didn't hear the question", "did not hear the question",
+    "didn't get the question", "did not get the question",
+    "can't hear you", "cant hear you", "can you hear me",
+    "reading the question", "just got the question", "got the question now",
+    "question just appeared", "see the question now", "didn't see anything",
+    "still loading", "still connecting", "screen is blank", "screen is not",
+    "nothing is showing", "nothing is coming", "no sound",
+]
+
+
+def looks_like_repeat_request(text: str) -> bool:
+    """True when a short committed utterance is a repeat request or a
+    connectivity complaint rather than an answer to the current question."""
+    if not text:
+        return False
+    cleaned = unicodedata.normalize("NFKC", text).strip().lower()
+    cleaned = cleaned.replace("’", "'").replace("‘", "'")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    words = cleaned.split()
+    if not words or len(words) > 30:
+        return False
+    return any(p in cleaned for p in REPEAT_REQUEST_PHRASES)
+
+
+def answer_echoes_question(answer: str, question: str) -> bool:
+    """True when the committed answer largely repeats the question's own words —
+    the candidate read the question back (STT capture of the on-screen text or
+    a stall) instead of answering it. The interviewer should re-ask, not grade."""
+    if not answer or not question:
+        return False
+    if not (8 <= len(answer.split()) <= 45):
+        return False
+    a_words = [w for w in re.findall(r"[a-z']+", normalize_text(answer)) if len(w) > 2 and w not in STOPWORDS]
+    if len(a_words) < 5:
+        return False
+    q_words = set(re.findall(r"[a-z']+", normalize_text(question)))
+    if not q_words:
+        return False
+    overlap = sum(1 for w in a_words if w in q_words) / len(a_words)
+    return overlap >= 0.6
+
+
 def is_qa_done_phrase(text: str) -> bool:
     """True if candidate expresses having no more questions in Candidate Q&A."""
     cleaned = normalize_text(text)
@@ -1061,20 +1362,58 @@ def extract_content_words(text: str) -> Set[str]:
     return {w for w in raw_words if len(w) >= 3 and w not in COMMON_STOP_WORDS}
 
 
+NEUTRAL_ACK_TEXTS: Set[str] = {
+    "understood", "got it", "no problem", "right", "okay", "ok", "thanks",
+    "thank you", "sure", "of course", "i see", "makes sense", "fair enough",
+    "alright", "all right", "noted", "absolutely",
+}
+
+
+def _shares_word_run(ack: str, source: str, run_len: int = 5) -> bool:
+    """True if ack copies `run_len`+ consecutive words verbatim from source."""
+    def words(t: str) -> List[str]:
+        return re.findall(r"[a-z0-9']+", t.lower())
+    a, s = words(ack), words(source)
+    if not a or not s:
+        return False
+    for i in range(len(a) - run_len + 1):
+        if a[i : i + run_len] in [s[j : j + run_len] for j in range(len(s) - run_len + 1)]:
+            return True
+    return False
+
+
 def is_ack_grounded(ack: str, candidate_answer: str, question_text: str = "") -> bool:
-    """True if ack shares >= 1 content word with candidate answer that is NOT in current question text."""
+    """True if the ack is safe to speak over voice.
+
+    Grounding rules (relaxed so the hot path never needs a second LLM call):
+    1. Short neutral acknowledgments are always safe.
+    2. An ack sharing >= 1 content word with the candidate's answer is safe,
+       even if that technical term also appeared in the question.
+    3. An ack copying 5+ consecutive words from the question (echo) or the
+       answer (parroting) is never safe.
+    """
     if not ack or not candidate_answer:
+        return False
+    ack_norm = re.sub(r"[^a-z0-9' ]", "", ack.lower()).strip()
+    if ack_norm in NEUTRAL_ACK_TEXTS:
+        return True
+    if question_text and _shares_word_run(ack, question_text, 5):
+        return False
+    if _shares_word_run(ack, candidate_answer, 5):
         return False
     ans_words = extract_content_words(candidate_answer)
     if not ans_words:
         return False
+    ack_words = extract_content_words(ack)
+    if ack_words.intersection(ans_words):
+        return True
+    # Legacy distinct-word rule as a final fallback: answer words that never
+    # appeared in the question are the strongest grounding signal.
     q_words = extract_content_words(question_text)
     distinct_ans_words = ans_words - q_words
     if not distinct_ans_words:
         return False
-    ack_words = extract_content_words(ack)
-    shared = ack_words.intersection(distinct_ans_words)
-    return len(shared) >= 1
+    return len(ack_words.intersection(distinct_ans_words)) >= 1
 
 
 FORBIDDEN_ACK_PHRASES: List[str] = [
@@ -1152,9 +1491,12 @@ def validate_qa_decision(
     if not decision:
         return APPROVED_QA_DEFERRAL, "", []
 
-    raw_followup = str(decision.get("followup") or "").strip()
+    raw_followup = str(decision.get("answer") or decision.get("followup") or decision.get("question") or "").strip()
     source_facts = list(decision.get("source_facts", []) or [])
     raw_ack = str(decision.get("ack") or "").strip()
+
+    if not raw_followup:
+        return APPROVED_QA_DEFERRAL, "", []
 
     # Check for forbidden hallucinated topics in candidate question, proposed answer, or raw ack
     norm_check = re.sub(r"[-\s]+", " ", f"{candidate_question} {raw_followup} {raw_ack}".lower())
@@ -1367,7 +1709,14 @@ def get_next_bridge(last_index: int) -> Tuple[str, int]:
 
 def get_next_plan_question(state: ConductorState) -> Optional[PlanQuestion]:
     """Determine the next question according to blueprint pacing and rules."""
-    if state.phase in (ConductorPhase.WELCOME, ConductorPhase.READY_GATE):
+    if state.phase in (
+        ConductorPhase.GREETING,
+        ConductorPhase.GREETING_RESPONSE,
+        ConductorPhase.AGENDA,
+        ConductorPhase.AGENDA_RESPONSE,
+        ConductorPhase.WELCOME,
+        ConductorPhase.READY_GATE,
+    ):
         return next((q for q in state.questions if q.kind == "intro_hook"), None)
 
     if state.phase == ConductorPhase.INTRO:
@@ -1422,16 +1771,19 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         questions.sort(key=lambda q: q.question_index)
         new_state.questions = questions
 
-        # Index skill sections
+        # Index skill sections. Background-family slots (intro, resume-probe
+        # walkthrough) are NOT skills — indexing them by a stage-derived name
+        # used to register a fake "Background" skill with no anchor, corrupting
+        # skill order and swallowing the projects walkthrough.
         skill_dict: Dict[str, Dict[str, Any]] = {}
         skill_names_ordered: List[str] = []
         for q in questions:
-            if q.kind in ("anchor", "anchor_alt", "escalation", "probe", "resume_probe"):
-                s_name = q.skill_name or "General"
+            if q.kind in ("anchor", "anchor_alt", "escalation", "probe", "custom"):
+                s_name = q.skill_name or ("Custom Screening" if q.kind == "custom" else "General")
                 if s_name not in skill_dict:
                     skill_dict[s_name] = {"probes": []}
                     skill_names_ordered.append(s_name)
-                if q.kind == "anchor":
+                if q.kind in ("anchor", "custom"):
                     skill_dict[s_name]["anchor"] = q
                 elif q.kind == "anchor_alt":
                     skill_dict[s_name]["anchor_alt"] = q
@@ -1446,11 +1798,18 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         new_state.followups_used_per_skill = {s: 0 for s in skill_names_ordered}
         new_state.clarify_used_per_skill = {s: False for s in skill_names_ordered}
         new_state.covered_expectations_per_skill = {s: [] for s in skill_names_ordered}
+        # Weight-proportional follow-up caps from each skill's anchor slot
+        new_state.max_followups_per_skill = {
+            s: int((skill_dict[s].get("anchor").follow_up_depth_allowed if skill_dict[s].get("anchor") else 0) or 2)
+            for s in skill_names_ordered
+        }
         new_state.qa_rounds_used = 0
 
         # Extract job_record if available in plan
         if isinstance(event.plan, dict):
             new_state.job_record = dict(event.plan.get("job_record", {}) or {})
+            if "script_plan" in event.plan:
+                new_state.script_plan = event.plan["script_plan"]
             if "decision_timeout_ms" in event.plan:
                 new_state.decision_timeout_ms = int(event.plan["decision_timeout_ms"])
             if "bridge_delay_ms" in event.plan:
@@ -1473,18 +1832,26 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         }
         new_state.skill_time_spent_ms = {s: 0 for s in skill_names_ordered}
 
-        # Locate Welcome question (Requirement 8: spoken welcome with role title and duration)
-        welcome_q = next((q for q in questions if q.kind == "welcome"), None)
-        role_title = new_state.job_record.get("title", "Software Engineer") if new_state.job_record else "Software Engineer"
-        duration_mins = int(event.plan.get("duration_planned_mins", 25)) if isinstance(event.plan, dict) and event.plan.get("duration_planned_mins") else 25
-        welcome_text = (
-            welcome_q.question_text
-            if welcome_q and welcome_q.question_text
-            else f"Hi there! Welcome to your interview for the {role_title} role. We will spend about {duration_mins} minutes together today covering technical topics and your questions. Ready to begin?"
+        # Locate Greeting / Welcome question (Target UX Step 1: Greeting)
+        plan_greeting_q = next(
+            (q for q in questions if q.kind in ("greeting", "welcome") or getattr(q, "stage", None) == "greeting"),
+            None
         )
-        new_state.asked_questions_history = [welcome_text]
+        if plan_greeting_q and (plan_greeting_q.kind == "greeting" or getattr(plan_greeting_q, "stage", None) == "greeting"):
+            greeting_text = plan_greeting_q.question_text
+            welcome_q = plan_greeting_q
+            new_state.current_slot_id = getattr(plan_greeting_q, "id", None) or getattr(plan_greeting_q, "probe_id", None)
+        else:
+            welcome_q = next((q for q in questions if q.kind == "welcome"), None)
+            plan_meta = event.plan.get("metadata", {}) if isinstance(event.plan, dict) else {}
+            role_title = plan_meta.get("job_title") or (new_state.job_record.get("title", "Software Engineer") if new_state.job_record else "Software Engineer")
+            greeting_text = f"Hi, I’m your interviewer for the {role_title}. Thanks for making the time today. How are you?"
 
-        new_state.phase = ConductorPhase.WELCOME
+        new_state.asked_questions_history = [greeting_text]
+
+        new_state.phase = ConductorPhase.GREETING
+        new_state.topic_count = len(skill_names_ordered)
+        new_state.topic_index = 0
         new_state.current_question_index = welcome_q.question_index if welcome_q else 0
         new_state.speech_seq += 1
         speech_id = f"speech_{new_state.speech_seq}"
@@ -1492,8 +1859,16 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         new_state.bot_speaking = True
         new_state.bot_audio_started = False
 
-        effects.append(Speak(text=welcome_text, speech_id=speech_id))
-        effects.append(EmitUI(status="welcome", payload={"question_text": welcome_text}))
+        effects.append(Speak(text=greeting_text, speech_id=speech_id, kind="greeting", question_text=greeting_text))
+        effects.append(EmitUI(status="greeting", payload={
+            "display_question": greeting_text,
+            "spoken_text": greeting_text,
+            "question_text": greeting_text,
+            "phase": "greeting",
+            "topic_index": 0,
+            "topic_count": new_state.topic_count,
+            "topic_label": "Introduction",
+        }))
         return new_state, effects
 
     # 2. EndButton (User requested immediate exit)
@@ -1508,7 +1883,7 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
             new_state.active_speculation_token = None
 
         effects.append(CancelSpeech())
-        new_state.phase = ConductorPhase.COMPLETED
+        new_state.phase = ConductorPhase.CLOSING
         new_state.speech_seq += 1
         end_speech_id = f"speech_{new_state.speech_seq}"
         new_state.active_speech_id = end_speech_id
@@ -1516,16 +1891,359 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         new_state.bot_audio_started = False
 
         close_text = "Thank you for taking the time to speak with me today. The interview is now concluded. Have a wonderful day!"
-        effects.append(Speak(text=close_text, speech_id=end_speech_id))
-        effects.append(EmitUI(status="completed", payload={"reason": "ended_by_candidate"}))
+        effects.append(Speak(text=close_text, speech_id=end_speech_id, kind="closing", question_id="closing"))
+        effects.append(EmitUI(status="closing", payload={"reason": "ended_by_candidate"}))
+
+        # Schedule bounded 12s fallback timeout for closing audio in case playback_ended is delayed or absent
+        new_state.timer_seq += 1
+        closing_token = f"closing_{new_state.timer_seq}"
+        new_state.active_timers["closing"] = {"at_ms": event.now_ms + 12000, "token": closing_token}
+        effects.append(ScheduleTimer(name="closing", at_ms=event.now_ms + 12000, token=closing_token, delay_ms=12000))
         return new_state, effects
 
-    # 3. Ready Gate handling (ReadyButton, CommitButton, TurnEnd, or EagerTurnEnd matching ready-intent)
+    # 3. Opening Flow: GREETING, GREETING_RESPONSE, AGENDA, AGENDA_RESPONSE, and legacy READY_GATE
+    if new_state.phase in (
+        ConductorPhase.GREETING,
+        ConductorPhase.GREETING_RESPONSE,
+        ConductorPhase.AGENDA,
+        ConductorPhase.AGENDA_RESPONSE,
+        ConductorPhase.READY_GATE,
+    ):
+        # ReadyButton or CommitButton bypasses opening conversational greeting directly to INTRO
+        if isinstance(event, (ReadyButton, CommitButton)):
+            for t_name in ("greeting_silence", "agenda_silence", "silence", "commit"):
+                if t_name in new_state.active_timers:
+                    effects.append(CancelTimer(name=t_name))
+                    new_state.active_timers.pop(t_name, None)
+
+            if new_state.bot_speaking and new_state.active_speech_id:
+                effects.append(CancelSpeech(speech_id=new_state.active_speech_id))
+                new_state.bot_speaking = False
+
+            if new_state.active_speculation_token:
+                effects.append(CancelSpeculativeReply(token=new_state.active_speculation_token))
+                new_state.active_speculation_token = None
+                new_state.speculation_source_text = ""
+
+            background_q = next(
+                (q for q in new_state.questions if getattr(q, "stage", None) == "background" or q.kind == "background"),
+                None
+            )
+            if not background_q:
+                background_q = next((q for q in new_state.questions if q.kind == "intro_hook"), None)
+
+            if background_q:
+                intro_text = background_q.question_text
+                new_state.current_slot_id = getattr(background_q, "id", None) or getattr(background_q, "probe_id", None)
+                new_state.current_question_index = getattr(background_q, "question_index", 1)
+            else:
+                intro_text = "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+                new_state.current_question_index = 1
+            spoken_intro = intro_text
+
+            new_state.phase = ConductorPhase.INTRO
+            new_state.asked_questions_history.append(intro_text)
+            new_state.speech_seq += 1
+            speech_id = f"speech_{new_state.speech_seq}"
+            new_state.active_speech_id = speech_id
+            new_state.bot_speaking = True
+            new_state.bot_audio_started = False
+            new_state.answer_buffer = ""
+            new_state.seen_turn_ids.clear()
+            new_state.is_committed = False
+            new_state.is_accumulating = False
+            new_state.accumulation_started_ms = 0
+
+            effects.append(Speak(text=spoken_intro, speech_id=speech_id, question_text=intro_text, kind=getattr(background_q, "kind", "intro_hook") if background_q else "intro_hook"))
+            effects.append(EmitUI(status="intro", payload={
+                "display_question": intro_text,
+                "spoken_text": spoken_intro,
+                "question_text": intro_text,
+                "phase": "intro",
+                "topic_index": 0,
+                "topic_count": new_state.topic_count,
+                "topic_label": "Background",
+            }))
+            return new_state, effects
+
+    if new_state.phase == ConductorPhase.GREETING_RESPONSE:
+        # Bounded opening response window: TurnEnd moves to AGENDA (legacy) or directly to INTRO (plan-driven)
+        if isinstance(event, TurnEnd):
+            if "greeting_silence" in new_state.active_timers:
+                effects.append(CancelTimer(name="greeting_silence"))
+                new_state.active_timers.pop("greeting_silence", None)
+
+            greeting_reply = event.text.strip()
+            ack_prefix = classify_greeting_reply(greeting_reply) if greeting_reply else ""
+
+            # Check if this session has an authoritative plan greeting
+            has_script_plan = bool(
+                new_state.script_plan is not None
+                or any(getattr(q, "stage", None) in ("greeting", "background") or q.kind == "greeting" for q in new_state.questions)
+            )
+
+            if has_script_plan:
+                intro_q = next(
+                    (q for q in new_state.questions if q.kind in ("background", "intro_hook") or getattr(q, "stage", None) == "background"),
+                    None
+                )
+                intro_text = (
+                    intro_q.question_text
+                    if intro_q and intro_q.question_text
+                    else "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+                )
+                spoken_intro = f"{ack_prefix} {intro_text}".strip() if ack_prefix else intro_text
+
+                new_state.phase = ConductorPhase.INTRO
+                new_state.current_question_index = intro_q.question_index if intro_q else 1
+                new_state.current_slot_id = getattr(intro_q, "id", None) or getattr(intro_q, "probe_id", None)
+                new_state.speech_seq += 1
+                speech_id = f"speech_{new_state.speech_seq}"
+                new_state.active_speech_id = speech_id
+                new_state.bot_speaking = True
+                new_state.bot_audio_started = False
+                new_state.answer_buffer = ""
+                new_state.seen_turn_ids.clear()
+                new_state.is_committed = False
+                new_state.is_accumulating = False
+                new_state.accumulation_started_ms = 0
+
+                effects.append(Speak(text=spoken_intro, speech_id=speech_id, ack_text=ack_prefix, question_text=intro_text, kind="intro_hook"))
+                effects.append(EmitUI(status="intro", payload={
+                    "display_question": intro_text,
+                    "spoken_text": spoken_intro,
+                    "question_text": intro_text,
+                    "ack_text": ack_prefix,
+                    "phase": "intro",
+                    "topic_index": 0,
+                    "topic_count": new_state.topic_count,
+                    "topic_label": "Background",
+                }))
+                return new_state, effects
+
+            skills = new_state.skill_names
+            topic_str = _format_topic_list_for_speech(skills)
+            agenda_q = f"Today I’d like to cover {topic_str}, and leave a few minutes for your questions. Does that sound good?"
+            spoken_agenda = f"{ack_prefix} {agenda_q}".strip() if ack_prefix else agenda_q
+
+            new_state.phase = ConductorPhase.AGENDA
+            new_state.speech_seq += 1
+            speech_id = f"speech_{new_state.speech_seq}"
+            new_state.active_speech_id = speech_id
+            new_state.bot_speaking = True
+            new_state.bot_audio_started = False
+
+            effects.append(Speak(text=spoken_agenda, speech_id=speech_id, ack_text=ack_prefix, question_text=agenda_q, kind="agenda"))
+            effects.append(EmitUI(status="agenda", payload={
+                "display_question": agenda_q,
+                "spoken_text": spoken_agenda,
+                "question_text": agenda_q,
+                "ack_text": ack_prefix,
+                "phase": "agenda",
+                "topic_index": 0,
+                "topic_count": new_state.topic_count,
+                "topic_label": "Agenda",
+            }))
+            return new_state, effects
+
+    if new_state.phase == ConductorPhase.AGENDA_RESPONSE:
+        if isinstance(event, TurnEnd):
+            if "agenda_silence" in new_state.active_timers:
+                effects.append(CancelTimer(name="agenda_silence"))
+                new_state.active_timers.pop("agenda_silence", None)
+
+            # 1. Candidate previously asked to adjust agenda -> apply adjustment and transition to INTRO
+            if new_state.agenda_adjustments > 0:
+                prioritized_skill = extract_prioritized_skill(event.text, new_state.skill_names)
+                if prioritized_skill:
+                    new_state.skill_names = [prioritized_skill] + [s for s in new_state.skill_names if s != prioritized_skill]
+                    ack_str = f"Noted, we will prioritize {prioritized_skill} first."
+                else:
+                    ack_str = "Noted, we will adjust our focus as we go."
+
+                intro_q = next((q for q in new_state.questions if q.kind == "intro_hook"), None)
+                intro_text = (
+                    intro_q.question_text
+                    if intro_q
+                    else "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+                )
+                spoken_intro = f"{ack_str} {intro_text}"
+                new_state.phase = ConductorPhase.INTRO
+                new_state.current_question_index = intro_q.question_index if intro_q else 1
+                new_state.speech_seq += 1
+                speech_id = f"speech_{new_state.speech_seq}"
+                new_state.active_speech_id = speech_id
+                new_state.bot_speaking = True
+                new_state.bot_audio_started = False
+                new_state.answer_buffer = ""
+                new_state.seen_turn_ids.clear()
+                new_state.is_committed = False
+                new_state.is_accumulating = False
+                new_state.accumulation_started_ms = 0
+
+                effects.append(Speak(text=spoken_intro, speech_id=speech_id, ack_text=ack_str, question_text=intro_text, kind="intro_hook"))
+                effects.append(EmitUI(status="intro", payload={
+                    "display_question": intro_text,
+                    "spoken_text": spoken_intro,
+                    "question_text": intro_text,
+                    "ack_text": ack_str,
+                    "phase": "intro",
+                    "topic_index": 0,
+                    "topic_count": new_state.topic_count,
+                    "topic_label": "Background",
+                }))
+                return new_state, effects
+
+            # 2. Candidate previously asked for clarification -> advance to INTRO
+            if new_state.agenda_clarifications > 0:
+                intro_q = next((q for q in new_state.questions if q.kind == "intro_hook"), None)
+                intro_text = (
+                    intro_q.question_text
+                    if intro_q
+                    else "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+                )
+                spoken_intro = f"Sounds good, let's dive in. {intro_text}"
+                new_state.phase = ConductorPhase.INTRO
+                new_state.current_question_index = intro_q.question_index if intro_q else 1
+                new_state.speech_seq += 1
+                speech_id = f"speech_{new_state.speech_seq}"
+                new_state.active_speech_id = speech_id
+                new_state.bot_speaking = True
+                new_state.bot_audio_started = False
+                new_state.answer_buffer = ""
+                new_state.seen_turn_ids.clear()
+                new_state.is_committed = False
+                new_state.is_accumulating = False
+                new_state.accumulation_started_ms = 0
+
+                effects.append(Speak(text=spoken_intro, speech_id=speech_id, ack_text="Sounds good, let's dive in.", question_text=intro_text, kind="intro_hook"))
+                effects.append(EmitUI(status="intro", payload={
+                    "display_question": intro_text,
+                    "spoken_text": spoken_intro,
+                    "question_text": intro_text,
+                    "ack_text": "Sounds good, let's dive in.",
+                    "phase": "intro",
+                    "topic_index": 0,
+                    "topic_count": new_state.topic_count,
+                    "topic_label": "Background",
+                }))
+                return new_state, effects
+
+            # 3. Initial response classification
+            agenda_intent = classify_agenda_intent(event.text)
+            if agenda_intent == "affirmative":
+                intro_q = next((q for q in new_state.questions if q.kind == "intro_hook"), None)
+                intro_text = (
+                    intro_q.question_text
+                    if intro_q
+                    else "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+                )
+                spoken_intro = f"Great. {intro_text}"
+
+                new_state.phase = ConductorPhase.INTRO
+                new_state.current_question_index = intro_q.question_index if intro_q else 1
+                new_state.speech_seq += 1
+                speech_id = f"speech_{new_state.speech_seq}"
+                new_state.active_speech_id = speech_id
+                new_state.bot_speaking = True
+                new_state.bot_audio_started = False
+                new_state.answer_buffer = ""
+                new_state.seen_turn_ids.clear()
+                new_state.is_committed = False
+                new_state.is_accumulating = False
+                new_state.accumulation_started_ms = 0
+
+                effects.append(Speak(text=spoken_intro, speech_id=speech_id, ack_text="Great.", question_text=intro_text, kind="intro_hook"))
+                effects.append(EmitUI(status="intro", payload={
+                    "display_question": intro_text,
+                    "spoken_text": spoken_intro,
+                    "question_text": intro_text,
+                    "ack_text": "Great.",
+                    "phase": "intro",
+                    "topic_index": 0,
+                    "topic_count": new_state.topic_count,
+                    "topic_label": "Background",
+                }))
+                return new_state, effects
+            elif agenda_intent == "negative":
+                prioritized_skill = extract_prioritized_skill(event.text, new_state.skill_names)
+                if prioritized_skill:
+                    new_state.skill_names = [prioritized_skill] + [s for s in new_state.skill_names if s != prioritized_skill]
+                    ack_str = f"Noted, we will prioritize {prioritized_skill} first."
+                    intro_q = next((q for q in new_state.questions if q.kind == "intro_hook"), None)
+                    intro_text = (
+                        intro_q.question_text
+                        if intro_q
+                        else "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+                    )
+                    spoken_intro = f"{ack_str} {intro_text}"
+                    new_state.phase = ConductorPhase.INTRO
+                    new_state.current_question_index = intro_q.question_index if intro_q else 1
+                    new_state.speech_seq += 1
+                    speech_id = f"speech_{new_state.speech_seq}"
+                    new_state.active_speech_id = speech_id
+                    new_state.bot_speaking = True
+                    new_state.bot_audio_started = False
+                    new_state.answer_buffer = ""
+                    new_state.seen_turn_ids.clear()
+                    new_state.is_committed = False
+                    new_state.is_accumulating = False
+                    new_state.accumulation_started_ms = 0
+
+                    effects.append(Speak(text=spoken_intro, speech_id=speech_id, ack_text=ack_str, question_text=intro_text, kind="intro_hook"))
+                    effects.append(EmitUI(status="intro", payload={
+                        "display_question": intro_text,
+                        "spoken_text": spoken_intro,
+                        "question_text": intro_text,
+                        "ack_text": ack_str,
+                        "phase": "intro",
+                        "topic_index": 0,
+                        "topic_count": new_state.topic_count,
+                        "topic_label": "Background",
+                    }))
+                    return new_state, effects
+
+                new_state.agenda_adjustments += 1
+                # Reschedule agenda_silence timer (5.0s) so silence doesn't hang
+                new_state.timer_seq += 1
+                silence_token = f"agenda_silence_{new_state.timer_seq}"
+                new_state.active_timers["agenda_silence"] = {"at_ms": event.now_ms + 5000, "token": silence_token}
+                effects.append(ScheduleTimer(name="agenda_silence", at_ms=event.now_ms + 5000, token=silence_token, delay_ms=5000))
+
+                resp = "Understood. What would you like to adjust about our agenda before we get started?"
+                new_state.speech_seq += 1
+                speech_id = f"speech_{new_state.speech_seq}"
+                new_state.active_speech_id = speech_id
+                new_state.bot_speaking = True
+                new_state.bot_audio_started = False
+                effects.append(Speak(text=resp, speech_id=speech_id, question_text=resp, kind="agenda_adjustment"))
+                effects.append(EmitUI(status="agenda_adjustment", payload={"display_question": resp, "spoken_text": resp, "question_text": resp, "phase": "agenda_response"}))
+                return new_state, effects
+            else:
+                # Ambiguous: ask 1 short clarification
+                new_state.agenda_clarifications += 1
+                # Reschedule agenda_silence timer (5.0s) so silence doesn't hang
+                new_state.timer_seq += 1
+                silence_token = f"agenda_silence_{new_state.timer_seq}"
+                new_state.active_timers["agenda_silence"] = {"at_ms": event.now_ms + 5000, "token": silence_token}
+                effects.append(ScheduleTimer(name="agenda_silence", at_ms=event.now_ms + 5000, token=silence_token, delay_ms=5000))
+
+                clarify = "Shall we go ahead with this plan, or did you have any questions first?"
+                new_state.speech_seq += 1
+                speech_id = f"speech_{new_state.speech_seq}"
+                new_state.active_speech_id = speech_id
+                new_state.bot_speaking = True
+                new_state.bot_audio_started = False
+                effects.append(Speak(text=clarify, speech_id=speech_id, question_text=clarify, kind="agenda_clarify"))
+                effects.append(EmitUI(status="agenda_clarify", payload={"display_question": clarify, "spoken_text": clarify, "question_text": clarify, "phase": "agenda_response"}))
+                return new_state, effects
+
+    # Legacy READY_GATE handling (ReadyButton, CommitButton, TurnEnd matching ready-intent)
     if new_state.phase == ConductorPhase.READY_GATE:
         ready_detected = False
         if isinstance(event, (ReadyButton, CommitButton)):
             ready_detected = True
-        elif isinstance(event, (TurnEnd, EagerTurnEnd)):
+        elif isinstance(event, TurnEnd):
             if matches_ready_intent(event.text):
                 ready_detected = True
 
@@ -1547,14 +2265,23 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
                 new_state.speculation_source_text = ""
 
             # Proceed to Intro
-            intro_q = next((q for q in new_state.questions if q.kind == "intro_hook"), None)
-            intro_text = (
-                intro_q.question_text
-                if intro_q
-                else "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+            background_q = next(
+                (q for q in new_state.questions if getattr(q, "stage", None) == "background" or q.kind == "background"),
+                None
             )
+            if not background_q:
+                background_q = next((q for q in new_state.questions if q.kind == "intro_hook"), None)
+
+            if background_q:
+                intro_text = background_q.question_text
+                new_state.current_slot_id = getattr(background_q, "id", None) or getattr(background_q, "probe_id", None)
+                new_state.current_question_index = getattr(background_q, "question_index", 1)
+            else:
+                intro_text = "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+                new_state.current_question_index = 1
+
             new_state.phase = ConductorPhase.INTRO
-            new_state.current_question_index = intro_q.question_index if intro_q else 1
+            new_state.asked_questions_history.append(intro_text)
             new_state.speech_seq += 1
             speech_id = f"speech_{new_state.speech_seq}"
             new_state.active_speech_id = speech_id
@@ -1566,8 +2293,8 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
             new_state.is_accumulating = False
             new_state.accumulation_started_ms = 0
 
-            effects.append(Speak(text=intro_text, speech_id=speech_id))
-            effects.append(EmitUI(status="intro", payload={"question_text": intro_text}))
+            effects.append(Speak(text=intro_text, speech_id=speech_id, question_text=intro_text, kind=getattr(background_q, "kind", "intro_hook") if background_q else "intro_hook"))
+            effects.append(EmitUI(status="intro", payload={"display_question": intro_text, "question_text": intro_text, "phase": "intro"}))
             return new_state, effects
 
     # 4. RepeatRequest handling
@@ -1694,14 +2421,31 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
             if event.speech_id and event.speech_id.startswith("silence_repeat_speech_"):
                 return new_state, effects
 
-            # After Welcome speech finishes -> transition to READY_GATE
-            if new_state.phase == ConductorPhase.WELCOME:
-                new_state.phase = ConductorPhase.READY_GATE
-                effects.append(EmitUI(status="waiting_for_ready", payload={"prompt": "Candidate can click Ready or say they are ready"}))
+            # After Greeting / Welcome speech finishes -> transition to GREETING_RESPONSE
+            if new_state.phase in (ConductorPhase.GREETING, ConductorPhase.WELCOME):
+                new_state.phase = ConductorPhase.GREETING_RESPONSE
+                new_state.timer_seq += 1
+                token = f"greeting_silence_{new_state.timer_seq}"
+                new_state.active_timers["greeting_silence"] = {"at_ms": event.now_ms + 3500, "token": token}
+                effects.append(ScheduleTimer(name="greeting_silence", at_ms=event.now_ms + 3500, token=token, delay_ms=3500))
+                effects.append(EmitUI(status="listening", payload={"phase": "greeting_response"}))
+                return new_state, effects
+
+            # After Agenda speech finishes -> transition to AGENDA_RESPONSE
+            if new_state.phase == ConductorPhase.AGENDA:
+                new_state.phase = ConductorPhase.AGENDA_RESPONSE
+                new_state.timer_seq += 1
+                token = f"agenda_silence_{new_state.timer_seq}"
+                new_state.active_timers["agenda_silence"] = {"at_ms": event.now_ms + 4000, "token": token}
+                effects.append(ScheduleTimer(name="agenda_silence", at_ms=event.now_ms + 4000, token=token, delay_ms=4000))
+                effects.append(EmitUI(status="listening", payload={"phase": "agenda_response"}))
                 return new_state, effects
 
             # After Closing speech finishes -> transition to COMPLETED
             if new_state.phase == ConductorPhase.CLOSING:
+                if "closing" in new_state.active_timers:
+                    effects.append(CancelTimer(name="closing"))
+                    new_state.active_timers.pop("closing", None)
                 new_state.phase = ConductorPhase.COMPLETED
                 effects.append(EmitUI(status="completed", payload={"message": "Interview session finished"}))
                 return new_state, effects
@@ -1731,6 +2475,12 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         if "silence" in new_state.active_timers:
             effects.append(CancelTimer(name="silence"))
             new_state.active_timers.pop("silence", None)
+        if "greeting_silence" in new_state.active_timers:
+            effects.append(CancelTimer(name="greeting_silence"))
+            new_state.active_timers.pop("greeting_silence", None)
+        if "agenda_silence" in new_state.active_timers:
+            effects.append(CancelTimer(name="agenda_silence"))
+            new_state.active_timers.pop("agenda_silence", None)
 
         # Late TurnStart after commit but before BotAudioStarted:
         # "If TurnStart arrives after commit but before BotAudioStarted: CancelSpeech, un-commit, merge back into the buffer. After BotAudioStarted the commit is final."
@@ -1751,6 +2501,12 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
             new_state.is_committed = False
             new_state.bot_speaking = False
             new_state.active_speech_id = None
+            # Same-turn continuation: restore the committed text so resumed
+            # speech merges with it (the commit boundary cleared the buffer to
+            # block cross-turn ghosts, but a late TurnStart before
+            # BotAudioStarted is still the SAME candidate turn).
+            if not new_state.answer_buffer and new_state.committed_answer:
+                new_state.answer_buffer = new_state.committed_answer
             effects.append(EmitUI(status="uncommitted", payload={"answer": new_state.answer_buffer}))
 
         # Cancel pending commit timer and keep accumulating
@@ -1773,6 +2529,15 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
 
     # 7. EagerTurnEnd
     if isinstance(event, EagerTurnEnd):
+        # Never speculate or advance during opening conversation phases
+        if new_state.phase in (
+            ConductorPhase.GREETING,
+            ConductorPhase.GREETING_RESPONSE,
+            ConductorPhase.AGENDA,
+            ConductorPhase.AGENDA_RESPONSE,
+        ):
+            return new_state, effects
+
         # Only speculate if accumulating and not already committed and bot not speaking
         if new_state.is_accumulating and not new_state.is_committed and not new_state.bot_speaking:
             next_q = get_next_plan_question(new_state)
@@ -1788,7 +2553,12 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
 
                 curr_cand_id = f"turn_{new_state.turn_counter + 1}"
                 new_state.current_candidate_turn_id = curr_cand_id
-                curr_skill = new_state.skill_names[new_state.current_skill_index] if 0 <= new_state.current_skill_index < len(new_state.skill_names) else ""
+                if new_state.phase == ConductorPhase.INTRO:
+                    curr_skill = "Introduction"
+                elif new_state.phase == ConductorPhase.CANDIDATE_QA:
+                    curr_skill = "Candidate Q&A"
+                else:
+                    curr_skill = new_state.skill_names[new_state.current_skill_index] if 0 <= new_state.current_skill_index < len(new_state.skill_names) else ""
                 spec_snapshot = DecisionContextSnapshot(
                     session_id=new_state.session_id,
                     candidate_turn_id=curr_cand_id,
@@ -1832,8 +2602,12 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         if new_state.answer_buffer and normalize_text_for_hash(event.text) == normalize_text_for_hash(new_state.answer_buffer):
             return new_state, effects
 
-        # In ready gate, candidate speech was already handled in Section 3; do not accumulate into question answer buffer
-        if new_state.phase == ConductorPhase.READY_GATE:
+        # In opening response phases or legacy ready gate, candidate speech was already handled in Section 3; do not accumulate into question answer buffer
+        if new_state.phase in (
+            ConductorPhase.GREETING_RESPONSE,
+            ConductorPhase.AGENDA_RESPONSE,
+            ConductorPhase.READY_GATE,
+        ):
             return new_state, effects
 
         if not new_state.is_committed and (not new_state.current_candidate_turn_id or new_state.current_candidate_turn_id == f"turn_{new_state.turn_counter}"):
@@ -2002,36 +2776,72 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
 
         return new_state, effects
 
-        # Cancel decision_timeout and ack_fallback timers
-        if "decision_timeout" in new_state.active_timers:
-            effects.append(CancelTimer(name="decision_timeout"))
-            new_state.active_timers.pop("decision_timeout", None)
-        if "ack_fallback" in new_state.active_timers:
-            effects.append(CancelTimer(name="ack_fallback"))
-            new_state.active_timers.pop("ack_fallback", None)
-
-        ack_currently_playing = bool(
-            new_state.bot_speaking
-            and new_state.active_speech_id
-            and new_state.active_speech_id.startswith("ack_speech_")
-        )
-        current_active_speech_id = new_state.active_speech_id
-
-        new_state, dec_effects = validate_and_apply_decision(new_state, event.decision, event.now_ms)
-
-        # If ack speech is currently active, defer speaking question until BotSpeechDone for the ack
-        if ack_currently_playing:
-            new_state.active_speech_id = current_active_speech_id
-            new_state.bot_speaking = True
-            new_state.pending_question_effects = dec_effects
-        else:
-            effects.extend(dec_effects)
-
-        return new_state, effects
-
     # 12. Tick (Timer checks, hard cap, silence progression, bridge playback, decision timeout)
     if isinstance(event, Tick):
         now_ms = event.now_ms
+
+        # Check greeting silence timer (3.5s timeout)
+        if "greeting_silence" in new_state.active_timers and new_state.phase == ConductorPhase.GREETING_RESPONSE:
+            timer_info = new_state.active_timers["greeting_silence"]
+            if now_ms >= timer_info["at_ms"] or event.token == timer_info.get("token"):
+                new_state.active_timers.pop("greeting_silence", None)
+                skills = new_state.skill_names
+                topic_str = _format_topic_list_for_speech(skills)
+                agenda_q = f"Today I’d like to cover {topic_str}, and leave a few minutes for your questions. Does that sound good?"
+                new_state.phase = ConductorPhase.AGENDA
+                new_state.speech_seq += 1
+                speech_id = f"speech_{new_state.speech_seq}"
+                new_state.active_speech_id = speech_id
+                new_state.bot_speaking = True
+                new_state.bot_audio_started = False
+                effects.append(Speak(text=agenda_q, speech_id=speech_id, question_text=agenda_q, kind="agenda"))
+                effects.append(EmitUI(status="agenda", payload={
+                    "display_question": agenda_q,
+                    "spoken_text": agenda_q,
+                    "question_text": agenda_q,
+                    "phase": "agenda",
+                    "topic_index": 0,
+                    "topic_count": new_state.topic_count,
+                    "topic_label": "Agenda",
+                }))
+                return new_state, effects
+
+        # Check agenda silence timer (4.0s timeout)
+        if "agenda_silence" in new_state.active_timers and new_state.phase == ConductorPhase.AGENDA_RESPONSE:
+            timer_info = new_state.active_timers["agenda_silence"]
+            if now_ms >= timer_info["at_ms"] or event.token == timer_info.get("token"):
+                new_state.active_timers.pop("agenda_silence", None)
+                intro_q = next((q for q in new_state.questions if q.kind == "intro_hook"), None)
+                intro_text = (
+                    intro_q.question_text
+                    if intro_q
+                    else "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+                )
+                if new_state.agenda_adjustments > 0:
+                    ack_str = "No worries, we'll keep the current agenda and adapt as we go."
+                    spoken_intro = f"{ack_str} {intro_text}"
+                else:
+                    ack_str = "I'll take that as a yes."
+                    spoken_intro = f"I’ll take that as a yes. {intro_text}"
+                new_state.phase = ConductorPhase.INTRO
+                new_state.current_question_index = intro_q.question_index if intro_q else 1
+                new_state.speech_seq += 1
+                speech_id = f"speech_{new_state.speech_seq}"
+                new_state.active_speech_id = speech_id
+                new_state.bot_speaking = True
+                new_state.bot_audio_started = False
+                effects.append(Speak(text=spoken_intro, speech_id=speech_id, ack_text=ack_str, question_text=intro_text, kind="intro_hook"))
+                effects.append(EmitUI(status="intro", payload={
+                    "display_question": intro_text,
+                    "spoken_text": spoken_intro,
+                    "question_text": intro_text,
+                    "ack_text": ack_str,
+                    "phase": "intro",
+                    "topic_index": 0,
+                    "topic_count": new_state.topic_count,
+                    "topic_label": "Background",
+                }))
+                return new_state, effects
 
         # A. Check Hard Cap (180s of accumulating force-commits)
         if (
@@ -2113,6 +2923,15 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
                     new_state.speech_seq += 1
                     bridge_speech_id = f"bridge_{new_state.speech_seq}"
                     effects.append(PlayBridge(text=bridge_text, speech_id=bridge_speech_id))
+
+        # Check Closing Timeout Timer (12s bounded fallback)
+        if "closing" in new_state.active_timers and new_state.phase == ConductorPhase.CLOSING:
+            timer_info = new_state.active_timers["closing"]
+            if now_ms >= timer_info["at_ms"] or event.token == timer_info.get("token"):
+                new_state.active_timers.pop("closing", None)
+                new_state.phase = ConductorPhase.COMPLETED
+                effects.append(EmitUI(status="completed", payload={"message": "Interview session finished"}))
+                return new_state, effects
 
         # E. Check Silence Progression (25s nudge, 60s repeat, 90s move on)
         if (
@@ -2203,6 +3022,13 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
     state.question_index_before_commit = state.current_question_index
     state.is_committed = True
     state.committed_answer = state.answer_buffer
+    # A committed buffer must NEVER seed the next answer: STT finals for later
+    # speech used to append onto it, re-committing the accumulated text as a
+    # new answer (production transcript showed each answer containing all the
+    # previous ones). The next question's BotSpeechDone resets it again; this
+    # is the authoritative reset at the commit boundary.
+    state.answer_buffer = ""
+    state.seen_turn_ids.clear()
     state.is_accumulating = False
     state.accumulation_started_ms = 0
     state.turn_counter += 1
@@ -2228,7 +3054,11 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
     }
     effects.append(Persist(turn=turn_record))
 
-    # Schedule conversational bridge timer after commit (default 700ms)
+    # Schedule conversational bridge timer after commit. 1400ms: the streamed
+    # ack typically starts within 400-1200ms of commit — at 700ms the bridge
+    # used to fire FIRST and then the ack played on top of it, producing the
+    # "Thanks. Understood. <question>" filler chatter heard in production.
+    # The bridge is a gap-filler for SLOW decisions only; the ack wins the race.
     state.bridge_played_for_commit = False
     state.spoken_ack_token = None
     state.spoken_ack_text = ""
@@ -2237,29 +3067,43 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
     state.commit_at_ms = now_ms
     state.timer_seq += 1
     bridge_token = f"bridge_{state.timer_seq}"
-    b_delay = getattr(state, "bridge_delay_ms", 700) or 700
+    b_delay = getattr(state, "bridge_delay_ms", 1400) or 1400
     state.active_timers["bridge"] = {"at_ms": now_ms + b_delay, "token": bridge_token}
     effects.append(ScheduleTimer(name="bridge", at_ms=now_ms + b_delay, token=bridge_token, delay_ms=b_delay))
 
-    # Conductor Phase A: In SKILL_ANCHOR or SKILL_FOLLOWUP, emit RequestDecision and enter AWAIT_DECISION sub-state
-    if state.phase in (ConductorPhase.SKILL_ANCHOR, ConductorPhase.SKILL_FOLLOWUP) and 0 <= state.current_skill_index < len(state.skill_names):
-        curr_skill = state.skill_names[state.current_skill_index]
-        sq = state.skill_questions.get(curr_skill, {})
+    # Conductor: In SKILL_ANCHOR, SKILL_FOLLOWUP, or INTRO, emit RequestDecision and enter AWAIT_DECISION sub-state
+    if state.phase in (ConductorPhase.SKILL_ANCHOR, ConductorPhase.SKILL_FOLLOWUP, ConductorPhase.INTRO):
+        if state.phase == ConductorPhase.INTRO:
+            curr_skill = "Introduction"
+            curr_q_text = curr_q.question_text if curr_q else "To start off, could you please introduce yourself and share highlights from your key projects and experiences?"
+            probes_list = []
+            escalation_text = ""
+            anchor_alt_text = ""
+            expectations = []
+            stretch_expectations = []
+            followups_used = 0
+            time_left_ms = 300000
+        else:
+            if not (0 <= state.current_skill_index < len(state.skill_names)):
+                return _transition_to_qa(state)
+            curr_skill = state.skill_names[state.current_skill_index]
+            sq = state.skill_questions.get(curr_skill, {})
 
-        probes_list = [
-            {
-                "id": p.probe_id or str(p.question_index),
-                "text": p.question_text,
-                "trigger_condition": p.trigger_condition or "",
-            }
-            for p in sq.get("probes", [])
-        ]
-        escalation_text = sq.get("escalation").question_text if sq.get("escalation") else ""
-        anchor_alt_text = sq.get("anchor_alt").question_text if sq.get("anchor_alt") else ""
-        expectations = list(curr_q.expected_key_points) if curr_q else []
-        stretch_expectations = list(getattr(curr_q, "stretch_key_points", [])) if curr_q else []
-        followups_used = state.followups_used_per_skill.get(curr_skill, 0)
-        time_left_ms = get_skill_time_left_ms(state, curr_skill, now_ms)
+            probes_list = [
+                {
+                    "id": p.probe_id or str(p.question_index),
+                    "text": p.question_text,
+                    "trigger_condition": p.trigger_condition or "",
+                }
+                for p in sq.get("probes", [])
+            ]
+            escalation_text = sq.get("escalation").question_text if sq.get("escalation") else ""
+            anchor_alt_text = sq.get("anchor_alt").question_text if sq.get("anchor_alt") else ""
+            expectations = list(curr_q.expected_key_points) if curr_q else []
+            stretch_expectations = list(getattr(curr_q, "stretch_key_points", [])) if curr_q else []
+            followups_used = state.followups_used_per_skill.get(curr_skill, 0)
+            time_left_ms = get_skill_time_left_ms(state, curr_skill, now_ms)
+            curr_q_text = curr_q.question_text if curr_q else ""
 
         state.decision_seq += 1
         dec_token = f"decision_{state.decision_seq}"
@@ -2271,7 +3115,6 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
         curr_cand_id = state.current_candidate_turn_id
         norm_ans = normalize_text_for_hash(state.committed_answer)
         ans_hash = compute_content_hash(state.committed_answer)
-        curr_q_text = curr_q.question_text if curr_q else ""
         q_hash = compute_content_hash(curr_q_text)
 
         snapshot = DecisionContextSnapshot(
@@ -2293,10 +3136,13 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
         state.active_timers["decision_timeout"] = {"at_ms": now_ms + timeout_ms, "token": dec_token}
         effects.append(ScheduleTimer(name="decision_timeout", at_ms=now_ms + timeout_ms, token=dec_token, delay_ms=timeout_ms))
 
+        curr_slot_id = state.current_slot_id or getattr(curr_q, "id", None) or getattr(curr_q, "probe_id", None)
+        parent_slot_id = state.parent_slot_id or getattr(curr_q, "parent_question_id", None)
+
         effects.append(RequestDecision(
             token=dec_token,
             skill=curr_skill,
-            question_text=curr_q.question_text if curr_q else "",
+            question_text=curr_q_text,
             answer_text=state.committed_answer,
             probes=probes_list,
             escalation_text=escalation_text,
@@ -2307,6 +3153,8 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
             time_left_ms=time_left_ms,
             last_ack_opener=state.last_ack_opener,
             snapshot=snapshot,
+            slot_id=curr_slot_id,
+            parent_slot_id=parent_slot_id,
         ))
         effects.append(EmitUI(status="awaiting_decision", payload={"skill": curr_skill, "token": dec_token}))
         return state, effects
@@ -2378,6 +3226,8 @@ def _commit_current_turn(state: ConductorState, now_ms: int) -> Tuple[ConductorS
             time_left_ms=180000,
             last_ack_opener=state.last_ack_opener,
             snapshot=snapshot,
+            slot_id=state.current_slot_id,
+            parent_slot_id=state.parent_slot_id,
         ))
         effects.append(EmitUI(status="awaiting_decision", payload={"skill": "Candidate Q&A", "token": dec_token}))
         return state, effects
@@ -2394,49 +3244,75 @@ def validate_and_apply_decision(
     decision: Optional[Dict[str, Any]],
     now_ms: int,
 ) -> Tuple[ConductorState, List[ConductorEffect]]:
-    """Validate decision JSON against Conductor rules or execute pure deterministic fallback."""
+    """Validate canonical Director decision JSON or execute deterministic fallback."""
     effects: List[ConductorEffect] = []
     curr_skill = state.skill_names[state.current_skill_index] if 0 <= state.current_skill_index < len(state.skill_names) else ""
     sq = state.skill_questions.get(curr_skill, {})
     curr_q = _get_current_question(state)
     answer = state.committed_answer
     time_left = get_skill_time_left_ms(state, curr_skill, now_ms)
-    followups_used = state.followups_used_per_skill.get(curr_skill, 0)
+    followups_used = getattr(state, "followups_used", 0) or state.followups_used_per_skill.get(curr_skill, 0)
+    # Weight-proportional cap: each skill earns depth from its recruiter weight,
+    # not a flat constant (falls back to 2 for legacy plans without caps).
+    max_followups = int(state.max_followups_per_skill.get(curr_skill, 2) or 2)
     core_expectations = curr_q.expected_key_points if curr_q else []
 
     is_valid = False
     action: Optional[str] = None
+    raw_action: str = ""
     ack: str = ""
-    followup: str = ""
-    probe_id: Optional[str] = None
-    no_experience: bool = False
+    question_text: str = ""
+    target_skill: str = ""
+    transition_prefix: str = ""
     covered_exps: List[str] = []
     chosen_q: Optional[PlanQuestion] = None
+    probe_id: Optional[str] = None
+    no_experience: bool = False
+    should_close: bool = False
 
     if isinstance(decision, dict):
         raw_action = str(decision.get("action", "") or "").strip().lower()
         raw_ack = str(decision.get("ack", "") or "").strip()
-        raw_followup = str(decision.get("followup", "") or "").strip()
+        raw_q = str(decision.get("question") or decision.get("followup") or decision.get("answer") or "").strip()
+        target_skill = str(decision.get("target_skill", "") or "").strip()
+        transition_prefix = str(decision.get("transition", "") or "").strip()
         probe_id = decision.get("probe_id")
         no_experience = bool(decision.get("no_experience", False))
-        covered_exps = list(decision.get("covered_expectations", []) or [])
+        should_close = bool(decision.get("should_close", False))
+        covered_exps = list(decision.get("covered_expectation_ids") or decision.get("covered_expectations") or [])
 
-        if raw_action in ("probe", "escalate", "hypothetical", "clarify", "off_topic", "rephrase", "next", "qa_reply"):
-            action = raw_action
+        canonical_map = {
+            "follow_up": "follow_up",
+            "probe": "follow_up",
+            "escalate": "follow_up",
+            "hypothetical": "follow_up",
+            "new_topic": "new_topic",
+            "transition": "new_topic",
+            "new-topic": "new_topic",
+            "next": "new_topic",
+            "clarify": "clarify",
+            "off_topic": "off_topic",
+            "rephrase": "rephrase",
+            "alt": "rephrase",
+            "candidate_qa": "candidate_qa",
+            "qa_reply": "candidate_qa",
+            "close": "close",
+        }
+        if raw_action in canonical_map:
+            action = canonical_map[raw_action]
             ack = raw_ack
-            followup = raw_followup
+            question_text = raw_q
             is_valid = True
 
-    # Candidate Q&A answer handling (Requirement 1 & 4)
-    if state.phase == ConductorPhase.CANDIDATE_QA or action == "qa_reply":
-        if is_valid and followup:
-            ans_text = followup.strip()
-            if not ans_text.endswith("?") and state.qa_rounds_used < 3:
+    # 1. Candidate Q&A answer handling
+    if state.phase == ConductorPhase.CANDIDATE_QA or action == "candidate_qa":
+        if is_valid and question_text:
+            ans_text = question_text.strip()
+            if not ans_text.endswith("?") and state.qa_rounds_used < 3 and not ans_text.startswith(APPROVED_QA_DEFERRAL) and "hiring team will follow up" not in ans_text:
                 ans_text = f"{ans_text} Anything else?"
         else:
             ans_text = APPROVED_QA_DEFERRAL
 
-        # If answer is approved deferral, suppress ack (Requirement 6)
         if ans_text.startswith(APPROVED_QA_DEFERRAL) or "hiring team will follow up" in ans_text:
             spoken_ack = ""
             recorded_ack = ""
@@ -2473,36 +3349,98 @@ def validate_and_apply_decision(
         state.decision_start_ms = 0
         return state, effects
 
-    # Rule 1: No experience (Requirement 6: one hypothetical per skill; if second -> warm transition and advance)
-    neutral_transition: str = ""
-    if is_valid and (no_experience or action == "hypothetical"):
-        if state.hypothetical_used_per_skill.get(curr_skill, False):
-            action = "next"
-            followup = ""
-            neutral_transition = "No problem, let's move on."
-        else:
-            action = "hypothetical"
-            state.hypothetical_used_per_skill[curr_skill] = True
-            anchor_alt_q = sq.get("anchor_alt")
-            if anchor_alt_q:
-                chosen_q = anchor_alt_q
-                followup = anchor_alt_q.question_text
-            elif sq.get("escalation"):
-                chosen_q = sq.get("escalation")
-                followup = chosen_q.question_text
+    # 2. Close action
+    if is_valid and (action == "close" or should_close):
+        closing_q = next((q for q in state.questions if q.kind == "closing"), None)
+        state.phase = ConductorPhase.CLOSING
+        state.current_question_index = closing_q.question_index if closing_q else 999
+        close_text = closing_q.question_text if closing_q else "Thank you for speaking with me today. Have a wonderful rest of your day!"
+        state.asked_questions_history.append(close_text)
+        state.speech_seq += 1
+        speech_id = f"speech_{state.speech_seq}"
+        state.active_speech_id = speech_id
+        state.bot_speaking = True
+        state.bot_audio_started = False
+        effects.append(Speak(text=close_text, speech_id=speech_id, question_text=close_text))
+        effects.append(EmitUI(status="closing", payload={"question_text": close_text}))
+        state.awaiting_decision = False
+        state.decision_token = None
+        state.decision_start_ms = 0
+        return state, effects
 
-    # Rule 1b: Clarify action (Requirement 2: max once per skill, grounded in candidate words)
-    if is_valid and action == "clarify":
-        if state.clarify_used_per_skill.get(curr_skill, False):
-            # Max once per skill!
-            action = "next"
-            followup = ""
+    # 2.5 Intro phase override: Intro answer always transitions toward the first skill topic (new_topic)
+    if state.phase_before_commit == ConductorPhase.INTRO or state.phase == ConductorPhase.INTRO:
+        action = "new_topic"
+        # Background-family continuation: if the projects walkthrough
+        # (resume_probe) or another background question follows in plan order
+        # and hasn't been asked, ask it next instead of jumping to skills —
+        # the interview opens with the candidate's own work, as designed.
+        next_bg = None
+        for q in sorted(state.questions, key=lambda x: x.question_index):
+            if (
+                q.question_index > state.current_question_index
+                and q.kind in ("background", "resume_probe")
+                and q.question_text not in state.asked_questions_history
+            ):
+                next_bg = q
+                break
+        if next_bg is not None:
+            question_text = next_bg.question_text
+            target_skill = ""
+            if not transition_prefix:
+                transition_prefix = "Great to meet you."
         else:
-            state.clarify_used_per_skill[curr_skill] = True
+            # The intro must always deliver the exact stored anchor wording; never a
+            # model-authored question that would bypass the prepared script.
+            if state.skill_names:
+                target_skill = state.skill_names[0]
+            elif not target_skill:
+                target_skill = ""
+            anchor_q = state.skill_questions.get(target_skill, {}).get("anchor") if target_skill else None
+            if anchor_q:
+                question_text = anchor_q.question_text
+            if not transition_prefix:
+                transition_prefix = f"Let's begin with {target_skill}."
 
-    # Rule 1c: Rephrase action (Requirement 5: does not count as follow-up, answer stays attributed to same question)
+    # 2.6 Repeat-request / connectivity guard: when the committed "answer" is
+    # actually the candidate saying they never saw or heard the question (e.g.
+    # they were stuck reconnecting), or the answer merely echoes the question
+    # back, the only humane decision is to re-ask the current question — never
+    # advance past it. Applies to every decision source (LLM, repair,
+    # deterministic fallback) because it overrides the incoming action entirely.
+    if (
+        state.phase != ConductorPhase.CANDIDATE_QA
+        and curr_q is not None
+        and (
+            looks_like_repeat_request(answer)
+            or answer_echoes_question(answer, curr_q.question_text)
+        )
+    ):
+        action = "rephrase"
+        question_text = curr_q.question_text
+        ack = "Of course."
+        transition_prefix = ""
+        probe_id = None
+        is_valid = True
+
+    # 2.7 No-knowledge guard: a candidate who admits they don't know the topic
+    # must never be probed deeper or asked to clarify that admission. Coerce the
+    # decision into the no-experience path, which swaps to the alternative
+    # prepared question once and otherwise moves on with a neutral transition.
+    if (
+        looks_like_no_knowledge_answer(answer)
+        and state.phase != ConductorPhase.CANDIDATE_QA
+        and is_valid
+        and action in ("follow_up", "clarify")
+    ):
+        no_experience = True
+        action = "follow_up"
+        question_text = ""
+        probe_id = None
+
+    # 3. Rephrase action
     if is_valid and action == "rephrase":
-        rephrased_text = followup or (curr_q.question_text if curr_q else "")
+        rephrased_text = question_text or (curr_q.question_text if curr_q else "")
         ack_already_spoken = bool(state.spoken_ack_token and state.spoken_ack_token == state.decision_token)
         if ack_already_spoken:
             spoken_ack = ""
@@ -2533,10 +3471,51 @@ def validate_and_apply_decision(
         state.decision_start_ms = 0
         return state, effects
 
-    # Rule 1d: Off-topic action (Requirement 6: simpler rewording sharing >=3 content words, prefixed with "Let's come back to it. ")
-    off_topic_move_on: bool = False
+    # 4. Clarify action (max once per skill)
+    if is_valid and action == "clarify":
+        if state.clarify_used_per_skill.get(curr_skill, False):
+            action = "new_topic"
+            question_text = ""
+        else:
+            state.clarify_used_per_skill[curr_skill] = True
+
+    # 5. Handle "no_experience" or hypothetical
+    neutral_transition: str = ""
+    if is_valid and (no_experience or action == "hypothetical" or raw_action == "hypothetical"):
+        if state.hypothetical_used_per_skill.get(curr_skill, False):
+            action = "new_topic"
+            question_text = ""
+            neutral_transition = "No problem, let's move on."
+        else:
+            state.hypothetical_used_per_skill[curr_skill] = True
+            anchor_alt_q = sq.get("anchor_alt")
+            if anchor_alt_q:
+                chosen_q = anchor_alt_q
+                question_text = anchor_alt_q.question_text
+            elif sq.get("escalation"):
+                chosen_q = sq.get("escalation")
+                question_text = chosen_q.question_text
+            elif sq.get("probes"):
+                chosen_q = sq.get("probes")[0]
+                question_text = chosen_q.question_text
+            else:
+                # Fallback to anchor if nothing else exists
+                anchor_q = sq.get("anchor")
+                if anchor_q and anchor_q.question_text:
+                    chosen_q = anchor_q
+                    question_text = anchor_q.question_text
+                elif question_text and question_text.strip():
+                    pass
+                else:
+                    question_text = question_text.strip() or "Could you walk me through a similar scenario if you had faced this?"
+            # Brief spoken bridge so the swap does not feel abrupt, but never
+            # duplicate a spoken ack ("No problem." ack + "No problem." transition).
+            if not transition_prefix and not ack:
+                transition_prefix = "No problem."
+
+    # 5.5 Handle "off_topic"
+    off_topic_move_on = False
     if is_valid and action == "off_topic":
-        # Phase A6: Speak NO acknowledgment about unrelated candidate content
         ans_content = {w for w in re.findall(r"\b[a-zA-Z]{3,}\b", answer.lower()) if w not in STOPWORDS}
         ack_content = {w for w in re.findall(r"\b[a-zA-Z]{3,}\b", ack.lower()) if w not in STOPWORDS}
         if ans_content.intersection(ack_content) or any(w in ack.lower() for w in ("coffee", "espresso", "parking", "lunch", "weather", "permit")):
@@ -2547,8 +3526,8 @@ def validate_and_apply_decision(
 
         if curr_off_count >= 2:
             state.insufficient_evidence_per_skill[curr_skill] = True
-            action = "next"
-            followup = ""
+            action = "new_topic"
+            question_text = ""
             off_topic_move_on = True
         elif retries == 0:
             state.off_topic_retries_per_question[state.current_question_index] = 1
@@ -2557,27 +3536,27 @@ def validate_and_apply_decision(
 
             is_meta = bool(re.search(
                 r"\b(are you ready to answer|could you address the question about|can you answer the question about|please answer the question)\b",
-                followup or "",
+                question_text or "",
                 re.IGNORECASE,
             ))
-            fol_words = set(w for w in re.findall(r"\b[a-zA-Z]{3,}\b", (followup or "").lower()) if w not in STOPWORDS)
+            fol_words = set(w for w in re.findall(r"\b[a-zA-Z]{3,}\b", (question_text or "").lower()) if w not in STOPWORDS)
             word_overlap = len(set(orig_words).intersection(fol_words))
 
-            if is_meta or word_overlap < 3 or not followup:
+            if is_meta or word_overlap < 3 or not question_text:
                 overlap_sample = orig_words[:3] if len(orig_words) >= 3 else orig_words
                 kw_str = " ".join(overlap_sample)
-                followup = f"Could you explain your experience with {kw_str}?"
+                question_text = f"Could you explain your experience with {kw_str}?"
 
-            if not followup.lower().startswith("let's come back to it"):
-                followup = f"Let's come back to it. {followup}"
+            if not question_text.lower().startswith("let's come back to it"):
+                question_text = f"Let's come back to it. {question_text}"
         else:
-            action = "next"
-            followup = ""
+            state.insufficient_evidence_per_skill[curr_skill] = True
+            action = "new_topic"
+            question_text = ""
             off_topic_move_on = True
 
-    # Rule 2: Expectations & progression (Requirement 5)
-    stretch_expectations = list(getattr(curr_q, "stretch_key_points", [])) if curr_q else []
-    if is_valid and action not in ("off_topic", "rephrase"):
+    # 6. Expectations & progression checks (unless transitioning from INTRO)
+    if is_valid and state.phase != ConductorPhase.INTRO and state.phase_before_commit != ConductorPhase.INTRO and action not in ("off_topic", "rephrase"):
         curr_covered = set(state.covered_expectations_per_skill.get(curr_skill, []))
         for exp in covered_exps:
             curr_covered.add(exp.strip().lower())
@@ -2590,6 +3569,7 @@ def validate_and_apply_decision(
                 for ce in core_expectations
             )
 
+        stretch_expectations = list(getattr(curr_q, "stretch_key_points", [])) if curr_q else []
         all_stretch_covered = True
         if stretch_expectations:
             all_stretch_covered = all(
@@ -2597,77 +3577,44 @@ def validate_and_apply_decision(
                 for se in stretch_expectations
             )
 
-        should_escalate_stretch = (
+        if (
             all_core_covered
             and not all_stretch_covered
             and time_left > 120000
             and followups_used < 2
             and not state.escalation_used_for_skill.get(curr_skill, False)
-        )
-
-        if should_escalate_stretch:
-            action = "escalate"
+        ):
+            # Stretch escalation
             esc_q = sq.get("escalation")
             if esc_q:
                 chosen_q = esc_q
-                followup = esc_q.question_text
+                question_text = esc_q.question_text
+                action = "follow_up"
             state.escalation_used_for_skill[curr_skill] = True
 
-        elif followups_used >= 2 or time_left < 60000 or (all_core_covered and all_stretch_covered) or (all_core_covered and not stretch_expectations):
-            action = "next"
-            followup = ""
+        elif (
+            followups_used >= max_followups
+            or time_left < 60000
+            or (all_core_covered and (all_stretch_covered or not stretch_expectations))
+        ):
+            action = "new_topic"
+            question_text = ""
+            target_skill = ""
 
-    # Rule 3: Never repeat a question already asked (>60% token overlap) - excludes off_topic and rephrase
-    if is_valid and action in ("probe", "escalate", "hypothetical", "clarify") and followup:
+    # 7. Check question repetition (token overlap > 0.65)
+    if is_valid and action in ("follow_up", "clarify") and question_text:
         for prior_q in state.asked_questions_history:
-            if check_token_overlap(followup, prior_q) > 0.60 or check_token_overlap(prior_q, followup) > 0.60:
+            if check_token_overlap(question_text, prior_q) > 0.65 or check_token_overlap(prior_q, question_text) > 0.65:
                 is_valid = False
                 break
 
-    # Rule 4: Followup must be exactly one question, <= 28 words, and match blueprint probe/escalation/hypothetical or reuse candidate content
-    if is_valid and action in ("probe", "escalate", "hypothetical", "clarify", "off_topic") and followup:
-        if followup.count("?") != 1:
+    # 8. Follow-up question guardrails (1 question mark, <= 32 words)
+    if is_valid and action == "follow_up" and question_text:
+        if question_text.count("?") != 1 or count_words(question_text) > 32:
             is_valid = False
-        elif count_words(followup) > 28:
-            is_valid = False
-        else:
-            matches_blueprint = False
-            blueprint_candidates = []
-            if sq.get("anchor_alt"):
-                blueprint_candidates.append(sq["anchor_alt"])
-            if sq.get("escalation"):
-                blueprint_candidates.append(sq["escalation"])
-            for p in sq.get("probes", []):
-                blueprint_candidates.append(p)
-                if probe_id and str(p.probe_id or p.question_index) == str(probe_id):
-                    matches_blueprint = True
-                    chosen_q = p
 
-            for bp_q in blueprint_candidates:
-                if normalize_text(bp_q.question_text) == normalize_text(followup):
-                    matches_blueprint = True
-                    chosen_q = bp_q
-                    break
-
-            reuses_candidate_content = False
-            ans_content_words = [
-                w for w in re.findall(r"\b[a-zA-Z]{3,}\b", answer.lower())
-                if w not in STOPWORDS
-            ]
-            if ans_content_words:
-                f_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", followup.lower()))
-                overlap_words = f_words.intersection(ans_content_words)
-                if len(overlap_words) >= 1 or any(w in f_words for w in ans_content_words if len(w) >= 4) or action in ("clarify", "off_topic"):
-                    reuses_candidate_content = True
-            elif action in ("clarify", "off_topic"):
-                reuses_candidate_content = True
-
-            if not (matches_blueprint or reuses_candidate_content):
-                is_valid = False
-
-    # Rule 5: ack validation (Requirement 4: Ack Validator & A5 Ack Grounding)
+    # 9. Ack validation
     if is_valid and ack:
-        curr_q = _get_current_question(state)
         curr_q_text = curr_q.question_text if curr_q else ""
         validated_ack, target_opener = validate_and_format_ack(
             raw_ack=ack,
@@ -2685,112 +3632,275 @@ def validate_and_apply_decision(
     elif is_valid and not ack:
         ack = ""
 
-    # Pure Conductor Deterministic Fallback (Requirements 2 & 4)
+    # 10. Fallback if invalid or null decision
     if not is_valid:
         ack = "Understood."
-        best_probe = None
-        max_overlap = 0
-        ans_lower = answer.lower()
+        if state.phase_before_commit == ConductorPhase.INTRO or state.phase == ConductorPhase.INTRO:
+            action = "new_topic"
+            # Background-family continuation first (projects walkthrough):
+            # identical rule to the validated-decision intro override.
+            next_bg_fb = None
+            for q in sorted(state.questions, key=lambda x: x.question_index):
+                if (
+                    q.question_index > state.current_question_index
+                    and q.kind in ("background", "resume_probe")
+                    and q.question_text not in state.asked_questions_history
+                ):
+                    next_bg_fb = q
+                    break
+            if next_bg_fb is not None:
+                question_text = next_bg_fb.question_text
+                target_skill = ""
+                transition_prefix = "Great to meet you."
+            else:
+                # Context-aware fallback: check candidate answer for mentioned skills
+                ans_lower = (state.committed_answer or "").lower()
+                target_skill = ""
+                for s in state.skill_names:
+                    if s.lower() in ans_lower or any(w.lower() in ans_lower for w in s.split() if len(w) > 4 and w.lower() not in STOPWORDS):
+                        target_skill = s
+                        break
+                if not target_skill and state.skill_names:
+                    target_skill = state.skill_names[0]
 
-        for p in sq.get("probes", []):
-            if p.question_text in state.asked_questions_history:
-                continue
-            tc = p.trigger_condition or ""
-            tc_words = [w for w in re.findall(r"\b[a-zA-Z]{3,}\b", tc.lower()) if w not in STOPWORDS]
-            overlap = sum(1 for w in tc_words if re.search(r"\b" + re.escape(w) + r"\b", ans_lower))
-            if overlap > max_overlap:
-                max_overlap = overlap
-                best_probe = p
-
-        if max_overlap >= 2 and best_probe and followups_used < 2 and time_left >= 60000:
-            action = "probe"
-            chosen_q = best_probe
-            followup = best_probe.question_text
-        elif (
-            count_words(answer) < 15
-            and not state.clarify_used_per_skill.get(curr_skill, False)
-            and followups_used < 2
-            and time_left >= 60000
-        ):
-            # Vague or short answer (< 15 words) with no probe match: one templated clarify question per skill, never escalation!
-            action = "clarify"
-            followup = "Could you share a concrete example from your work demonstrating that?"
-            state.clarify_used_per_skill[curr_skill] = True
+                # Explicitly mark degraded intro path in director memory
+                state.director_memory["degraded_intro"] = True
+                anchor_q = state.skill_questions.get(target_skill, {}).get("anchor") if target_skill else None
+                question_text = anchor_q.question_text if anchor_q else ""
+                transition_prefix = f"Thanks for sharing that background. Let's start with {target_skill}."
         else:
-            action = "next"
-            followup = ""
+            # No-knowledge guard for the deterministic fallback too: never pick a
+            # probe or a clarify when the candidate just said they don't know.
+            if looks_like_no_knowledge_answer(answer) and state.phase != ConductorPhase.CANDIDATE_QA:
+                anchor_alt_q = sq.get("anchor_alt")
+                if anchor_alt_q and not state.hypothetical_used_per_skill.get(curr_skill, False):
+                    state.hypothetical_used_per_skill[curr_skill] = True
+                    action = "follow_up"
+                    chosen_q = anchor_alt_q
+                    question_text = anchor_alt_q.question_text
+                    ack = "No problem."
+                else:
+                    action = "new_topic"
+                    question_text = ""
+                    transition_prefix = "No problem, let's move on."
 
-    # Execute Chosen Action & Compute Deterministic Transitions (Requirement 5)
+            best_probe = None
+            max_overlap = 0
+            ans_lower = answer.lower()
+            for p in sq.get("probes", []):
+                if p.question_text in state.asked_questions_history:
+                    continue
+                tc = p.trigger_condition or ""
+                tc_words = [w for w in re.findall(r"\b[a-zA-Z]{3,}\b", tc.lower()) if w not in STOPWORDS]
+                overlap = sum(1 for w in tc_words if re.search(r"\b" + re.escape(w) + r"\b", ans_lower))
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                    best_probe = p
+
+            if (
+                max_overlap >= 2
+                and best_probe
+                and followups_used < 2
+                and time_left >= 60000
+                and not looks_like_no_knowledge_answer(answer)
+            ):
+                action = "follow_up"
+                chosen_q = best_probe
+                question_text = best_probe.question_text
+            has_plan = bool(state.current_slot_id or any(getattr(q, "stage", None) for q in state.questions))
+            if has_plan and not chosen_q:
+                # In bounded plan mode, do NOT use generic canned question ("Could you share a concrete example...")
+                # If current question has followup probes, use the first available probe
+                probe_text = None
+                if curr_q and curr_q.followup_probes:
+                    for pb in curr_q.followup_probes:
+                        if pb not in state.asked_questions_history:
+                            probe_text = pb
+                            break
+                if (
+                    probe_text
+                    and followups_used < 2
+                    and time_left >= 60000
+                    and not looks_like_no_knowledge_answer(answer)
+                ):
+                    action = "follow_up"
+                    question_text = probe_text
+                elif not question_text:
+                    action = "new_topic"
+                    question_text = ""
+            elif (
+                count_words(answer) < 15
+                and not state.clarify_used_per_skill.get(curr_skill, False)
+                and followups_used < 2
+                and time_left >= 60000
+                and not looks_like_no_knowledge_answer(answer)
+            ):
+                action = "clarify"
+                question_text = "Could you share a concrete example from your work demonstrating that?"
+                state.clarify_used_per_skill[curr_skill] = True
+            elif not question_text and action not in ("new_topic",):
+                action = "new_topic"
+                question_text = ""
+
+    # 11. Execute Chosen Action
     next_q: Optional[PlanQuestion] = None
-    transition_prefix: str = ""
 
     if action == "off_topic" and state.off_topic_retries_per_question.get(state.current_question_index, 0) == 1:
         # Off-topic first retry: stay on same question and same skill!
         next_q = curr_q
-        question_text = followup or (curr_q.question_text if curr_q else "Could you share your thoughts on the question?")
+        display_question = question_text or (curr_q.question_text if curr_q else "Could you share your thoughts on the question?")
+        question_text = display_question
 
-    elif action == "next":
-        next_skill_idx = state.current_skill_index + 1
-        if next_skill_idx < len(state.skill_names):
-            state.current_skill_index = next_skill_idx
-            next_skill = state.skill_names[next_skill_idx]
-            anchor_q = state.skill_questions.get(next_skill, {}).get("anchor") or _find_next_skill_question(state, next_skill_idx)
-            if anchor_q:
-                state.phase = ConductorPhase.SKILL_ANCHOR
-                state.current_question_index = anchor_q.question_index
-                state.current_skill_start_ms = now_ms
-                next_q = anchor_q
-            transition_prefix = f"Let's move on to {next_skill}."
-        else:
-            # All skills finished -> Candidate Q&A
-            qa_q = next((q for q in state.questions if q.kind == "candidate_qa"), None)
-            state.phase = ConductorPhase.CANDIDATE_QA
-            state.current_question_index = qa_q.question_index if qa_q else 888
-            next_q = qa_q
-
-        question_text = next_q.question_text if next_q else (followup or "Thank you. Let's move to the next topic.")
+    elif action == "new_topic":
         if off_topic_move_on:
             transition_prefix = "No problem, let's move on to the next topic."
         elif neutral_transition:
             transition_prefix = neutral_transition
 
+        matched_idx = -1
+        is_leaving_curr_skill = (state.phase_before_commit != ConductorPhase.INTRO and state.phase != ConductorPhase.INTRO)
+        if target_skill and (not is_leaving_curr_skill or target_skill.lower() != curr_skill.lower()):
+            for idx, s in enumerate(state.skill_names):
+                if s.lower() == target_skill.lower():
+                    matched_idx = idx
+                    break
+
+        if matched_idx >= 0:
+            state.current_skill_index = matched_idx
+        elif (state.phase_before_commit == ConductorPhase.INTRO or state.phase == ConductorPhase.INTRO) and state.skill_names:
+            state.current_skill_index = 0
+        elif curr_q is not None and curr_q.kind in ("background", "resume_probe") and state.skill_names:
+            # Leaving the projects walkthrough: the first REAL skill starts at
+            # index 0 (the walkthrough ran before any skill, not after one).
+            state.current_skill_index = 0
+        else:
+            state.current_skill_index += 1
+
+        if 0 <= state.current_skill_index < len(state.skill_names):
+            next_skill = state.skill_names[state.current_skill_index]
+            curr_skill = next_skill
+            state.phase = ConductorPhase.SKILL_ANCHOR
+            state.current_skill_start_ms = now_ms
+            state.topic_index = state.current_skill_index + 1
+
+            if question_text:
+                existing = None
+                planned_q_id = decision.get("planned_question_id") if isinstance(decision, dict) else None
+                if planned_q_id:
+                    existing = next((q for q in state.questions if getattr(q, "id", None) == planned_q_id or getattr(q, "probe_id", None) == planned_q_id), None)
+                if not existing:
+                    existing = next((q for q in state.questions if normalize_text(q.question_text) == normalize_text(question_text)), None)
+                if existing:
+                    next_q = existing
+                    state.current_question_index = existing.question_index
+                    state.current_slot_id = getattr(existing, "id", None) or getattr(existing, "probe_id", None)
+                    state.parent_slot_id = None
+                else:
+                    state.dynamic_question_seq += 1
+                    dyn_idx = 1000 + state.dynamic_question_seq
+                    next_q = PlanQuestion(
+                        question_index=dyn_idx,
+                        kind="director_question",
+                        skill_name=next_skill,
+                        question_text=question_text,
+                    )
+                    state.questions.append(next_q)
+                    state.current_question_index = dyn_idx
+                    state.current_slot_id = None
+                    state.parent_slot_id = None
+            else:
+                anchor_q = state.skill_questions.get(next_skill, {}).get("anchor") or _find_next_skill_question(state, state.current_skill_index)
+                if anchor_q:
+                    state.current_question_index = anchor_q.question_index
+                    next_q = anchor_q
+                    state.current_slot_id = getattr(anchor_q, "id", None) or getattr(anchor_q, "probe_id", None)
+                    state.parent_slot_id = None
+
+            if not transition_prefix:
+                if state.phase_before_commit == ConductorPhase.INTRO:
+                    transition_prefix = f"Let's begin with {next_skill}."
+                else:
+                    # Rotate the topic-transition phrasing so consecutive topic
+                    # changes never sound identical (viva-style repetition).
+                    variants = [
+                        f"Let's move on to {next_skill}.",
+                        f"Next up: {next_skill}.",
+                        f"Alright, let's talk about {next_skill}.",
+                        f"Now I'd like to hear your take on {next_skill}.",
+                        f"Shifting gears a little — {next_skill}.",
+                    ]
+                    transition_prefix = variants[state.speech_seq % len(variants)]
+        else:
+            qa_q = next((q for q in state.questions if q.kind == "candidate_qa"), None)
+            state.phase = ConductorPhase.CANDIDATE_QA
+            state.current_question_index = qa_q.question_index if qa_q else 888
+            state.current_slot_id = getattr(qa_q, "id", None) or getattr(qa_q, "probe_id", None) if qa_q else None
+            state.parent_slot_id = None
+            next_q = qa_q
+
+        if neutral_transition:
+            transition_prefix = neutral_transition
+        question_text = next_q.question_text if next_q else (question_text or "Thank you. Let's move to the next topic.")
+
     else:
-        # action in ("probe", "escalate", "hypothetical", "clarify")
+        # action in ("follow_up", "clarify")
         state.phase = ConductorPhase.SKILL_FOLLOWUP
         state.followups_used_per_skill[curr_skill] = followups_used + 1
+        state.parent_slot_id = state.current_slot_id or (getattr(curr_q, "id", None) if curr_q else None)
+        state.current_slot_id = None
+        state.topic_index = state.current_skill_index + 1 if 0 <= state.current_skill_index < len(state.skill_names) else 1
 
-        if action == "escalate":
-            # Escalation transition rule: if escalation text has <2 content words in common with answer -> "Let me take that a bit further."
+        if raw_action == "escalate" or (action == "follow_up" and (chosen_q and getattr(chosen_q, "kind", "") == "escalation")):
             ans_words = set(w for w in re.findall(r"\b[a-zA-Z]{3,}\b", answer.lower()) if w not in STOPWORDS)
-            esc_words = set(w for w in re.findall(r"\b[a-zA-Z]{3,}\b", (followup or "").lower()) if w not in STOPWORDS)
+            esc_words = set(w for w in re.findall(r"\b[a-zA-Z]{3,}\b", (question_text or "").lower()) if w not in STOPWORDS)
             if len(ans_words.intersection(esc_words)) < 2:
                 transition_prefix = "Let me take that a bit further."
 
-        if chosen_q is not None:
+        if chosen_q is not None and (no_experience or action == "hypothetical" or raw_action == "hypothetical" or not (isinstance(decision, dict) and decision.get("question"))):
             next_q = chosen_q
             state.current_question_index = chosen_q.question_index
+            if getattr(chosen_q, "id", None):
+                state.current_slot_id = getattr(chosen_q, "id", None)
         else:
-            # Check if followup exists in plan
-            existing = next((q for q in state.questions if normalize_text(q.question_text) == normalize_text(followup)), None)
+            existing = next((q for q in state.questions if normalize_text(q.question_text) == normalize_text(question_text)), None)
             if existing:
                 next_q = existing
                 state.current_question_index = existing.question_index
             else:
-                # Dynamic follow-up (Requirement 8)
                 state.dynamic_question_seq += 1
                 dyn_idx = 1000 + state.dynamic_question_seq
                 next_q = PlanQuestion(
                     question_index=dyn_idx,
-                    kind="followup_dynamic",
+                    kind="director_question",
                     skill_name=curr_skill,
-                    question_text=followup,
+                    question_text=question_text,
                 )
                 state.questions.append(next_q)
                 state.current_question_index = dyn_idx
 
-        question_text = next_q.question_text if next_q else (followup or "Thank you. Let's move to the next topic.")
+        question_text = next_q.question_text if next_q else (question_text or "Thank you. Let's move to the next topic.")
 
-    # Ack handling: if ack was already spoken by AckReady, do NOT speak it again!
+    # 11b. De-duplicate transition and question, and strip question marks from transition
+    if transition_prefix:
+        norm_q = normalize_text_for_hash(question_text)
+        norm_trans = normalize_text_for_hash(transition_prefix)
+        # If transition contains the normalized question, strip the question from transition
+        if norm_q and norm_q in norm_trans:
+            escaped_q = re.escape(question_text.rstrip("?").strip())
+            cleaned_trans = re.sub(escaped_q + r"\??", "", transition_prefix, flags=re.IGNORECASE).strip()
+            transition_prefix = cleaned_trans.rstrip(". ").strip()
+            if transition_prefix and not transition_prefix.endswith((".", "!", ",")):
+                transition_prefix += "."
+
+        # Reject/drop a transition containing a question mark
+        if "?" in transition_prefix:
+            declarative_parts = [p.strip() for p in re.split(r"[.!?]", transition_prefix) if p.strip() and "?" not in p]
+            if declarative_parts:
+                transition_prefix = declarative_parts[0] + "."
+            else:
+                transition_prefix = ""
+
+    # 12. Assemble spoken order: ack, transition, question
     ack_already_spoken = bool(state.spoken_ack_token and state.spoken_ack_token == state.decision_token)
     if ack_already_spoken:
         spoken_ack = ""
@@ -2799,7 +3909,6 @@ def validate_and_apply_decision(
         spoken_ack = ack
         recorded_ack = ack
 
-    # Spoken order: ack, transition, question
     spoken_parts = []
     if spoken_ack:
         spoken_parts.append(spoken_ack)
@@ -2809,19 +3918,63 @@ def validate_and_apply_decision(
         spoken_parts.append(question_text)
     full_spoken_text = " ".join(spoken_parts).strip()
 
-    # Record in asked questions history (record transition + question)
+    display_question = question_text
     full_recorded_q = f"{transition_prefix} {question_text}".strip() if transition_prefix else question_text
     state.asked_questions_history.append(full_recorded_q)
 
-    # Emit speech
+    # 13. Update Director Memory
+    try:
+        from backend.app.services.interview_v2.director import update_director_memory, DirectorDecision
+        dec_obj = DirectorDecision(
+            action=action if action in ("follow_up", "new_topic", "clarify", "rephrase", "candidate_qa", "close") else "follow_up",
+            ack=recorded_ack,
+            transition=transition_prefix,
+            question=display_question,
+            target_skill=curr_skill,
+            covered_expectation_ids=covered_exps,
+        )
+        turn_rec = {
+            "skill": curr_skill or "Introduction",
+            "question": curr_q.question_text if curr_q else "",
+            "answer": state.committed_answer,
+        }
+        state.director_memory = update_director_memory(state.director_memory, turn_rec, dec_obj)
+    except Exception as mem_err:
+        logger.warning("Could not update director memory in conductor: %s", mem_err)
+
+    # 14. Emit speech & UI
     state.speech_seq += 1
     speech_id = f"speech_{state.speech_seq}"
     state.active_speech_id = speech_id
     state.bot_speaking = True
     state.bot_audio_started = False
 
-    effects.append(Speak(text=full_spoken_text, speech_id=speech_id, ack_text=recorded_ack, question_text=full_recorded_q))
-    effects.append(EmitUI(status=state.phase.value, payload={"skill": curr_skill, "question_text": full_recorded_q, "ack": recorded_ack, "action": action, "transition": transition_prefix}))
+    q_kind = getattr(next_q, "kind", "director_question") if next_q else "director_question"
+
+    effects.append(Speak(
+        text=full_spoken_text,
+        speech_id=speech_id,
+        ack_text=recorded_ack,
+        transition_text=transition_prefix,
+        question_text=full_recorded_q,
+        kind=q_kind,
+    ))
+    effects.append(EmitUI(
+        status=state.phase.value,
+        payload={
+            "display_question": display_question,
+            "spoken_text": full_spoken_text,
+            "question_text": display_question,
+            "ack_text": recorded_ack,
+            "transition_text": transition_prefix,
+            "skill": curr_skill,
+            "topic_label": curr_skill,
+            "topic_index": state.topic_index,
+            "topic_count": state.topic_count,
+            "action": action,
+            "transition": transition_prefix,
+        },
+    ))
 
     # Reset decision sub-state
     state.awaiting_decision = False

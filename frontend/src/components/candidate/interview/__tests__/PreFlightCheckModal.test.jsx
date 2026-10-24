@@ -26,7 +26,7 @@ describe('PreFlightCheckModal Component', () => {
     vi.clearAllMocks();
   });
 
-  it('renders the modal when isOpen=true with Headphones Recommendation and WebSocket Step 3', async () => {
+  it('renders the modal when isOpen=true with Headphones Recommendation and backend Step 3', async () => {
     render(
       <PreFlightCheckModal
         isOpen={true}
@@ -40,7 +40,7 @@ describe('PreFlightCheckModal Component', () => {
     // Modal title & subtitle
     expect(screen.getByText('System Readiness Check')).toBeInTheDocument();
     expect(
-      screen.getByText(/WebSocket audio streaming connectivity/i)
+      screen.getByText(/backend audio streaming connectivity/i)
     ).toBeInTheDocument();
 
     // Headphones Recommendation Notice
@@ -49,13 +49,41 @@ describe('PreFlightCheckModal Component', () => {
       screen.getByText(/For optimal acoustic clarity, natural voice turn-taking/i)
     ).toBeInTheDocument();
 
-    // Step 3: WebSocket Audio Channel & Pipeline Probe
+    // Step 3: Backend Connectivity & Latency Probe
     expect(
-      screen.getByText('WebSocket Audio Channel & Pipeline Probe')
+      screen.getByText('Backend Connectivity & Latency Probe')
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Probing WebSocket bidirectional audio stream/i)
+      screen.getByText(/Probing the interview backend/i)
     ).toBeInTheDocument();
+  });
+
+  it('lists output speakers and lets the candidate choose one', async () => {
+    const origEnumerate = navigator.mediaDevices.enumerateDevices;
+    navigator.mediaDevices.enumerateDevices = vi.fn(async () => [
+      { deviceId: 'mic-1', kind: 'audioinput', label: 'Test Microphone' },
+      { deviceId: 'cam-1', kind: 'videoinput', label: 'Test Camera' },
+      { deviceId: 'speaker-1', kind: 'audiooutput', label: 'Built-in Speakers' },
+      { deviceId: 'speaker-2', kind: 'audiooutput', label: 'USB Headphones' },
+    ]);
+
+    render(
+      <PreFlightCheckModal
+        isOpen={true}
+        onClose={vi.fn()}
+        onProceedToInterview={vi.fn()}
+        jobTitle="Full Stack Engineer"
+        candidateName="Test User"
+      />
+    );
+
+    const speakerSelect = await screen.findByTestId('preflight-speaker-select');
+    expect(speakerSelect).toHaveValue('speaker-1');
+
+    fireEvent.change(speakerSelect, { target: { value: 'speaker-2' } });
+    expect(speakerSelect).toHaveValue('speaker-2');
+
+    navigator.mediaDevices.enumerateDevices = origEnumerate;
   });
 
   it('displays "Setting up the interview environment..." when entering', () => {

@@ -10,7 +10,9 @@ import { Card, Badge, Stat, EmptyState, PageHeader } from '../ui';
 import CandidateJobListing from './CandidateJobListing';
 import ApplicationWizard from './ApplicationWizard';
 import PreFlightCheckModal from './interview/PreFlightCheckModal';
-import LiveInterviewRoom from './interview/LiveInterviewRoom';
+import { getCandidateToken as getAuthCandidateToken } from '../../utils/auth';
+
+const LiveInterviewRoom = React.lazy(() => import('./interview/LiveInterviewRoom'));
 
 function getApplicationStep(app) {
   if (!app) return 1;
@@ -41,9 +43,15 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
 
   // Interview flow states
   const [preflightOpen, setPreflightOpen] = useState(false);
+  const [preflightDevices, setPreflightDevices] = useState({
+    selectedAudioInput: '',
+    selectedVideoInput: '',
+    selectedAudioOutput: '',
+  });
   const [interviewStarted, setInterviewStarted] = useState(false);
   const [interviewSession, setInterviewSession] = useState(null);
   const [interviewError, setInterviewError] = useState(null);
+  const [interviewNotice, setInterviewNotice] = useState(null);
   const [startingInterview, setStartingInterview] = useState(false);
   const [startingPractice, setStartingPractice] = useState(false);
   const [isPracticeMode, setIsPracticeMode] = useState(false);
@@ -54,9 +62,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
   const [selectedAppIndex, setSelectedAppIndex] = useState(0);
 
   const getCandidateToken = () =>
-    authUser?.access_token ||
-    localStorage.getItem('candidly-auth-token-candidate') ||
-    localStorage.getItem('candidly-auth-token');
+    getAuthCandidateToken(authUser);
 
   const fetchApplications = async (silent = false) => {
     if (!silent) {
@@ -130,6 +136,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
   };
 
   const handleStartPracticeInterview = async () => {
+    if (startingPractice) return;
     setStartingPractice(true);
     setInterviewError(null);
     try {
@@ -147,11 +154,17 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         throw new Error(payload.detail || 'Could not start practice interview');
       }
       const sessionId = payload.session_id || payload.id;
+      if (!sessionId) {
+        throw new Error('Server returned an invalid practice session identifier.');
+      }
       const startRes = await fetch(`/api/interview-sessions/${sessionId}/start`, {
         method: 'POST',
         headers,
       });
-      const startedPayload = startRes.ok ? await startRes.json() : { id: sessionId };
+      const startedPayload = await startRes.json().catch(() => ({ id: sessionId }));
+      if (!startRes.ok) {
+        throw new Error(startedPayload.detail || 'Failed to start practice interview session.');
+      }
       setIsPracticeMode(true);
       setInterviewSession({
         ...startedPayload,
@@ -161,15 +174,18 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
       });
       setInterviewStarted(true);
     } catch (err) {
-      setInterviewError(err.message);
-      alert(err.message || 'Unable to start practice interview.');
+      setInterviewError(err.message || 'Unable to start practice interview.');
     } finally {
       setStartingPractice(false);
     }
   };
 
-  const handleProceedToInterview = async () => {
+  const handleProceedToInterview = async (devices) => {
+    if (devices && typeof devices === 'object') {
+      setPreflightDevices(devices);
+    }
     if (!currentApp?.id) return;
+    if (startingInterview) return;
     setStartingInterview(true);
     setInterviewError(null);
     try {
@@ -188,9 +204,19 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
             fetchApplications();
             throw new Error(generationPayload.message || 'Interview preparation started. Refresh in a moment.');
           }
-          throw new Error(generationPayload.detail || sessionPayload.detail);
+          throw new Error(generationPayload.detail || sessionPayload.detail || 'Interview preparation failed');
         }
         throw new Error(sessionPayload.detail || 'Interview preparation is not complete yet.');
+      }
+
+      if (!sessionPayload || !sessionPayload.id) {
+        throw new Error('Invalid interview session payload received from server.');
+      }
+
+      if (sessionPayload.status === 'completed' || sessionPayload.status === 'cancelled') {
+        setInterviewError(`This interview has already been ${sessionPayload.status}. You cannot re-enter it.`);
+        fetchApplications();
+        return;
       }
 
       let activeSession = sessionPayload;
@@ -202,7 +228,13 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
         const startedPayload = await startResponse.json();
         if (startResponse.ok) {
           activeSession = startedPayload;
+        } else {
+          throw new Error(startedPayload.detail || 'Failed to activate interview session.');
         }
+      }
+
+      if (!activeSession || !activeSession.id) {
+        throw new Error('Interview session could not be verified.');
       }
 
       setIsPracticeMode(false);
@@ -210,8 +242,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
       setPreflightOpen(false);
       setInterviewStarted(true);
     } catch (err) {
-      setInterviewError(err.message);
-      alert(err.message || 'Unable to launch interview session.');
+      setInterviewError(err.message || 'Unable to launch interview session.');
     } finally {
       setStartingInterview(false);
     }
@@ -247,19 +278,62 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     }
   };
 
-  // If live interview is running, render interview room directly
-  if (interviewStarted && interviewSession) {
+  // If live interview is running, render interview room directly with verified contract
+  const handleInterviewExit = () => {
+    setInterviewStarted(false);
+    setInterviewSession(null);
+    setIsPracticeMode(false);
+
+    // The room writes this notice only when REST completion persistence fails.
+    // Read it during the exit transition, while the dashboard is still mounted.
+    try {
+      const notice = sessionStorage.getItem('candidly-interview-exit-notice');
+      if (notice) {
+        setInterviewNotice(notice);
+        sessionStorage.removeItem('candidly-interview-exit-notice');
+      }
+    } catch (err) {
+      console.warn('Could not read interview exit notice:', err);
+    }
+
+    fetchApplications();
+  };
+
+  if (interviewStarted && interviewSession && interviewSession.id) {
     return (
-      <LiveInterviewRoom
-        session={interviewSession}
-        onEndInterview={() => {
-          setInterviewStarted(false);
-          setInterviewSession(null);
-          setIsPracticeMode(false);
-          fetchApplications();
-        }}
-        isPractice={isPracticeMode}
-      />
+      <React.Suspense
+        fallback={
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black text-white p-6">
+            <div className="flex items-center gap-2 text-teal-400 font-semibold text-sm">
+              <RefreshCw className="w-5 h-5 animate-spin" />
+              <span>Loading interview environment...</span>
+            </div>
+          </div>
+        }
+      >
+        <LiveInterviewRoom
+          sessionId={interviewSession.id}
+          session={interviewSession}
+          jobTitle={
+            isPracticeMode
+              ? (interviewSession.job_title || 'Practice Interview')
+              : (currentApp?.job?.job_title || interviewSession.job_title || 'Technical Interview')
+          }
+          candidateName={authUser?.full_name || 'Candidate'}
+          durationMins={
+            isPracticeMode
+              ? (interviewSession.duration_mins || interviewSession.duration_planned_mins || 5)
+              : (currentApp?.job?.interview_duration_mins || interviewSession.duration_planned_mins || 20)
+          }
+          token={getCandidateToken()}
+          initialAudioDeviceId={preflightDevices.selectedAudioInput}
+          initialVideoDeviceId={preflightDevices.selectedVideoInput}
+          initialAudioOutputId={preflightDevices.selectedAudioOutput}
+          onExit={handleInterviewExit}
+          onEndInterview={handleInterviewExit}
+          isPractice={isPracticeMode}
+        />
+      </React.Suspense>
     );
   }
 
@@ -273,16 +347,29 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
     <div className="min-h-screen bg-black text-white flex flex-col">
       {/* Header with Role Navigation */}
       <Header
+        authUser={authUser}
         user={authUser}
+        currentView="candidate"
         roleNav="candidate"
+        activeNav={activePortalTab === 'browse' ? 'jobs' : 'applications'}
         activeRoleNav={activePortalTab === 'browse' ? 'jobs' : 'applications'}
         onNavChange={(key) => {
-          if (key === 'jobs') setActivePortalTab('browse');
+          if (key === 'jobs' || key === 'browse') setActivePortalTab('browse');
           else if (key === 'applications') setActivePortalTab('applications');
+          else if (key === 'profile') {
+            const el = document.getElementById('profile-readiness-card');
+            if (el) el.scrollIntoView({ behavior: 'smooth' });
+          }
         }}
-        onAction={() => setActivePortalTab('browse')}
-        actionLabel="Browse Jobs"
+        primaryAction={{
+          label: activePortalTab === 'browse' ? 'My Applications' : 'Explore Jobs',
+          icon: activePortalTab === 'browse' ? Layers : Sparkles,
+          onClick: () => setActivePortalTab((prev) => (prev === 'browse' ? 'applications' : 'browse')),
+        }}
+        onAction={() => setActivePortalTab((prev) => (prev === 'browse' ? 'applications' : 'browse'))}
+        actionLabel={activePortalTab === 'browse' ? 'My Applications' : 'Explore Jobs'}
         onSignOut={onSignOut}
+        onBackToLanding={onBackToLanding}
       />
 
       {/* Main Content Area */}
@@ -320,6 +407,50 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
             </div>
           }
         />
+
+        {interviewError && (
+          <div
+            data-testid="interview-launch-error"
+            role="alert"
+            className="flex items-start gap-3 rounded-xl border border-rose-500/30 bg-rose-950/30 px-4 py-3 text-sm text-rose-100"
+          >
+            <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-medium text-rose-200">Could not launch the interview</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-rose-100/80">{interviewError}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setInterviewError(null)}
+              aria-label="Dismiss interview launch error"
+              className="p-1 rounded-md text-rose-300/70 hover:text-rose-200 hover:bg-rose-500/10 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {interviewNotice && (
+          <div
+            data-testid="interview-exit-notice"
+            role="status"
+            className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-950/30 px-4 py-3 text-sm text-amber-100"
+          >
+            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-medium text-amber-200">Interview completion not confirmed</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-amber-100/80">{interviewNotice}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setInterviewNotice(null)}
+              aria-label="Dismiss interview notice"
+              className="p-1 rounded-md text-amber-300/70 hover:text-amber-200 hover:bg-amber-500/10 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
 
         {/* Short "How the interview works" strip */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 rounded-xl bg-[#0A0A0B] border border-white/[0.08]">
@@ -476,7 +607,7 @@ export default function CandidateDashboard({ authUser, onBackToLanding, onSignOu
                         >
                           <Play className="w-4 h-4 fill-black" />
                           <span>
-                            {currentApp?.interview_session_status === 'paused'
+                            {(currentApp?.interview_session_status === 'paused' || currentApp?.interview_session_status === 'in_progress')
                               ? 'Resume Interview'
                               : currentApp?.interview_ready
                               ? 'Start Interview'
