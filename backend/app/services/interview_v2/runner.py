@@ -655,6 +655,12 @@ class SessionRunner:
         # repeating the same sentence on NEW speech must never be dropped.
         self.new_turn_started: bool = False
 
+        # Question-token streaming: when True (committed decisions only), the
+        # runner forwards partial question text from the LLM stream to the UI
+        # so decision latency feels like live typing instead of dead air.
+        self.stream_question_to_ui: bool = True
+        self._last_q_delta_sent: str = ""
+
         # Live client presence: gates candidate-presence timers (silence ladder,
         # commit grace). Defaults to True so WS-less runs (simulator, harnesses)
         # keep flowing; the WS router explicitly marks disconnects False.
@@ -1604,6 +1610,7 @@ class SessionRunner:
         return system_prompt, user_prompt
 
     async def _call_decision_llm(self, effect: RequestDecision) -> None:
+        self._last_q_delta_sent = ""
         """Call LLM via router to evaluate candidate answer and return decision JSON."""
         start_time = time.perf_counter()
         model_name = os.getenv("GEMINI_MODEL_LIVE", "gemini-3.5-flash-lite")
@@ -1910,10 +1917,23 @@ class SessionRunner:
                             else:
                                 on_stream_ack(payload)
 
+                        def _question_partial_sink(partial_text: str) -> None:
+                            # Called synchronously from the LLM token stream:
+                            # fire-and-forget WS send, throttled to a frame
+                            # every few characters of growth so the candidate
+                            # sees the next question typing in live.
+                            if not self.stream_question_to_ui or not self.websocket:
+                                return
+                            if partial_text and len(partial_text) - len(self._last_q_delta_sent) < 4:
+                                return
+                            self._last_q_delta_sent = partial_text
+                            asyncio.create_task(self._send_question_delta(partial_text))
+
                         selector_out, sel_metrics = await select_next_interview_action(
                             selector_input,
                             llm_fn=self.llm_fn,
                             on_stream_ack=_ack_sink,
+                            on_question_partial=_question_partial_sink,
                         )
                         metrics.update(sel_metrics)
                         # Carry the estimated rubric level across turns so the
@@ -2286,11 +2306,19 @@ class SessionRunner:
 
         async def _run_spec():
             try:
-                # Speculative lookahead runs the SAME decision pipeline as the committed
-                # call (plan-bounded selector / QA prompts). AckReady/DecisionReady
-                # events it enqueues carry the speculation token and are dropped by
-                # the conductor until the matching commit makes them current.
-                await self._call_decision_llm(req)
+                # Speculative lookahead runs the SAME decision pipeline as the
+                # committed call (plan-bounded selector / QA prompts).
+                # AckReady/DecisionReady events it enqueues carry the
+                # speculation token and are dropped by the conductor until the
+                # matching commit makes them current. Question-token streaming
+                # is DISABLED here: speculative text may be discarded, and
+                # showing it while the candidate is still speaking would be
+                # jarring.
+                self.stream_question_to_ui = False
+                try:
+                    await self._call_decision_llm(req)
+                finally:
+                    self.stream_question_to_ui = True
                 self.spec_inference_latency_ms = (time.perf_counter() - self.spec_start_wall_time) * 1000.0
                 self.spec_decision = self.last_raw_decision
             except Exception as e:
@@ -2563,6 +2591,15 @@ class SessionRunner:
 
     async def on_ready_button(self) -> None:
         await self.queue.put(ReadyButton(now_ms=self.now_ms()))
+
+    async def _send_question_delta(self, partial_text: str) -> None:
+        """Stream partial next-question text to the UI (live typing feel)."""
+        if not self.websocket:
+            return
+        try:
+            await self.websocket.send_json({"type": "QuestionDelta", "text": partial_text})
+        except Exception:
+            pass
 
     async def on_commit_button(self) -> None:
         """Manual 'Done Answering' accelerator.

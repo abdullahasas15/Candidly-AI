@@ -188,6 +188,28 @@ def extract_ack_from_json_stream(accumulated: str) -> Optional[str]:
     return None
 
 
+def extract_partial_question_from_json_stream(accumulated: str) -> Optional[str]:
+    """Incrementally extract the PARTIAL question text from a streaming JSON
+    decision, while the question-ish string value is still being generated.
+
+    Used to stream the next question's wording to the candidate's screen token
+    by token (ChatGPT-style) so the LLM decision latency feels like live typing
+    instead of dead air. Returns the partial value (may grow every call), or
+    None when the stream is not currently inside a question-ish string.
+    """
+    m = re.search(
+        r'"(?:question|followup|question_text|clarify_text)"\s*:\s*"((?:[^"\\]|\\.)*)$',
+        accumulated,
+    )
+    if not m:
+        return None
+    raw = m.group(1)
+    try:
+        return json.loads(f'"{raw}"')
+    except Exception:
+        return raw
+
+
 def extract_action_and_ack_from_json_stream(accumulated: str) -> Optional[Dict[str, Any]]:
     """Incrementally extract action, no_experience, and ack from streaming JSON.
     Returns a dict when all three fields are resolved:
@@ -627,6 +649,7 @@ async def stream_decision_with_ack_first(
     model_id: Optional[str] = None,
     user_stable_prefix: Optional[str] = None,
     user_volatile_suffix: Optional[str] = None,
+    on_question_partial: Optional[Callable[[str], None]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """Stream decision JSON using Bedrock (primary) with failover to Gemini (secondary).
 
@@ -732,6 +755,13 @@ async def stream_decision_with_ack_first(
                                             call_metrics["ack_emitted_ms"] = round((time.time() - t0) * 1000.0, 1)
                                             if on_ack_ready:
                                                 on_ack_ready(("follow_up", str(parsed_ack).strip()))
+                                if on_question_partial is not None:
+                                    try:
+                                        partial_q = extract_partial_question_from_json_stream(full_so_far)
+                                        if partial_q:
+                                            on_question_partial(partial_q)
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
 

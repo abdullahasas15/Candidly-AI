@@ -986,6 +986,9 @@ export default function LiveInterviewRoom({
                   ]);
                   // Hold the new question back until its audio starts
                   setCaptionRevealed(false);
+                  // The previous answer must not linger under the new question
+                  setLastCandidateAnswer('');
+                  setCandidateLiveTranscript('');
                 }
                 return newText;
               });
@@ -1052,6 +1055,22 @@ export default function LiveInterviewRoom({
             // candidate can read it while answering.
             setCaptionRevealed(true);
             setBotLevel(0);
+          } else if (msg.type === 'QuestionDelta') {
+            // Live token streaming from the decision LLM: the next question
+            // types itself onto the screen while it is being generated, so
+            // decision latency feels alive instead of dead air.
+            if (msg.text) {
+              setCaptionRevealed(true);
+              setCurrentBotCaption((prev) => {
+                const t = msg.text.trim();
+                // Deltas are cumulative partials: replace, but never let a
+                // stale frame shrink a longer finalized caption.
+                if (prev && prev.length > t.length) {
+                  return prev;
+                }
+                return t;
+              });
+            }
           } else if (msg.type === 'InterimCaption' || msg.type === 'Update') {
             // Only show interim speech while the candidate is actually being
             // listened to. Late STT frames for the PREVIOUS answer used to
@@ -1445,7 +1464,7 @@ export default function LiveInterviewRoom({
     closing: { label: 'Concluding...', dotColor: 'bg-amber-400', textColor: 'text-amber-300' },
     completed: { label: 'Interview Finished', dotColor: 'bg-zinc-400', textColor: 'text-zinc-300' },
     failed: { label: 'Connection Failed', dotColor: 'bg-rose-400', textColor: 'text-rose-300' },
-  }[status] || { label: 'Connecting...', dotColor: 'bg-zinc-500', textColor: 'text-zinc-400' };
+  }[status] || { label: 'Listening', dotColor: 'bg-emerald-400', textColor: 'text-emerald-300' };
 
   if ((!canonicalSessionId || connectionState === 'error') && !mockState?.skipConnect) {
     return (
