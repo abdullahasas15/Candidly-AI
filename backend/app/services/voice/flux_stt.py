@@ -238,7 +238,7 @@ class FluxSTTClient:
     def __init__(
         self,
         key_pool: Optional[DeepgramKeyPool] = None,
-        model: str = "flux-general-en",
+        model: Optional[str] = None,
         sample_rate: int = 16000,
         encoding: str = "linear16",
         eot_threshold: Optional[float] = None,
@@ -248,7 +248,10 @@ class FluxSTTClient:
         on_event: Optional[Callable[[FluxEvent], Any]] = None,
     ) -> None:
         self.key_pool = key_pool or get_shared_key_pool()
-        self.model = model
+        # Deepgram's Flux line is their latest streaming STT; flux-general-en
+        # is the highest-accuracy general English model on it. Override with
+        # DEEPGRAM_STT_MODEL if Deepgram ships something better for a locale.
+        self.model = model or os.getenv("DEEPGRAM_STT_MODEL", "flux-general-en")
         self.sample_rate = sample_rate
         self.encoding = encoding
         self.eot_threshold = DEFAULT_EOT_THRESHOLD if eot_threshold is None else float(eot_threshold)

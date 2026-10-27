@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  X, CheckCircle2, AlertTriangle, Clock, ShieldCheck, Download,
+  X, CheckCircle2, AlertTriangle, Clock, ShieldCheck, Download, ClipboardList,
   ExternalLink, Mail, Phone, Calendar, DollarSign, Award, Briefcase,
   Layers, Check, ChevronRight, ChevronDown, UserCheck, RefreshCw, FileText,
   Sparkles, Code, FolderGit2, GraduationCap, BarChart3, Edit3, Save,
@@ -952,6 +952,21 @@ export default function ApplicantDetailModal({
               <div className="p-4 rounded-xl bg-[#111113] border border-white/[0.08] space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5 font-semibold text-white">
+                    {(currentApp.screening_answers || []).filter((a) => a.answer && a.answer.trim()).length > 0 && (
+                      <div className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.08] space-y-2">
+                        <div className="flex items-center gap-2 text-xs font-bold text-teal-300">
+                          <ClipboardList className="w-4 h-4 text-teal-400" />
+                          <span>Role Questions (answered at apply)</span>
+                        </div>
+                        {(currentApp.screening_answers || []).filter((a) => a.answer && a.answer.trim()).map((a, i) => (
+                          <div key={i} className="text-xs space-y-0.5">
+                            <div className="font-semibold text-zinc-200">{a.question_text}</div>
+                            <div className="text-zinc-400 whitespace-pre-wrap">{a.answer}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                     <AlertTriangle className="w-4 h-4 text-amber-400" />
                     <span>Consistency & Verification Audit</span>
                   </div>

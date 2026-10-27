@@ -3353,6 +3353,18 @@ async def finalize_application_submission(
         if payload.fit_pitch is not None: app.fit_pitch = payload.fit_pitch
         if payload.expected_salary is not None: app.expected_salary = payload.expected_salary
         if payload.expected_salary_currency is not None: app.expected_salary_currency = payload.expected_salary_currency
+        # Recruiter-defined screening questions answered by the candidate at
+        # apply time ("Why are you a fit for this role?"). Stored on the
+        # application for the recruiter and fed to interview personalization.
+        if payload.screening_answers:
+            valid_ids = {q.id for q in (app.job.custom_questions or [])} if app.job else set()
+            cleaned = [
+                {"question_id": a.get("question_id"), "question_text": a.get("question_text", ""),
+                 "answer": str(a.get("answer") or "").strip()[:2000]}
+                for a in payload.screening_answers
+                if isinstance(a, dict) and (not valid_ids or a.get("question_id") in valid_ids)
+            ]
+            app.screening_answers = cleaned
 
     app.status = "submitted"
     app.applied_at = datetime.utcnow()

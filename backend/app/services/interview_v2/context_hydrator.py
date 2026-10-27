@@ -80,6 +80,11 @@ class HydratedInterviewContext:
             "name": self.candidate_first_name,
             "years_of_experience": self.self_reported_experience_years,
             "fit_pitch": self.fit_pitch,
+            "apply_time_screening_answers": [
+                {"question": a.get("question_text", ""), "answer": a.get("answer", "")}
+                for a in (self.screening_answers or [])
+                if a.get("answer")
+            ],
             "work_experience": self.resume_work_experience[:5],
             "projects": self.resume_projects[:4],
             "skills": self.resume_skills,

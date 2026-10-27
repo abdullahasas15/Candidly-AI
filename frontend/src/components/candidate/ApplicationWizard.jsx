@@ -69,6 +69,8 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
   });
 
   // Step 4: Fit Pitch & Compensation
+  // Recruiter-defined screening questions answered at apply time
+  const [screeningAnswers, setScreeningAnswers] = useState({});
   const [fitData, setFitData] = useState({
     self_reported_experience_years: 3.0,
     fit_pitch: '',
@@ -596,6 +598,14 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
   // STEP 6: Final Submission
   // -------------------------------------------------------------
   const handleFinalSubmit = async () => {
+    const missingRequired = (job.custom_questions || []).filter(
+      (q) => q.is_required !== false && !(screeningAnswers[q.id] || '').trim()
+    );
+    if (missingRequired.length > 0) {
+      setCurrentStep(4);
+      setErrorMessage('Please answer all required role questions before submitting.');
+      return;
+    }
     setSubmitting(true);
     setErrorMessage(null);
     try {
@@ -608,7 +618,12 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
         self_reported_experience_years: parseFloat(fitData.self_reported_experience_years) || 0,
         fit_pitch: fitData.fit_pitch || null,
         expected_salary: parseFloat(fitData.expected_salary) || null,
-        expected_salary_currency: fitData.expected_salary_currency || 'USD'
+        expected_salary_currency: fitData.expected_salary_currency || 'USD',
+        screening_answers: (job.custom_questions || []).map((q) => ({
+          question_id: q.id,
+          question_text: q.question_text,
+          answer: screeningAnswers[q.id] || ''
+        }))
       };
 
       const res = await fetch(`/api/applications/${applicationId}/submit`, {
@@ -1615,6 +1630,40 @@ export default function ApplicationWizard({ job, authUser, isOpen, onClose, onAp
               {/* ========================================================= */}
               {currentStep === 4 && (
                 <div className="space-y-6">
+                  {/* Recruiter-defined role questions — answered once here, at
+                      apply time; they inform the interview and appear on the
+                      application for the recruiter. */}
+                  {(job.custom_questions || []).length > 0 && (
+                    <div className="space-y-4 p-4 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+                      <div>
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-teal-400">
+                          Role Questions
+                        </h4>
+                        <p className="text-xs text-zinc-400 mt-1">
+                          Answered once here — the interviewer uses these to tailor your interview.
+                        </p>
+                      </div>
+                      {(job.custom_questions || []).map((q) => (
+                        <div key={q.id}>
+                          <label className="block text-sm font-semibold text-zinc-200 mb-1">
+                            {q.question_text}
+                            {q.is_required !== false && <span className="text-rose-500"> *</span>}
+                          </label>
+                          <textarea
+                            rows={3}
+                            data-testid={`screening-question-${q.id}`}
+                            value={screeningAnswers[q.id] || ''}
+                            onChange={(e) =>
+                              setScreeningAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))
+                            }
+                            placeholder="Type your answer..."
+                            className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-teal-500 focus:outline-none"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="space-y-1">
                     <h3 className="text-sm font-bold text-white">
                       Step 4: Role Fit Pitch & Compensation Expectations

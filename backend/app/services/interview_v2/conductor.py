@@ -782,6 +782,10 @@ class ConductorState:
     # Weight-proportional follow-up caps per skill (from each anchor's
     # follow_up_depth_allowed); replaces the old hardcoded cap of 2.
     max_followups_per_skill: Dict[str, int] = field(default_factory=dict)
+    # True when the candidate explicitly clicked "Done Answering": that commit
+    # is FINAL - later TurnStarts open the next answer instead of un-committing
+    # and appending to the finished one.
+    manual_commit: bool = False
     # Last L1-L5 level the selector estimated per skill — lets the escalation
     # ladder CONTINUE across turns instead of re-estimating blind.
     estimated_level_per_skill: Dict[str, str] = field(default_factory=dict)
@@ -915,6 +919,7 @@ class ConductorState:
         data.setdefault("clarify_used_per_skill", {})
         data.setdefault("covered_expectations_per_skill", {})
         data.setdefault("max_followups_per_skill", {})
+        data.setdefault("manual_commit", False)
         data.setdefault("estimated_level_per_skill", {})
         data.setdefault("asked_questions_history", [])
         data.setdefault("job_record", {})
@@ -2454,6 +2459,7 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
             new_state.question_active_at_ms = event.now_ms
             new_state.silence_nudge_emitted = False
             new_state.silence_repeat_emitted = False
+            new_state.manual_commit = False
             new_state.answer_buffer = ""
             new_state.seen_turn_ids.clear()
             new_state.is_committed = False
@@ -2481,10 +2487,13 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         if "agenda_silence" in new_state.active_timers:
             effects.append(CancelTimer(name="agenda_silence"))
             new_state.active_timers.pop("agenda_silence", None)
+        if "bridge" in new_state.active_timers:
+            effects.append(CancelTimer(name="bridge"))
+            new_state.active_timers.pop("bridge", None)
 
         # Late TurnStart after commit but before BotAudioStarted:
         # "If TurnStart arrives after commit but before BotAudioStarted: CancelSpeech, un-commit, merge back into the buffer. After BotAudioStarted the commit is final."
-        if new_state.is_committed and not new_state.bot_audio_started:
+        if new_state.is_committed and not new_state.bot_audio_started and not new_state.manual_commit:
             effects.append(CancelSpeech())
             if "bridge" in new_state.active_timers:
                 effects.append(CancelTimer(name="bridge"))
@@ -2644,6 +2653,7 @@ def step(state: ConductorState, event: ConductorEvent) -> Tuple[ConductorState, 
         if not new_state.is_committed:
             if not new_state.answer_buffer.strip():
                 new_state.answer_buffer = "[Skipped by candidate]"
+            new_state.manual_commit = True
             new_state, commit_effects = _commit_current_turn(new_state, event.now_ms)
             effects.extend(commit_effects)
         return new_state, effects

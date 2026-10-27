@@ -216,6 +216,7 @@ async def select_next_interview_action(
     input_data: SelectorInput,
     llm_fn: Optional[Callable[..., Any]] = None,
     on_stream_ack: Optional[Callable[[Dict[str, Any]], None]] = None,
+    on_question_partial: Optional[Callable[[str], None]] = None,
 ) -> Tuple[SelectorOutput, Dict[str, Any]]:
     """Execute live bounded-agentic selection with repair loop and safe fallback."""
     metrics: Dict[str, Any] = {
@@ -290,6 +291,8 @@ async def select_next_interview_action(
                 "on_ack_ready": on_stream_ack,
                 "model_id": metrics["model_name"],
             }
+            if on_question_partial is not None:
+                call_kwargs["on_question_partial"] = on_question_partial
             # Prefix-caching split: pass stable/volatile parts when available so
             # the router can attach provider cache points.
             if user_stable and user_volatile:

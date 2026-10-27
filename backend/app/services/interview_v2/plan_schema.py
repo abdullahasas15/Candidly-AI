@@ -329,6 +329,29 @@ def build_plan_skeleton(context: HydratedInterviewContext) -> ScriptPlan:
 
     coverage_reqs = []
 
+    # Distribute resume projects across skills so the interview draws on the
+    # candidate's WHOLE background: prefer the project whose tech stack overlaps
+    # the skill, otherwise round-robin. Without this, every skill's resume
+    # probe named the FIRST project ("...come into play in ProjectOne?"),
+    # which felt like a single-project interview.
+    def _project_for_skill(skill: Dict[str, Any], order_idx: int) -> Optional[str]:
+        if not resume_projects:
+            return None
+        skill_blob = " ".join([
+            str(skill.get("name") or ""),
+            str(skill.get("rubric_l3") or ""),
+            str(skill.get("rubric_l4") or ""),
+        ]).lower()
+        best, best_score = None, 0
+        for p in (context.resume_projects or []):
+            techs = [str(t).lower() for t in (p.get("technologies") or [])]
+            score = sum(1 for t in techs if t and t in skill_blob)
+            if score > best_score:
+                best, best_score = p.get("name"), score
+        if best:
+            return best
+        return resume_projects[order_idx % len(resume_projects)]
+
     # Map blueprint sections by skill name / skill id if present
     bp_section_map = {}
     if context.blueprint_sections:
@@ -340,7 +363,7 @@ def build_plan_skeleton(context: HydratedInterviewContext) -> ScriptPlan:
                 if sec.get("skill_id"):
                     bp_section_map[sec["skill_id"]] = sec
 
-    for skill in sorted_skills:
+    for skill_order_idx, skill in enumerate(sorted_skills):
         s_id = skill.get("id")
         s_name = skill.get("name") or "Core Technical"
         weight = float(skill.get("weight_percentage") or 0.0)
@@ -400,16 +423,27 @@ def build_plan_skeleton(context: HydratedInterviewContext) -> ScriptPlan:
             prepared_probes.insert(0, custom_probe)
 
         # Resume-grounded follow-up option: lets the live selector probe what
-        # the candidate actually built with this skill (their project, their
-        # stack) instead of only abstract prepared probes.
+        # the candidate actually built with this skill. Projects rotate across
+        # skills (best tech-stack overlap first, else round-robin) and the
+        # phrasing varies so consecutive skills never sound templated.
+        assigned_project: Optional[str] = None
         if has_resume_context and not any(
             w in s_name.lower() for w in ("project", "experience deep")
         ):
-            if resume_projects:
-                resume_probe = f"Where did {s_name} come into play in {resume_projects[0]}, and how did you approach it there?"
+            assigned_project = _project_for_skill(skill, skill_order_idx)
+            if assigned_project:
+                templates = [
+                    f"You worked on {assigned_project} — where did {s_name} matter most there, and what did you do?",
+                    f"Was there a part of {assigned_project} where {s_name} was the hard part? How did you handle it?",
+                    f"Thinking of {assigned_project}: how did {s_name} shape your approach?",
+                ]
+                resume_probe = templates[skill_order_idx % len(templates)]
+            elif resume_companies:
+                company = resume_companies[skill_order_idx % len(resume_companies)]
+                resume_probe = f"During your time at {company}, where did you exercise {s_name}, and how?"
             else:
-                resume_probe = f"During your time at {resume_companies[0]}, where did you exercise {s_name}, and how?"
-            if resume_probe not in prepared_probes:
+                resume_probe = None
+            if resume_probe and resume_probe not in prepared_probes:
                 prepared_probes.insert(0, resume_probe)
 
         if not expected_points:
@@ -445,11 +479,10 @@ def build_plan_skeleton(context: HydratedInterviewContext) -> ScriptPlan:
         for claim in (context.claims_to_verify or [])[:3]:
             if claim and claim not in candidate_hooks:
                 candidate_hooks.append(str(claim))
-        if has_resume_context and not any(w in s_name.lower() for w in ("project", "experience deep")):
-            if resume_projects:
-                proj = next((p for p in (context.resume_projects or []) if p.get("name") == resume_projects[0]), None)
-                stack = f" ({', '.join((proj.get('technologies') or [])[:3])})" if proj and proj.get("technologies") else ""
-                candidate_hooks.append(f"{resume_projects[0]}{stack}")
+        if assigned_project:
+            proj = next((p for p in (context.resume_projects or []) if p.get("name") == assigned_project), None)
+            stack = f" ({', '.join((proj.get('technologies') or [])[:3])})" if proj and proj.get("technologies") else ""
+            candidate_hooks.append(f"{assigned_project}{stack}")
         tech_slot = PlanSlot(
             id=anchor_slot_id,
             index=slot_idx,
@@ -503,10 +536,18 @@ def build_plan_skeleton(context: HydratedInterviewContext) -> ScriptPlan:
             slots.append(alt_slot)
             slot_idx += 1
 
+    # Custom screening questions — the candidate already answered these in the
+    # application form; re-asking them in the interview would be redundant.
+    answered_custom = {
+        str(a.get("question_text") or "").strip().lower()
+        for a in (context.screening_answers or [])
+        if a.get("answer") and a.get("question_text")
+    }
     # Custom screening questions
     for cq in context.custom_questions:
         cq_text = cq.get("question_text")
-        if not cq_text:
+        if not cq_text or cq_text.strip().lower() in answered_custom:
+            continue
             continue
         cq_slot = PlanSlot(
             id=str(uuid.uuid4()),
